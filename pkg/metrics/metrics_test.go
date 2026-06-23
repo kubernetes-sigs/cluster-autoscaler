@@ -175,3 +175,20 @@ func TestRegisterNodesDeleted(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateNodesCountPerNodeGroup(t *testing.T) {
+	reg := metrics.NewKubeRegistry()
+	m := newCaMetricsWithRegistry(reg)
+	m.RegisterAll(true)
+
+	nodeGroupID := "node-group-id"
+
+	m.UpdateNodesCountPerNodeGroup(1, 2, 3, 4, 5, 6, nodeGroupID)
+
+	assert.Equal(t, 1, int(testutil.ToFloat64(m.nodesCountPerNodeGroup.GaugeVec.WithLabelValues(readyLabel, nodeGroupID))))
+	assert.Equal(t, 2, int(testutil.ToFloat64(m.nodesCountPerNodeGroup.GaugeVec.WithLabelValues(unreadyLabel, nodeGroupID))))
+	assert.Equal(t, 3, int(testutil.ToFloat64(m.nodesCountPerNodeGroup.GaugeVec.WithLabelValues(startingLabel, nodeGroupID))))
+	assert.Equal(t, 4, int(testutil.ToFloat64(m.nodesCountPerNodeGroup.GaugeVec.WithLabelValues(suspendedLabel, nodeGroupID))))
+	assert.Equal(t, 5, int(testutil.ToFloat64(m.nodesCountPerNodeGroup.GaugeVec.WithLabelValues(longUnregisteredLabel, nodeGroupID))))
+	assert.Equal(t, 6, int(testutil.ToFloat64(m.nodesCountPerNodeGroup.GaugeVec.WithLabelValues(unregisteredLabel, nodeGroupID))))
+}
