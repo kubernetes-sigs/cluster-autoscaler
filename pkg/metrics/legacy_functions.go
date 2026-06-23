@@ -262,3 +262,7 @@ func ObserveMaxNodeSkipEvalDurationSeconds(duration time.Duration) {
 func UpdateSkippedPodsCount(podsCount int, label string) {
 	DefaultMetrics.UpdateSkippedPodsCount(podsCount, label)
 }
+
+func UpdateNodesCountPerNodeGroup(ready, unready, starting, suspended, longUnregistered, unregistered int, nodeGroupID string) {
+	DefaultMetrics.UpdateNodesCountPerNodeGroup(ready, unready, starting, suspended, longUnregistered, unregistered, nodeGroupID)
+}
