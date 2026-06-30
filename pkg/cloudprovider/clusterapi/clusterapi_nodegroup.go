@@ -99,6 +99,11 @@ func (ng *nodegroup) AtomicIncreaseSize(delta int) error {
 	return cloudprovider.ErrNotImplemented
 }
 
+type markedForDeletion struct {
+	nodegroup *nodegroup
+	machine   *unstructured.Unstructured
+}
+
 // DeleteNodes deletes nodes from this node group. Error is returned
 // either on failure or if the given node doesn't belong to this node
 // group. This function should wait until node group size is updated.
@@ -147,6 +152,8 @@ func (ng *nodegroup) DeleteNodes(nodes []*corev1.Node) error {
 	// and decrease the replica count by 1. For MachinePool-backed node groups,
 	// if no per-node Machine can be resolved, fall back to replica decrement
 	// after verifying the node belongs to the MachinePool providerID list.
+	toDelete := make([]markedForDeletion, 0, len(nodes))
+
 	for _, node := range nodes {
 		nodeGroup, err := ng.machineController.nodeGroupForNode(node, ng.nodeDeletionBatcherInterval)
 		if err != nil {
@@ -210,8 +217,26 @@ func (ng *nodegroup) DeleteNodes(nodes []*corev1.Node) error {
 			return err
 		}
 
-		if err := nodeGroup.scalableResource.SetSize(replicas - 1); err != nil {
-			_ = nodeGroup.scalableResource.UnmarkMachineForDeletion(machine)
+		toDelete = append(toDelete, markedForDeletion{
+			nodegroup: nodeGroup,
+			machine:   machine,
+		})
+	}
+
+	if ng.nodeDeletionBatcherInterval != 0 {
+		if err := ng.scalableResource.SetSize(replicas - len(toDelete)); err != nil {
+			for _, deletion := range toDelete {
+				_ = deletion.nodegroup.scalableResource.UnmarkMachineForDeletion(deletion.machine)
+			}
+			return err
+		}
+
+		return nil
+	}
+
+	for _, deletion := range toDelete {
+		if err := ng.scalableResource.SetSize(replicas - 1); err != nil {
+			_ = deletion.nodegroup.scalableResource.UnmarkMachineForDeletion(deletion.machine)
 			return err
 		}
 
