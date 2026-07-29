@@ -47,6 +47,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupconfig"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/utilization"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/expiring"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
@@ -1140,6 +1141,15 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 		}
 		return true, node, nil
 	})
+	fakeClient.Fake.AddReactor("list", "nodes", func(action core.Action) (bool, runtime.Object, error) {
+		nodesLock.Lock()
+		defer nodesLock.Unlock()
+		nodeList := &apiv1.NodeList{}
+		for _, node := range nodesByName {
+			nodeList.Items = append(nodeList.Items, *node)
+		}
+		return true, nodeList, nil
+	})
 	fakeClient.Fake.AddReactor("get", "pods",
 		func(action core.Action) (bool, runtime.Object, error) {
 			return true, nil, errors.NewNotFound(apiv1.Resource("pod"), "whatever")
@@ -1227,7 +1237,8 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 		t.Fatalf("Couldn't create daemonset lister")
 	}
 
-	registry := kube_util.NewListerRegistry(nil, nil, podLister, pdbLister, dsLister, nil, nil, nil, nil)
+	nodeLister := kube_util.NewDynamicTestNodeLister(fakeClient)
+	registry := kube_util.NewListerRegistry(nodeLister, nil, podLister, pdbLister, dsLister, nil, nil, nil, nil)
 	autoscalingCtx, err := NewScaleTestAutoscalingContext(opts, fakeClient, registry, provider, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Couldn't set up autoscaling context: %v", err)
@@ -1274,6 +1285,7 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 	actuator := Actuator{
 		autoscalingCtx: &autoscalingCtx, nodeDeletionTracker: ndt,
 		nodeDeletionScheduler: NewGroupDeletionScheduler(&autoscalingCtx, ndt, ndb, evictor),
+		pastLatencies:         expiring.NewList(),
 		budgetProcessor:       budgets.NewScaleDownBudgetProcessor(&autoscalingCtx),
 		configGetter:          nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.NodeGroupDefaults),
 	}
@@ -1552,6 +1564,7 @@ func TestStartDeletionInBatchBasic(t *testing.T) {
 			actuator := Actuator{
 				autoscalingCtx: &autoscalingCtx, nodeDeletionTracker: ndt,
 				nodeDeletionScheduler: NewGroupDeletionScheduler(&autoscalingCtx, ndt, ndb, evictor),
+				pastLatencies:         expiring.NewList(),
 				budgetProcessor:       budgets.NewScaleDownBudgetProcessor(&autoscalingCtx),
 			}
 
