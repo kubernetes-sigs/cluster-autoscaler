@@ -26,7 +26,8 @@ import (
 )
 
 const sleepDurationWhenPolling = 50 * time.Millisecond
-const waitForTaintingTimeoutDuration = 30 * time.Second
+
+var waitForTaintingTimeoutDuration = 30 * time.Second
 
 type nodeTaintStartTime struct {
 	nodeName  string
@@ -43,16 +44,15 @@ type UpdateLatencyTracker struct {
 	// Sends node tainting start timestamps to the tracker
 	StartTimeChan            chan nodeTaintStartTime
 	sleepDurationWhenPolling time.Duration
-	// Passing a bool will wait for all the started nodes to get tainted and calculate
-	// latency based on latencies observed. (If all the nodes did not get tained within
-	// waitForTaintingTimeoutDuration after passing a bool, latency calculation will be
-	// aborted and the ResultChan will be closed without returning a value) Closing the
-	// AwaitOrStopChan without passing any bool will abort the latency calculation.
-	AwaitOrStopChan chan bool
+	// ExpectedNodeCountChan receives the capacity limit seeded precisely to the count
+	// of successfully tainted nodes. This instructs the tracker to discard start stamps
+	// of any node that failed its API request to bypass the hang.
+	ExpectedNodeCountChan chan int
 	// Communicate back the measured latency
 	ResultChan chan time.Duration
 	// now is used only to make the testing easier
-	now func() time.Time
+	now   func() time.Time
+	sleep func(time.Duration)
 }
 
 // NewUpdateLatencyTracker returns a new NewUpdateLatencyTracker object
@@ -62,21 +62,27 @@ func NewUpdateLatencyTracker(nodeLister kubernetes.NodeLister) *UpdateLatencyTra
 		finishTimestamp:          map[string]time.Time{},
 		remainingNodeCount:       0,
 		nodeLister:               nodeLister,
-		StartTimeChan:            make(chan nodeTaintStartTime),
+		StartTimeChan:            make(chan nodeTaintStartTime, 10000),
 		sleepDurationWhenPolling: sleepDurationWhenPolling,
-		AwaitOrStopChan:          make(chan bool),
+		ExpectedNodeCountChan:    make(chan int, 1),
 		ResultChan:               make(chan time.Duration),
 		now:                      time.Now,
+		sleep:                    time.Sleep,
 	}
 }
 
 // Start starts listening for node tainting start timestamps and update the timestamps that
-// the taint appears for the first time for a particular node. Listen AwaitOrStopChan for stop/await signals
+// the taint appears for the first time for a particular node. Listen ExpectedNodeCountChan for stop/await signals
 func (u *UpdateLatencyTracker) Start(ctx context.Context) {
 	for {
 		select {
-		case _, ok := <-u.AwaitOrStopChan:
+		case expectedCount, ok := <-u.ExpectedNodeCountChan:
 			if ok {
+				u.drainStartTimeChan()
+				u.remainingNodeCount = expectedCount - len(u.finishTimestamp)
+				if u.remainingNodeCount < 0 {
+					u.remainingNodeCount = 0
+				}
 				u.await(ctx)
 			}
 			return
@@ -87,7 +93,22 @@ func (u *UpdateLatencyTracker) Start(ctx context.Context) {
 		default:
 		}
 		u.updateFinishTime(ctx)
-		time.Sleep(u.sleepDurationWhenPolling)
+		u.sleep(u.sleepDurationWhenPolling)
+	}
+}
+
+// drainStartTimeChan safely and non-blockingly pulls all pending items out
+// of StartTimeChan until it's completely empty. It uses a select-default idiom
+// to avoid deadlocking, which is a risk when using `len(chan) > 0` checks
+// due to concurrent race conditions.
+func (u *UpdateLatencyTracker) drainStartTimeChan() {
+	for {
+		select {
+		case ntst := <-u.StartTimeChan:
+			u.startTimestamp[ntst.nodeName] = ntst.startTime
+		default:
+			return // Channel is empty, safely exit without blocking.
+		}
 	}
 }
 
@@ -112,7 +133,10 @@ func (u *UpdateLatencyTracker) updateFinishTime(ctx context.Context) {
 func (u *UpdateLatencyTracker) calculateLatency() time.Duration {
 	var maxLatency time.Duration = 0
 	for node, startTime := range u.startTimestamp {
-		endTime, _ := u.finishTimestamp[node]
+		endTime, ok := u.finishTimestamp[node]
+		if !ok {
+			continue
+		}
 		currentLatency := endTime.Sub(startTime)
 		if currentLatency > maxLatency {
 			maxLatency = currentLatency
@@ -123,20 +147,20 @@ func (u *UpdateLatencyTracker) calculateLatency() time.Duration {
 
 func (u *UpdateLatencyTracker) await(ctx context.Context) {
 	logger := klog.FromContext(ctx)
-	waitingForTaintingStartTime := time.Now()
+	waitingForTaintingStartTime := u.now()
 	for {
 		switch {
-		case u.remainingNodeCount == 0:
+		case u.remainingNodeCount <= 0:
 			latency := u.calculateLatency()
 			u.ResultChan <- latency
 			return
-		case time.Now().After(waitingForTaintingStartTime.Add(waitForTaintingTimeoutDuration)):
+		case u.now().After(waitingForTaintingStartTime.Add(waitForTaintingTimeoutDuration)):
 			logger.Error(nil, "Timeout before tainting all nodes, latency measurement will be stale")
 
 			close(u.ResultChan)
 			return
 		default:
-			time.Sleep(u.sleepDurationWhenPolling)
+			u.sleep(u.sleepDurationWhenPolling)
 			u.updateFinishTime(ctx)
 		}
 	}
