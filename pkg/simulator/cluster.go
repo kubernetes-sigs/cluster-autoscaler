@@ -23,6 +23,7 @@ import (
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/pdb"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
@@ -218,6 +219,69 @@ func (r *RemovalSimulator) SimulateNodeRemoval(
 		DaemonSetPods:    podMoveInfo.DaemonSetPods,
 		OnCompletionPods: podMoveInfo.OnCompletionPods,
 	}, nil
+}
+
+// SimulateNodesGroupRemoval simulates removing a group of nodes atomically (all-or-nothing).
+// If any node in the group is unremovable, simulation is aborted early and any temporary
+// destinationMap and remainingPdbTracker mutations are rolled back.
+// Returns:
+//   - removable: the list of removable nodes if all nodes in the group can be removed.
+//   - unremovable: the unremovable node failure info if any node failed removal.
+//   - failedNodeIndex: the index in nodeNames of the node that failed removal (-1 if all succeeded).
+func (r *RemovalSimulator) SimulateNodesGroupRemoval(
+	ctx context.Context,
+	nodeNames []string,
+	destinationMap map[string]bool,
+	timestamp time.Time,
+	remainingPdbTracker pdb.RemainingPdbTracker,
+) ([]NodeToBeRemoved, *UnremovableNode, int) {
+	logger := klog.FromContext(ctx)
+
+	destinationMapCopy := make(map[string]bool, len(destinationMap))
+	for k, v := range destinationMap {
+		destinationMapCopy[k] = v
+	}
+
+	var pdbsSnapshot []*policyv1.PodDisruptionBudget
+	if remainingPdbTracker != nil {
+		pdbsSnapshot = remainingPdbTracker.GetPdbs()
+	}
+
+	rollback := func() {
+		for k := range destinationMap {
+			delete(destinationMap, k)
+		}
+		for k, v := range destinationMapCopy {
+			destinationMap[k] = v
+		}
+		if remainingPdbTracker != nil {
+			if err := remainingPdbTracker.SetPdbs(pdbsSnapshot); err != nil {
+				logger.Error(err, "Failed to restore PDB snapshot after rollback in group removal simulation")
+			}
+		}
+	}
+
+	var removableList []NodeToBeRemoved
+	for j, nodeName := range nodeNames {
+		removable, unremovable := r.SimulateNodeRemoval(ctx, nodeName, destinationMap, timestamp, remainingPdbTracker)
+		if unremovable != nil {
+			logger.V(2).Info("Node in group cannot be removed. Early aborting group removal simulation.", "nodeName", nodeName, "nodesCount", len(nodeNames))
+			rollback()
+			return nil, unremovable, j
+		}
+
+		if remainingPdbTracker != nil {
+			_, inParallel, _ := remainingPdbTracker.CanRemovePods(removable.PodsToReschedule)
+			if !inParallel {
+				removable.IsRisky = true
+			}
+			remainingPdbTracker.RemovePods(removable.PodsToReschedule)
+		}
+		delete(destinationMap, removable.Node.Name)
+		removableList = append(removableList, *removable)
+	}
+
+	return removableList, nil, -1
 }
 
 func (r *RemovalSimulator) withForkedSnapshot(ctx context.Context, f func() error) (err error) {

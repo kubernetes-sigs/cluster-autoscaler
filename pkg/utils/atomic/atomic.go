@@ -67,3 +67,21 @@ func CountRegisteredNodesForGroup(ctx context.Context, g cloudprovider.NodeGroup
 	}
 	return count, nil
 }
+
+// GroupAtomicNodes groups unneeded atomic node names by their NodeGroup ID.
+func GroupAtomicNodes(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, nodeNames []string) map[string][]string {
+	atomicGroups := make(map[string][]string)
+	for _, nodeName := range nodeNames {
+		nodeInfo, err := autoscalingCtx.ClusterSnapshot.GetNodeInfo(nodeName)
+		if err != nil || nodeInfo == nil || nodeInfo.Node() == nil {
+			continue
+		}
+		node := nodeInfo.Node()
+		nodeGroup, isAtomic := IsAtomicNodeGroup(ctx, autoscalingCtx, node)
+		if isAtomic && nodeGroup != nil {
+			ngID := nodeGroup.Id()
+			atomicGroups[ngID] = append(atomicGroups[ngID], nodeName)
+		}
+	}
+	return atomicGroups
+}

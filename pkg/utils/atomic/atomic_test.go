@@ -27,6 +27,8 @@ import (
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 
 	testprovider "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/test"
+	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
+	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot/testsnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/annotations"
 )
 
@@ -93,4 +95,80 @@ func TestCountRegisteredNodesForGroup(t *testing.T) {
 	assert.NoError(t, err)
 	// n2 has NodeUpcomingAnnotation=true, so registered count should be 2
 	assert.Equal(t, 2, count)
+}
+
+func TestGroupAtomicNodes(t *testing.T) {
+	ctx := context.Background()
+
+	nodeAtomic1 := &apiv1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-atomic-1"},
+		Spec:       apiv1.NodeSpec{ProviderID: "node-atomic-1"},
+	}
+	nodeAtomic2 := &apiv1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-atomic-2"},
+		Spec:       apiv1.NodeSpec{ProviderID: "node-atomic-2"},
+	}
+	nodeAtomic3 := &apiv1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-atomic-3"},
+		Spec:       apiv1.NodeSpec{ProviderID: "node-atomic-3"},
+	}
+	nodeStandard := &apiv1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-standard"},
+		Spec:       apiv1.NodeSpec{ProviderID: "node-standard"},
+	}
+
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	atomicOpts := &config.NodeGroupAutoscalingOptions{
+		ZeroOrMaxNodeScaling: true,
+	}
+	provider.AddNodeGroupWithCustomOptions("ng-atomic-1", 0, 10, 2, atomicOpts)
+	provider.AddNode("ng-atomic-1", nodeAtomic1)
+	provider.AddNode("ng-atomic-1", nodeAtomic2)
+
+	provider.AddNodeGroupWithCustomOptions("ng-atomic-2", 0, 10, 1, atomicOpts)
+	provider.AddNode("ng-atomic-2", nodeAtomic3)
+
+	provider.AddNodeGroup("ng-standard", 0, 10, 1)
+	provider.AddNode("ng-standard", nodeStandard)
+
+	snapshot := testsnapshot.NewTestSnapshotOrDie(t)
+	clustersnapshot.InitializeClusterSnapshotOrDie(t, snapshot, []*apiv1.Node{nodeAtomic1, nodeAtomic2, nodeAtomic3, nodeStandard}, nil)
+
+	autoscalingCtx := &ca_context.AutoscalingContext{
+		CloudProvider:   provider,
+		ClusterSnapshot: snapshot,
+	}
+
+	testCases := []struct {
+		name      []string
+		testName  string
+		nodeNames []string
+		expected  map[string][]string
+	}{
+		{
+			testName:  "groups atomic nodes by nodegroup and ignores standard and unknown nodes",
+			nodeNames: []string{"node-atomic-1", "node-standard", "node-atomic-2", "node-atomic-3", "non-existent-node"},
+			expected: map[string][]string{
+				"ng-atomic-1": {"node-atomic-1", "node-atomic-2"},
+				"ng-atomic-2": {"node-atomic-3"},
+			},
+		},
+		{
+			testName:  "empty node names returns empty map",
+			nodeNames: []string{},
+			expected:  map[string][]string{},
+		},
+		{
+			testName:  "only standard nodes returns empty map",
+			nodeNames: []string{"node-standard"},
+			expected:  map[string][]string{},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.testName, func(t *testing.T) {
+			result := GroupAtomicNodes(ctx, autoscalingCtx, tc.nodeNames)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
 }

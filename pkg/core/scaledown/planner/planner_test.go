@@ -1280,6 +1280,18 @@ func (r *fakeRemovalSimulator) SimulateNodeRemoval(ctx context.Context, name str
 	return &simulator.NodeToBeRemoved{Node: node}, nil
 }
 
+func (r *fakeRemovalSimulator) SimulateNodesGroupRemoval(ctx context.Context, names []string, destinations map[string]bool, timestamp time.Time, tracker pdb.RemainingPdbTracker) ([]simulator.NodeToBeRemoved, *simulator.UnremovableNode, int) {
+	var removable []simulator.NodeToBeRemoved
+	for i, name := range names {
+		rem, unrem := r.SimulateNodeRemoval(ctx, name, destinations, timestamp, tracker)
+		if unrem != nil {
+			return nil, unrem, i
+		}
+		removable = append(removable, *rem)
+	}
+	return removable, nil, -1
+}
+
 func TestAtomicScaleDownNodeNilGroup(t *testing.T) {
 	n1 := BuildTestNode("n1", 1000, 1000)
 	provider := testprovider.NewTestCloudProviderBuilder().Build()
@@ -1300,4 +1312,37 @@ func TestAtomicScaleDownNodeNilGroup(t *testing.T) {
 
 	result := p.isNodeAtomicScaleDown(context.Background(), node.Node)
 	assert.False(t, result)
+}
+
+func TestUpdateClusterStateContextCancelled(t *testing.T) {
+	n1 := BuildTestNode("n1", 1000, 10)
+	n2 := BuildTestNode("n2", 1000, 10)
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	provider.AddNodeGroup("ng1", 0, 0, 0)
+	provider.AddNode("ng1", n1)
+	provider.AddNode("ng1", n2)
+
+	opts := config.AutoscalingOptions{
+		NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+			ScaleDownUnneededTime: 10 * time.Minute,
+		},
+		ScaleDownSimulationTimeout: 1 * time.Minute,
+		MaxScaleDownParallelism:    10,
+	}
+	processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(opts)
+	autoscalingCtx, err := NewScaleTestAutoscalingContext(opts, &fake.Clientset{}, kube_util.NewListerRegistry(nil, nil, nil, nil, nil, nil, nil, nil, nil), provider, nil, nil, templateNodeInfoRegistry)
+	assert.NoError(t, err)
+	clustersnapshot.InitializeClusterSnapshotOrDie(t, autoscalingCtx.ClusterSnapshot, []*apiv1.Node{n1, n2}, nil)
+	deleteOptions := options.NodeDeleteOptions{}
+	factory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{CustomResourcesProcessor: processors.CustomResourcesProcessor, QuotaProvider: resourcequotas.NewCloudMinProvider(provider)})
+	p := New(&autoscalingCtx, processors, deleteOptions, nil, factory)
+	p.eligibilityChecker = &fakeEligibilityChecker{eligible: map[string]bool{"n1": true, "n2": true}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately to simulate shutdown
+
+	assert.NoError(t, p.UpdateClusterState(ctx, []*apiv1.Node{n1, n2}, []*apiv1.Node{n1, n2}, &fakeActuationStatus{}, time.Now()))
+	// Since context was cancelled before simulation started, nodes should not be marked unneeded
+	assert.False(t, p.unneededNodes.Contains("n1"))
+	assert.False(t, p.unneededNodes.Contains("n2"))
 }
