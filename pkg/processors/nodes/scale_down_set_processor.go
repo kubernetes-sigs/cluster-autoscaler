@@ -20,12 +20,10 @@ import (
 	"context"
 	"slices"
 
-	v1 "k8s.io/api/core/v1"
 	klog "k8s.io/klog/v2"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
-	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/atomic"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/klogx"
 )
@@ -87,10 +85,6 @@ func (p *AtomicResizeFilteringProcessor) FilterUnremovableNodes(ctx context.Cont
 	atomicQuota := klogx.NodesLoggingQuota()
 	standardQuota := klogx.NodesLoggingQuota()
 	nodesByGroup := map[cloudprovider.NodeGroup][]simulator.NodeToBeRemoved{}
-	allNodes, err := allNodes(autoscalingCtx.ClusterSnapshot)
-	if err != nil {
-		logger.Error(err, "Failed to read all nodes from the cluster snapshot for filtering unremovable nodes")
-	}
 
 	for _, node := range candidates {
 		nodeGroup, err := autoscalingCtx.CloudProvider.NodeGroupForNode(ctx, node.Node)
@@ -120,6 +114,9 @@ func (p *AtomicResizeFilteringProcessor) FilterUnremovableNodes(ctx context.Cont
 	}
 	klogx.V(2).Over(atomicQuota).Infof("Considering %d other nodes for atomic scale down", -atomicQuota.Left())
 	klogx.V(2).Over(standardQuota).Infof("Considering %d other nodes for standard scale down", -atomicQuota.Left())
+	// Node groups with fewer candidates than their target size, that need registered node count.
+	var groupsToCount []cloudprovider.NodeGroup
+	targetSizes := make(map[cloudprovider.NodeGroup]int)
 	for nodeGroup, consideredNodes := range nodesByGroup {
 		ngSize, err := nodeGroup.TargetSize(ctx)
 		if err != nil {
@@ -132,17 +129,30 @@ func (p *AtomicResizeFilteringProcessor) FilterUnremovableNodes(ctx context.Cont
 		if ngSize == len(consideredNodes) {
 			logger.V(2).Info("Scheduling atomic scale down for all nodes from node group", "nodesCount", len(consideredNodes), "nodeGroupId", nodeGroup.Id())
 			nodesToBeRemoved = append(nodesToBeRemoved, consideredNodes...)
-		} else {
-			registeredCount, err := atomic.CountRegisteredNodesForGroup(ctx, nodeGroup, allNodes)
-			if err != nil {
-				logger.Error(err, "Failed to get registered nodes for node group", "nodeGroupId", nodeGroup.Id())
-				unremovableNodes = p.atomicScaleDownFailed(ctx, consideredNodes, ngSize, unremovableNodes, nodeGroup)
-			} else if registeredCount == len(consideredNodes) {
-				logger.V(2).Info("Scheduling atomic scale down for all registered nodes from node group", "nodesCount", len(consideredNodes), "nodeGroupId", nodeGroup.Id())
-				nodesToBeRemoved = append(nodesToBeRemoved, consideredNodes...)
-			} else {
-				unremovableNodes = p.atomicScaleDownFailed(ctx, consideredNodes, registeredCount, unremovableNodes, nodeGroup)
-			}
+			continue
+		}
+		groupsToCount = append(groupsToCount, nodeGroup)
+		targetSizes[nodeGroup] = ngSize
+	}
+	if len(groupsToCount) == 0 {
+		return nodesToBeRemoved, unremovableNodes
+	}
+
+	registeredCounts, err := atomic.CountRegisteredNodesPerGroup(ctx, autoscalingCtx.ListerRegistry.AllNodeLister(), groupsToCount)
+	if err != nil {
+		logger.Error(err, "Failed to count registered nodes for atomic node groups")
+	}
+	for _, nodeGroup := range groupsToCount {
+		consideredNodes := nodesByGroup[nodeGroup]
+		registeredCount, found := registeredCounts[nodeGroup.Id()]
+		switch {
+		case !found:
+			unremovableNodes = p.atomicScaleDownFailed(ctx, consideredNodes, targetSizes[nodeGroup], unremovableNodes, nodeGroup)
+		case registeredCount == len(consideredNodes):
+			logger.V(2).Info("Scheduling atomic scale down for all registered nodes from node group", "nodesCount", len(consideredNodes), "nodeGroupId", nodeGroup.Id())
+			nodesToBeRemoved = append(nodesToBeRemoved, consideredNodes...)
+		default:
+			unremovableNodes = p.atomicScaleDownFailed(ctx, consideredNodes, registeredCount, unremovableNodes, nodeGroup)
 		}
 	}
 	return nodesToBeRemoved, unremovableNodes
@@ -156,19 +166,6 @@ func (p *AtomicResizeFilteringProcessor) atomicScaleDownFailed(ctx context.Conte
 		unremovableNodes = append(unremovableNodes, simulator.UnremovableNode{Node: node.Node, Reason: simulator.AtomicScaleDownFailed})
 	}
 	return unremovableNodes
-}
-
-func allNodes(s clustersnapshot.ClusterSnapshot) ([]*v1.Node, error) {
-	nodeInfos, err := s.ListNodeInfos()
-	if err != nil {
-		// This should never happen, List() returns err only because scheduler interface requires it.
-		return nil, err
-	}
-	nodes := make([]*v1.Node, len(nodeInfos))
-	for i, ni := range nodeInfos {
-		nodes[i] = ni.Node()
-	}
-	return nodes, nil
 }
 
 // CleanUp is called at CA termination
