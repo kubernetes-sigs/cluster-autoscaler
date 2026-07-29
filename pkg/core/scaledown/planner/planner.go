@@ -310,11 +310,13 @@ func (p *Planner) categorizeNodes(ctx context.Context, podDestinations map[strin
 
 	timer := time.NewTimer(p.autoscalingCtx.ScaleDownSimulationTimeout)
 	var skippedNodes []string
+	atomicGroups := p.groupAtomicNodes(ctx, currentlyUnneededNodeNames)
+	processedAtomicGroups := make(map[string]bool)
 
 	for i, nodeName := range currentlyUnneededNodeNames {
 		if timedOut(timer) {
-			skippedNodes = append(skippedNodes, currentlyUnneededNodeNames[i:]...)
-			logger.Info("Some nodes skipped in scale down simulation due to timeout.", "skippedNodesCount", len(currentlyUnneededNodeNames)-i, "nodesCount", len(currentlyUnneededNodeNames))
+			skippedNodes = p.appendUnprocessed(ctx, skippedNodes, currentlyUnneededNodeNames[i:], processedAtomicGroups)
+			logger.Info("Some nodes skipped in scale down simulation due to timeout.", "skippedNodesCount", len(skippedNodes), "nodesCount", len(currentlyUnneededNodeNames))
 			break
 		}
 
@@ -324,9 +326,30 @@ func (p *Planner) categorizeNodes(ctx context.Context, podDestinations map[strin
 			continue
 		}
 		node := nodeInfo.Node()
-		_, isAtomic := atomic.IsAtomicNodeGroup(ctx, p.autoscalingCtx, node)
+		nodeGroup, isAtomic := atomic.IsAtomicNodeGroup(ctx, p.autoscalingCtx, node)
 
-		if !isAtomic && nonAtomicRemovableCount >= p.unneededNodesLimit() {
+		if isAtomic && nodeGroup != nil {
+			ngID := nodeGroup.Id()
+			if processedAtomicGroups[ngID] {
+				continue
+			}
+			groupRemovable, groupUnremovableCount, groupSkipped, timedOut := p.simulateAtomicNodeGroup(ctx, ngID, atomicGroups[ngID], podDestinations, unremovableTimeout, timer)
+			if timedOut {
+				skippedNodes = p.appendUnprocessed(ctx, skippedNodes, currentlyUnneededNodeNames[i:], processedAtomicGroups)
+				klog.Warningf("%d out of %d nodes skipped in scale down simulation due to timeout.", len(skippedNodes), len(currentlyUnneededNodeNames))
+				break
+			}
+			processedAtomicGroups[ngID] = true
+			if len(groupRemovable) > 0 {
+				removableList = append(removableList, groupRemovable...)
+				atomicScaleDownNodesCount += len(groupRemovable)
+			}
+			unremovableCount += groupUnremovableCount
+			skippedNodes = append(skippedNodes, groupSkipped...)
+			continue
+		}
+
+		if nonAtomicRemovableCount >= p.unneededNodesLimit() {
 			skippedNodes = append(skippedNodes, nodeName)
 			logger.V(4).Info("Skipping non-atomic node in scale down simulation: there are already some non-atomic unneeded nodes.", "node", klog.KObj(node), "nonAtomicUnneededNodesCount", nonAtomicRemovableCount)
 			continue
@@ -341,12 +364,7 @@ func (p *Planner) categorizeNodes(ctx context.Context, podDestinations map[strin
 			delete(podDestinations, removable.Node.Name)
 			p.autoscalingCtx.RemainingPdbTracker.RemovePods(removable.PodsToReschedule)
 			removableList = append(removableList, *removable)
-			if isAtomic {
-				atomicScaleDownNodesCount++
-				logger.V(2).Info("Considering node for atomic scale down.", "node", klog.KObj(node), "currentAtomicScaleDownNodesCount", atomicScaleDownNodesCount)
-			} else {
-				nonAtomicRemovableCount++
-			}
+			nonAtomicRemovableCount++
 		}
 		if unremovable != nil {
 			unremovableCount += 1
@@ -438,6 +456,126 @@ func (p *Planner) prefilterIncompleteAtomicNodeGroups(ctx context.Context, nodeN
 	}
 
 	return filteredNodeNames, unremovableCount
+}
+
+// groupAtomicNodes groups unneeded atomic node names by their NodeGroup ID.
+func (p *Planner) groupAtomicNodes(ctx context.Context, nodeNames []string) map[string][]string {
+	atomicGroups := make(map[string][]string)
+	for _, nodeName := range nodeNames {
+		nodeInfo, err := p.autoscalingCtx.ClusterSnapshot.GetNodeInfo(nodeName)
+		if err != nil || nodeInfo == nil || nodeInfo.Node() == nil {
+			continue
+		}
+		node := nodeInfo.Node()
+		nodeGroup, isAtomic := atomic.IsAtomicNodeGroup(ctx, p.autoscalingCtx, node)
+		if isAtomic && nodeGroup != nil {
+			ngID := nodeGroup.Id()
+			atomicGroups[ngID] = append(atomicGroups[ngID], nodeName)
+		}
+	}
+	return atomicGroups
+}
+
+// appendUnprocessed appends remaining node names to skippedNodes, excluding nodes belonging to
+// atomic node groups that were already simulated.
+func (p *Planner) appendUnprocessed(ctx context.Context, skippedNodes []string, nodeNames []string, processedAtomicGroups map[string]bool) []string {
+	for _, nodeName := range nodeNames {
+		nodeInfo, err := p.autoscalingCtx.ClusterSnapshot.GetNodeInfo(nodeName)
+		if err == nil && nodeInfo != nil && nodeInfo.Node() != nil {
+			nodeGroup, isAtomic := atomic.IsAtomicNodeGroup(ctx, p.autoscalingCtx, nodeInfo.Node())
+			if isAtomic && nodeGroup != nil && processedAtomicGroups[nodeGroup.Id()] {
+				continue
+			}
+		}
+		skippedNodes = append(skippedNodes, nodeName)
+	}
+	return skippedNodes
+}
+
+// simulateAtomicNodeGroup simulates removal of all nodes in an atomic node group as an all-or-nothing unit.
+// If any node in the group is unremovable, simulation of remaining nodes is aborted early, and any temporary
+// podDestinations and RemainingPdbTracker mutations are rolled back.
+// Returns removableList for the group, unremovableCount, skippedNodes, and whether simulation timed out.
+func (p *Planner) simulateAtomicNodeGroup(
+	ctx context.Context,
+	ngID string,
+	ngNodes []string,
+	podDestinations map[string]bool,
+	unremovableTimeout time.Time,
+	timer *time.Timer,
+) ([]simulator.NodeToBeRemoved, int, []string, bool) {
+	logger := klog.FromContext(ctx)
+
+	if timedOut(timer) {
+		return nil, 0, ngNodes, true
+	}
+
+	podDestinationsCopy := make(map[string]bool, len(podDestinations))
+	for k, v := range podDestinations {
+		podDestinationsCopy[k] = v
+	}
+	pdbsSnapshot := p.autoscalingCtx.RemainingPdbTracker.GetPdbs()
+
+	var groupRemovable []simulator.NodeToBeRemoved
+
+	for j, nodeName := range ngNodes {
+		if timedOut(timer) {
+			for k := range podDestinations {
+				delete(podDestinations, k)
+			}
+			for k, v := range podDestinationsCopy {
+				podDestinations[k] = v
+			}
+			if err := p.autoscalingCtx.RemainingPdbTracker.SetPdbs(pdbsSnapshot); err != nil {
+				logger.Error(err, "failed to restore PDB snapshot on timeout for atomic group", "nodeGroupId", ngID)
+			}
+			return nil, 0, ngNodes, true
+		}
+
+		removable, unremovable := p.rs.SimulateNodeRemoval(ctx, nodeName, podDestinations, p.latestUpdate, p.autoscalingCtx.RemainingPdbTracker)
+		if removable != nil {
+			_, inParallel, _ := p.autoscalingCtx.RemainingPdbTracker.CanRemovePods(removable.PodsToReschedule)
+			if !inParallel {
+				removable.IsRisky = true
+			}
+			delete(podDestinations, removable.Node.Name)
+			p.autoscalingCtx.RemainingPdbTracker.RemovePods(removable.PodsToReschedule)
+			groupRemovable = append(groupRemovable, *removable)
+			continue
+		}
+
+		// Early-Abort: nodeName is unremovable. Because this is an atomic node group,
+		// if any node fails simulation, the entire group cannot scale down.
+		logger.V(2).Info("Atomic node group cannot scale down because node is unremovable. Early aborting simulation for nodes.", "nodeGroupId", ngID, "nodeName", nodeName, "ngNodesCount", len(ngNodes))
+
+		for k := range podDestinations {
+			delete(podDestinations, k)
+		}
+		for k, v := range podDestinationsCopy {
+			podDestinations[k] = v
+		}
+		if err := p.autoscalingCtx.RemainingPdbTracker.SetPdbs(pdbsSnapshot); err != nil {
+			logger.Error(err, "failed to restore PDB snapshot after early abort for atomic group", "nodeGroupId", ngID)
+		}
+
+		for idx, name := range ngNodes {
+			if idx == j && unremovable != nil {
+				p.unremovableNodes.AddTimeout(unremovable, unremovableTimeout)
+			} else {
+				nodeInfo, err := p.autoscalingCtx.ClusterSnapshot.GetNodeInfo(name)
+				if err == nil && nodeInfo != nil && nodeInfo.Node() != nil {
+					p.unremovableNodes.AddTimeout(&simulator.UnremovableNode{
+						Node:   nodeInfo.Node(),
+						Reason: simulator.AtomicScaleDownFailed,
+					}, unremovableTimeout)
+				}
+			}
+		}
+		return nil, len(ngNodes), nil, false
+	}
+
+	logger.V(2).Info("Atomic node group with some nodes successfully simulated for removal.", "nodeGroupId", ngID, "removableNodesCountForAtomicNodeGroup", len(groupRemovable))
+	return groupRemovable, 0, nil, false
 }
 
 // isNodeAtomicScaleDown checks if the node would be considered for atomic scale down.
