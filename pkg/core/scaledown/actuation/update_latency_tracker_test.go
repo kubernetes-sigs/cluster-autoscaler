@@ -174,7 +174,7 @@ func TestUpdateLatencyCalculation(t *testing.T) {
 				nodes[name] = node
 			}
 			nodeLister := NewTestCustomNodeLister(nodes, tc.nodeTaintAfterDuration, mc)
-			updateLatencyTracker := NewUpdateLatencyTrackerForTesting(nodeLister, mc.Now)
+			updateLatencyTracker := NewUpdateLatencyTrackerForTesting(nodeLister, len(nodes), mc.Now)
 
 			// Synthetically advance mock clock upon each sleep.
 			updateLatencyTracker.sleep = func(d time.Duration) {
@@ -187,12 +187,18 @@ func TestUpdateLatencyCalculation(t *testing.T) {
 			for _, node := range nodes {
 				updateLatencyTracker.StartTimeChan <- nodeTaintStartTime{node.Name, tc.startTime}
 			}
-			updateLatencyTracker.ExpectedNodeCountChan <- len(tc.nodes)
+			if tc.simulateZeroExpectedCount {
+				close(updateLatencyTracker.ExpectedNodeCountChan)
+				// Wait slightly to ensure Start() loop processes the closed channel.
+				time.Sleep(50 * time.Millisecond)
+			} else {
+				updateLatencyTracker.ExpectedNodeCountChan <- len(tc.nodes)
 
-			latency, ok := <-updateLatencyTracker.ResultChan
-			assert.Equal(t, tc.wantResultChanOpen, ok)
-			if ok {
-				assert.Equal(t, tc.wantLatency, latency)
+				latency, ok := <-updateLatencyTracker.ResultChan
+				assert.Equal(t, tc.wantResultChanOpen, ok)
+				if ok {
+					assert.Equal(t, tc.wantLatency, latency)
+				}
 			}
 		})
 	}

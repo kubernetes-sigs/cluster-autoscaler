@@ -375,6 +375,7 @@ func BuildTestNode(name string, millicpuCapacity int64, memCapacity int64, opts 
 	node := &apiv1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:     name,
+				UID:      types.UID(name),
 			SelfLink: fmt.Sprintf("/api/v1/nodes/%s", name),
 			Labels:   map[string]string{},
 		},

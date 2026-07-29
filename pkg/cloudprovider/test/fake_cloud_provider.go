@@ -17,6 +17,7 @@ limitations under the License.
 package test
 
 import (
+	"k8s.io/apimachinery/pkg/types"
 	"context"
 	"fmt"
 	"strings"
@@ -241,6 +242,13 @@ func WithNodeReadinessDelay(delay time.Duration) NodeGroupOption {
 	}
 }
 
+// WithNodeGroupOptions sets the autoscaling options for the node group.
+func WithNodeGroupOptions(opts *config.NodeGroupAutoscalingOptions) NodeGroupOption {
+	return func(n *NodeGroup) {
+		n.opts = opts
+	}
+}
+
 // AddNodeGroup is a helper for tests to add a group with its template.
 func (c *CloudProvider) AddNodeGroup(id string, opts ...NodeGroupOption) *NodeGroup {
 	c.Lock()
@@ -320,6 +328,9 @@ type NodeGroup struct {
 	// nodeReadinessDelay can be used to simulate Node objects taking some time to transition to Ready after they appear in the K8s API. If unset,
 	// the Nodes will appear as Ready immediately after registration.
 	nodeReadinessDelay time.Duration
+
+	// opts contains the autoscaling options for this node group.
+	opts *config.NodeGroupAutoscalingOptions
 }
 
 // MaxSize returns the maximum size of the node group.
@@ -442,7 +453,7 @@ func (n *NodeGroup) Autoprovisioned(ctx context.Context) bool {
 
 // GetOptions returns autoscaling options specific to this node group.
 func (n *NodeGroup) GetOptions(ctx context.Context, defaults config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error) {
-	return nil, nil
+	return n.opts, nil
 }
 
 // TargetSize returns the current target size of the node group.
@@ -532,6 +543,7 @@ func (n *NodeGroup) addNodeFromTemplate(nodeName string) *apiv1.Node {
 func cloneNodeForNodeGroup(templateNode *apiv1.Node, ngName, nodeName string) *apiv1.Node {
 	node := templateNode.DeepCopy()
 	node.Name = nodeName
+		node.UID = types.UID(nodeName)
 	node.Spec.ProviderID = fmt.Sprintf("fake-provider/%s/%s", ngName, node.Name)
 	return node
 }
