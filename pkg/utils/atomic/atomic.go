@@ -29,19 +29,33 @@ import (
 
 // IsAtomicNodeGroup returns the node group and true if the given node belongs to an atomic node group (ZeroOrMaxNodeScaling).
 func IsAtomicNodeGroup(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, node *apiv1.Node) (cloudprovider.NodeGroup, bool) {
+	logger := klog.FromContext(ctx)
 	nodeGroup, err := autoscalingCtx.CloudProvider.NodeGroupForNode(ctx, node)
 	if err != nil || nodeGroup == nil {
 		return nil, false
 	}
 	autoscalingOptions, err := nodeGroup.GetOptions(ctx, autoscalingCtx.NodeGroupDefaults)
 	if err != nil && err != cloudprovider.ErrNotImplemented {
-		klog.Errorf("Failed to get autoscaling options for node group %s: %v", nodeGroup.Id(), err)
+		logger.Error(err, "Failed to get autoscaling options for node group", "nodeGroupId", nodeGroup.Id())
 		return nil, false
 	}
 	if autoscalingOptions != nil && autoscalingOptions.ZeroOrMaxNodeScaling {
 		return nodeGroup, true
 	}
 	return nil, false
+}
+
+// AllowsNonAtomicScaleUpToMax returns true if the given node group has the AllowNonAtomicScaleUpToMax
+// option enabled. For such atomic node groups, partially failed scale-ups are not cleaned up, so the
+// number of registered nodes may permanently differ from the target size.
+func AllowsNonAtomicScaleUpToMax(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, nodeGroup cloudprovider.NodeGroup) bool {
+	logger := klog.FromContext(ctx)
+	autoscalingOptions, err := nodeGroup.GetOptions(ctx, autoscalingCtx.NodeGroupDefaults)
+	if err != nil && err != cloudprovider.ErrNotImplemented {
+		logger.Error(err, "Failed to get autoscaling options for node group", "nodeGroupId", nodeGroup.Id())
+		return false
+	}
+	return autoscalingOptions != nil && autoscalingOptions.AllowNonAtomicScaleUpToMax
 }
 
 // CountRegisteredNodesForGroup returns the number of registered (non-upcoming) nodes in allNodes belonging to nodeGroup.
@@ -66,4 +80,22 @@ func CountRegisteredNodesForGroup(ctx context.Context, g cloudprovider.NodeGroup
 		}
 	}
 	return count, nil
+}
+
+// GroupAtomicNodes groups unneeded atomic node names by their NodeGroup ID.
+func GroupAtomicNodes(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, nodeNames []string) map[string][]string {
+	atomicGroups := make(map[string][]string)
+	for _, nodeName := range nodeNames {
+		nodeInfo, err := autoscalingCtx.ClusterSnapshot.GetNodeInfo(nodeName)
+		if err != nil || nodeInfo == nil || nodeInfo.Node() == nil {
+			continue
+		}
+		node := nodeInfo.Node()
+		nodeGroup, isAtomic := IsAtomicNodeGroup(ctx, autoscalingCtx, node)
+		if isAtomic && nodeGroup != nil {
+			ngID := nodeGroup.Id()
+			atomicGroups[ngID] = append(atomicGroups[ngID], nodeName)
+		}
+	}
+	return atomicGroups
 }

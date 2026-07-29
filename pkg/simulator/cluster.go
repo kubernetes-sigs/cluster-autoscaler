@@ -23,6 +23,7 @@ import (
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/pdb"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
@@ -218,6 +219,110 @@ func (r *RemovalSimulator) SimulateNodeRemoval(
 		DaemonSetPods:    podMoveInfo.DaemonSetPods,
 		OnCompletionPods: podMoveInfo.OnCompletionPods,
 	}, nil
+}
+
+// NodeGroupRemovalResult contains the outcome of a node group removal simulation.
+type NodeGroupRemovalResult struct {
+	// Removable contains all nodes in the group if all of them can be removed, nil otherwise.
+	Removable []NodeToBeRemoved
+	// Unremovable contains the failure info of the node that couldn't be removed, if any.
+	Unremovable *UnremovableNode
+}
+
+// SimulateNodeGroupRemoval simulates removing a group of nodes atomically (all-or-nothing).
+// If any node in the group is unremovable, or the context is done, simulation is aborted early
+// and any temporary destinationMap, remainingPdbTracker and cluster snapshot mutations are rolled back.
+//
+// Drainability of each node (including the PDB rule) is evaluated against the PDB state from
+// before the group simulation started. This way a PDB that allows at least one disruption doesn't
+// block the group just because its budget was consumed by sibling nodes from the same group.
+// Such nodes are marked as IsRisky instead, since their pods have to be evicted sequentially,
+// after the pods evicted from sibling nodes get recreated elsewhere.
+// Returns the simulation result and the context error if the simulation was aborted because
+// the context is done.
+func (r *RemovalSimulator) SimulateNodeGroupRemoval(
+	ctx context.Context,
+	nodeNames []string,
+	destinationMap map[string]bool,
+	timestamp time.Time,
+	remainingPdbTracker pdb.RemainingPdbTracker,
+) (NodeGroupRemovalResult, error) {
+	logger := klog.FromContext(ctx)
+
+	destinationMapCopy := make(map[string]bool, len(destinationMap))
+	for k, v := range destinationMap {
+		destinationMapCopy[k] = v
+	}
+
+	var pdbsSnapshot []*policyv1.PodDisruptionBudget
+	// drainabilityPdbTracker holds the PDB state from before the group simulation and is used
+	// only for drainability checks. remainingPdbTracker keeps tracking the budget consumed by
+	// the group and is used to determine whether nodes can be drained in parallel.
+	var drainabilityPdbTracker pdb.RemainingPdbTracker
+	if remainingPdbTracker != nil {
+		// GetPdbs returns the tracker's internal objects, which RemovePods mutates in place,
+		// so they have to be deep-copied to be usable for rollback.
+		for _, p := range remainingPdbTracker.GetPdbs() {
+			pdbsSnapshot = append(pdbsSnapshot, p.DeepCopy())
+		}
+		drainabilityPdbTracker = pdb.NewBasicRemainingPdbTracker()
+		if err := drainabilityPdbTracker.SetPdbs(pdbsSnapshot); err != nil {
+			logger.Error(err, "Failed to initialize PDB tracker for group removal simulation, falling back to the shared tracker")
+			drainabilityPdbTracker = remainingPdbTracker
+		}
+	}
+
+	rollback := func() {
+		for k := range destinationMap {
+			delete(destinationMap, k)
+		}
+		for k, v := range destinationMapCopy {
+			destinationMap[k] = v
+		}
+		if remainingPdbTracker != nil {
+			if err := remainingPdbTracker.SetPdbs(pdbsSnapshot); err != nil {
+				logger.Error(err, "Failed to restore PDB snapshot after rollback in group removal simulation")
+			}
+		}
+	}
+
+	// Pods must not be rescheduled onto sibling nodes, since the whole group is going to be removed.
+	for _, nodeName := range nodeNames {
+		delete(destinationMap, nodeName)
+	}
+
+	r.clusterSnapshot.Fork()
+	var removableList []NodeToBeRemoved
+	for _, nodeName := range nodeNames {
+		if err := ctx.Err(); err != nil {
+			logger.V(2).Info("Context done. Aborting group removal simulation.", "nodeName", nodeName, "nodesCount", len(nodeNames), "err", err)
+			r.clusterSnapshot.Revert()
+			rollback()
+			return NodeGroupRemovalResult{}, err
+		}
+		removable, unremovable := r.SimulateNodeRemoval(ctx, nodeName, destinationMap, timestamp, drainabilityPdbTracker)
+		if unremovable != nil {
+			logger.V(2).Info("Node in group cannot be removed. Early aborting group removal simulation.", "nodeName", nodeName, "nodesCount", len(nodeNames))
+			r.clusterSnapshot.Revert()
+			rollback()
+			return NodeGroupRemovalResult{Unremovable: unremovable}, nil
+		}
+
+		if remainingPdbTracker != nil {
+			_, inParallel, _ := remainingPdbTracker.CanRemovePods(removable.PodsToReschedule)
+			if !inParallel {
+				removable.IsRisky = true
+			}
+			remainingPdbTracker.RemovePods(removable.PodsToReschedule)
+		}
+		removableList = append(removableList, *removable)
+	}
+
+	if err := r.clusterSnapshot.Commit(); err != nil {
+		logger.Error(err, "Failed to commit cluster snapshot after group removal simulation")
+		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+	}
+	return NodeGroupRemovalResult{Removable: removableList}, nil
 }
 
 func (r *RemovalSimulator) withForkedSnapshot(ctx context.Context, f func() error) (err error) {
