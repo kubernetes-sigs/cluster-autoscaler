@@ -526,7 +526,7 @@ func setupTest(t *testing.T, client *provreqclient.ProvisioningRequestClient, no
 	})
 	orchestrator := &provReqOrchestrator{
 		client:              client,
-		provisioningClasses: []ProvisioningClass{checkcapacity.New(client, injector), besteffortatomic.New(client)},
+		provisioningClasses: []ProvisioningClass{checkcapacity.New(client, injector, pods.NewSimulationWorkloadBuilder(nil)), besteffortatomic.New(client)},
 	}
 	orchestrator.Initialize(&autoscalingCtx, processors, clusterState, estimatorBuilder, taints.TaintConfig{}, quotasTrackerFactory)
 	return orchestrator, nodeInfos

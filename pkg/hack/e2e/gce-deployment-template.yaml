@@ -67,7 +67,7 @@ rules:
     resources: [ "leases" ]
     verbs: [ "get", "update" ]
   - apiGroups: [ "resource.k8s.io" ]
-    resources: [ "resourceslices", "deviceclasses", "resourceclaims" ]
+    resources: [ "resourceslices", "deviceclasses", "resourceclaims", "resourceclaimtemplates" ]
     verbs: [ "list", "watch" ]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
