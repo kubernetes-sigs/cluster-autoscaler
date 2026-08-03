@@ -17,6 +17,7 @@ limitations under the License.
 package scaledown
 
 import (
+	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
 	"time"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/status"
@@ -96,4 +97,7 @@ type UnneededNode struct {
 	// This value is derived from either --scale-down-unneeded-time or
 	// --scale-down-unready-time, depending on the node's readiness state.
 	RemovalThreshold time.Duration
+
+	// NodeType indicates whether the node was empty (no pods to reschedule) or non-empty when it was scaled down.
+	NodeType metrics.UnneededNodeType
 }

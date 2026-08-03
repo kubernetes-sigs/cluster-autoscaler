@@ -17,6 +17,7 @@ limitations under the License.
 package unneeded
 
 import (
+	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
 	"fmt"
 	"time"
 
@@ -186,9 +187,15 @@ func (n *Nodes) AsList() []*scaledown.UnneededNode {
 	if n.cachedList == nil {
 		n.cachedList = make([]*scaledown.UnneededNode, 0, len(n.byName))
 		for _, v := range n.byName {
+			nodeType := metrics.NonEmptyUnneededNode
+			if len(v.ntbr.PodsToReschedule) == 0 {
+				nodeType = metrics.EmptyUnneededNode
+			}
+
 			n.cachedList = append(n.cachedList, &scaledown.UnneededNode{
 				Node:             v.ntbr.Node,
 				RemovalThreshold: v.removalThreshold,
+				NodeType:         nodeType,
 			})
 		}
 	}

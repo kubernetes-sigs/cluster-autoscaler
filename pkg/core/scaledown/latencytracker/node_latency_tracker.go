@@ -39,6 +39,7 @@ const (
 )
 
 type unneededNodeState struct {
+	nodeType metrics.UnneededNodeType
 	unneededSince     time.Time
 	removalThreshold  time.Duration
 	latestDelayReason string
@@ -68,6 +69,7 @@ func (t *NodeLatencyTracker) UpdateScaleDownCandidates(list []*scaledown.Unneede
 		if info, exists := t.unneededNodes[nodeName]; !exists {
 			t.unneededNodes[nodeName] = unneededNodeState{
 				unneededSince:    timestamp,
+				nodeType:         candidate.NodeType,
 				removalThreshold: candidate.RemovalThreshold,
 			}
 			klog.V(6).Infof("Started tracking unneeded node %s at %v with removal threshold %v.", nodeName, timestamp, candidate.RemovalThreshold)
@@ -123,7 +125,7 @@ func (t *NodeLatencyTracker) recordAndCleanup(nodeName string, isRemoved bool) {
 	}
 
 	if latency > 0 {
-		metrics.UpdateScaleDownNodeRemovalLatency(isRemoved, delayReason, latency)
+		metrics.UpdateScaleDownNodeRemovalLatency(isRemoved, delayReason, info.nodeType, latency)
 	} else {
 		klog.V(6).Infof("Node %q was unneeded for %s (threshold %s). Latency %s is <= 0, skipping metric. isRemoved: %v, delayReason: %v",
 			nodeName, duration, info.removalThreshold, latency, isRemoved, delayReason)
