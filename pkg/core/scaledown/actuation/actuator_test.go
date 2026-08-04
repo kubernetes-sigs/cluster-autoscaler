@@ -1685,70 +1685,82 @@ taintsLoop:
 }
 
 func TestStartDeletion(t *testing.T) {
-	testSets := []map[string]startDeletionTestCase{
+	for _, dynamicDelay := range []bool{false, true} {
+		testSets := []map[string]startDeletionTestCase{
 		getStartDeletionTestCases(false, false, "testNg1"),
 		getStartDeletionTestCases(true, false, "testNg2"),
 	}
 
-	for _, testSet := range testSets {
+		for _, testSet := range testSets {
 		for tn, tc := range testSet {
 			if !tc.partialTaintActuationEnabled {
-				t.Run(fmt.Sprintf("%s-partialActuationEnabled:false", tn), func(t *testing.T) {
+				tc.dynamicNodeDeleteDelayEnabled = dynamicDelay
+				t.Run(fmt.Sprintf("%s-partialActuationEnabled:false-DynamicDelay:%v", tn, dynamicDelay), func(t *testing.T) {
 					runStartDeletionTest(t, tc, false)
 				})
 			}
 		}
+	}
 	}
 }
 
 func TestStartDeletionThroughputOptimized(t *testing.T) {
-	testSets := []map[string]startDeletionTestCase{
+	for _, dynamicDelay := range []bool{false, true} {
+		testSets := []map[string]startDeletionTestCase{
 		getStartDeletionTestCases(false, false, "testNg1"),
 		getStartDeletionTestCases(true, false, "testNg2"),
 	}
 
-	for _, testSet := range testSets {
+		for _, testSet := range testSets {
 		for tn, tc := range testSet {
 			if tc.partialTaintActuationEnabled {
-				t.Run(fmt.Sprintf("%s-partialActuationEnabled:true", tn), func(t *testing.T) {
+				tc.dynamicNodeDeleteDelayEnabled = dynamicDelay
+				t.Run(fmt.Sprintf("%s-partialActuationEnabled:true-DynamicDelay:%v", tn, dynamicDelay), func(t *testing.T) {
 					runStartDeletionTest(t, tc, false)
 				})
 			}
 		}
 	}
+	}
 }
 
 func TestStartForceDeletion(t *testing.T) {
-	testSets := []map[string]startDeletionTestCase{
+	for _, dynamicDelay := range []bool{false, true} {
+		testSets := []map[string]startDeletionTestCase{
 		getStartDeletionTestCases(false, true, "testNg1"),
 		getStartDeletionTestCases(true, true, "testNg2"),
 	}
 
-	for _, testSet := range testSets {
+		for _, testSet := range testSets {
 		for tn, tc := range testSet {
 			if !tc.partialTaintActuationEnabled {
-				t.Run(fmt.Sprintf("%s-partialActuationEnabled:false", tn), func(t *testing.T) {
+				tc.dynamicNodeDeleteDelayEnabled = dynamicDelay
+				t.Run(fmt.Sprintf("%s-partialActuationEnabled:false-DynamicDelay:%v", tn, dynamicDelay), func(t *testing.T) {
 					runStartDeletionTest(t, tc, true)
 				})
 			}
 		}
+	}
 	}
 }
 
 func TestStartForceDeletionThroughputOptimized(t *testing.T) {
-	testSets := []map[string]startDeletionTestCase{
+	for _, dynamicDelay := range []bool{false, true} {
+		testSets := []map[string]startDeletionTestCase{
 		getStartDeletionTestCases(false, true, "testNg1"),
 		getStartDeletionTestCases(true, true, "testNg2"),
 	}
 
-	for _, testSet := range testSets {
+		for _, testSet := range testSets {
 		for tn, tc := range testSet {
 			if tc.partialTaintActuationEnabled {
-				t.Run(fmt.Sprintf("%s-partialActuationEnabled:true", tn), func(t *testing.T) {
+				tc.dynamicNodeDeleteDelayEnabled = dynamicDelay
+				t.Run(fmt.Sprintf("%s-partialActuationEnabled:true-DynamicDelay:%v", tn, dynamicDelay), func(t *testing.T) {
 					runStartDeletionTest(t, tc, true)
 				})
 			}
 		}
+	}
 	}
 }
 
@@ -1830,14 +1842,15 @@ func TestStartDeletionInBatchBasic(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
+		for _, dynamicDelay := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s-DynamicDelay:%v", test.name, dynamicDelay), func(t *testing.T) {
 			test := test
 			gotFailedRequest := func(nodeGroupId string) bool {
 				val, _ := test.failedRequests[nodeGroupId]
 				return val
 			}
 			deletedResult := make(chan string)
-			fakeClient := &fake.Clientset{}
+			fakeClient := fake.NewSimpleClientset()
 			provider := testprovider.NewTestCloudProviderBuilder().WithOnScaleDown(func(nodeGroupId string, node string) error {
 				if gotFailedRequest(nodeGroupId) {
 					return fmt.Errorf("SIMULATED ERROR: won't remove node")
@@ -1868,6 +1881,7 @@ func TestStartDeletionInBatchBasic(t *testing.T) {
 					singleBucketList := generateNodeGroupViewList(ng, 0, num)
 					bucket := singleBucketList[0]
 					deleteNodes[i] = append(deleteNodes[i], bucket.Nodes...)
+					for _, n := range bucket.Nodes { fakeClient.Tracker().Add(n) }
 					for _, node := range bucket.Nodes {
 						provider.AddNode(bucket.Group.Id(), node)
 					}
@@ -1878,11 +1892,13 @@ func TestStartDeletionInBatchBasic(t *testing.T) {
 				MaxDrainParallelism:            5,
 				MaxPodEvictionTime:             0,
 				DaemonSetEvictionForEmptyNodes: true,
+				DynamicNodeDeleteDelayAfterTaintEnabled: dynamicDelay,
 			}
 
 			podLister := kube_util.NewTestPodLister([]*apiv1.Pod{})
 			pdbLister := kube_util.NewTestPodDisruptionBudgetLister([]*policyv1.PodDisruptionBudget{})
-			registry := kube_util.NewListerRegistry(nil, nil, podLister, pdbLister, nil, nil, nil, nil, nil)
+			nodeLister := kube_util.NewDynamicTestNodeLister(fakeClient)
+			registry := kube_util.NewListerRegistry(nodeLister, nil, podLister, pdbLister, nil, nil, nil, nil, nil)
 			autoscalingCtx, err := NewScaleTestAutoscalingContext(opts, fakeClient, registry, provider, nil, nil, nil)
 			if err != nil {
 				t.Fatalf("Couldn't set up autoscaling context: %v", err)
@@ -1927,6 +1943,7 @@ func TestStartDeletionInBatchBasic(t *testing.T) {
 			}
 		})
 	}
+		}
 }
 
 func sizedNodeGroup(id string, size int, atomic, ignoreDaemonSetUtil bool) *testprovider.TestNodeGroup {

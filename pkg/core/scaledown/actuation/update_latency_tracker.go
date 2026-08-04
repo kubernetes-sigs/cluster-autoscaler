@@ -70,18 +70,16 @@ func NewUpdateLatencyTracker(nodeLister kubernetes.NodeLister) *UpdateLatencyTra
 	}
 }
 
-// Start starts listening for node tainting start timestamps and update the timestamps that
-// the taint appears for the first time for a particular node. Listen ExpectedNodeCountChan for stop/await signals
+// Start periodically polls the nodeLister cache to record exactly when the ToBeDeleted taint
+// propagates to specific nodes (supplied via StartTimeChan). It runs this loop until the total
+// number of observed taints matches the integer limit received via ExpectedNodeCountChan.
 func (u *UpdateLatencyTracker) Start() {
 	for {
 		select {
 		case expectedCount, ok := <-u.ExpectedNodeCountChan:
 			if ok {
 				u.drainStartTimeChan()
-				u.remainingNodeCount = expectedCount - len(u.finishTimestamp)
-				if u.remainingNodeCount < 0 {
-					u.remainingNodeCount = 0
-				}
+				u.remainingNodeCount = max(expectedCount-len(u.finishTimestamp), 0)
 				u.await()
 			}
 			return
@@ -151,7 +149,8 @@ func (u *UpdateLatencyTracker) await() {
 	for {
 		switch {
 		case u.remainingNodeCount <= 0:
-			latency := u.calculateLatency()
+			// The resolution of the tracker is equal to its polling inteval, so we enforce a floor for the latency equal to u.sleepDurationWhenPolling.
+			latency := max(u.calculateLatency(), u.sleepDurationWhenPolling)
 			u.ResultChan <- latency
 			return
 		case u.now().After(waitingForTaintingStartTime.Add(waitForTaintingTimeoutDuration)):

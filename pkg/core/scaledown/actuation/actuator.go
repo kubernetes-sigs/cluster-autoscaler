@@ -224,14 +224,7 @@ func (a *Actuator) taintNodesSync(NodeGroupViews []*budgets.NodeGroupView) (tain
 	}
 
 	for _, bucket := range NodeGroupViews {
-		for _, node := range bucket.Nodes {
-			if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
-				// The start timestamps pushed to the tracker prior to this block are captured before client-go token bucket rate-limiting (QPS/burst).
-				// Therefore, this metric inherently measures: [client-side throttle queue time + network round trip + API server propagation time].
-				updateLatencyTracker.StartTimeChan <- nodeTaintStartTime{node.Name, time.Now()}
-			}
-			nodesToTaint = append(nodesToTaint, node)
-		}
+		nodesToTaint = append(nodesToTaint, bucket.Nodes...)
 	}
 
 	var successfulNodeGroupViews []*budgets.NodeGroupView
@@ -239,12 +232,13 @@ func (a *Actuator) taintNodesSync(NodeGroupViews []*budgets.NodeGroupView) (tain
 	var retErr errors.AutoscalerError
 
 	if a.autoscalingCtx.AutoscalingOptions.PartialTaintActuationEnabled {
-		failedNodes := a.applyTaintsConcurrently(nodesToTaint)
+		failedNodes := a.applyTaintsConcurrently(nodesToTaint, updateLatencyTracker)
 
 		if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
-			// ExpectedCount relies entirely on the network response. If a node taint call throws a network timeout but implicitly succeeds
-			// on the server, expectedCount drops but a start timestamp was already recorded. The tracker loop may hit its expected count early
-			// and underestimate max latency. This is a known, accepted compromise.
+			// expectedCount only includes nodes whose network requests returned a success.
+			// Edge case: if a request times out for us but succeeds on the API server, the node 
+			// will get tainted, but the latency tracker will simply ignore it. This is an accepted
+			// trade-off.
 			expectedCount := len(nodesToTaint) - len(failedNodes)
 			if expectedCount == 0 {
 				close(updateLatencyTracker.ExpectedNodeCountChan)
@@ -281,7 +275,7 @@ func (a *Actuator) taintNodesSync(NodeGroupViews []*budgets.NodeGroupView) (tain
 		taintedNodes := make(chan *apiv1.Node, len(nodesToTaint))
 		workqueue.ParallelizeUntil(context.Background(), maxConcurrentNodesTainting, len(nodesToTaint), func(piece int) {
 			node := nodesToTaint[piece]
-			err := a.taintNode(node)
+			err := a.taintNode(node, updateLatencyTracker)
 			if err != nil {
 				failedTaintedNodes <- struct {
 					node *apiv1.Node
@@ -336,7 +330,7 @@ func (a *Actuator) taintNodesSync(NodeGroupViews []*budgets.NodeGroupView) (tain
 // applyTaintsConcurrently attempts to add the ToBeDeleted taint to all nodes in the batch.
 // It executes via workqueue.ParallelizeUntil to prevent single-node networking latency from bottlenecking the loop.
 // Returns a map of node names to errors for nodes that failed the network taint call.
-func (a *Actuator) applyTaintsConcurrently(nodesToTaint []*apiv1.Node) map[string]error {
+func (a *Actuator) applyTaintsConcurrently(nodesToTaint []*apiv1.Node, tracker *UpdateLatencyTracker) map[string]error {
 	type taintResult struct {
 		node *apiv1.Node
 		err  error
@@ -345,7 +339,7 @@ func (a *Actuator) applyTaintsConcurrently(nodesToTaint []*apiv1.Node) map[strin
 
 	workqueue.ParallelizeUntil(context.Background(), maxConcurrentNodesTainting, len(nodesToTaint), func(piece int) {
 		node := nodesToTaint[piece]
-		err := a.taintNode(node)
+		err := a.taintNode(node, tracker)
 		results <- taintResult{node: node, err: err}
 	})
 	close(results)
@@ -551,11 +545,18 @@ func (a *Actuator) scaleDownNodeToReport(node *apiv1.Node, drain bool) (*status.
 }
 
 // taintNode taints the node with NoSchedule to prevent new pods scheduling on it.
-func (a *Actuator) taintNode(node *apiv1.Node) error {
+func (a *Actuator) taintNode(node *apiv1.Node, tracker *UpdateLatencyTracker) error {
 	if _, err := taints.MarkToBeDeleted(node, a.autoscalingCtx.ClientSet, a.autoscalingCtx.CordonNodeBeforeTerminate); err != nil {
 		a.autoscalingCtx.Recorder.Eventf(node, apiv1.EventTypeWarning, "ScaleDownFailed", "failed to mark the node as toBeDeleted/unschedulable: %v", err)
 		return errors.ToAutoscalerError(errors.ApiCallError, err)
 	}
+	
+	if tracker != nil {
+		// Pushing the timestamp *after* the API call completes excludes any 
+		// delay caused by the client-side throttling (which is controlled by --kube-api-qps and --kube-api-burst flags). 
+		tracker.StartTimeChan <- nodeTaintStartTime{node.Name, time.Now()}
+	}
+	
 	a.autoscalingCtx.Recorder.Eventf(node, apiv1.EventTypeNormal, "ScaleDown", "marked the node as toBeDeleted/unschedulable")
 	return nil
 }
