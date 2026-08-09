@@ -25,9 +25,12 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	v1 "k8s.io/api/resource/v1"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot/store"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot/testsnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/dynamicresources/comparator"
+	draprovider "sigs.k8s.io/cluster-autoscaler/pkg/simulator/dynamicresources/provider"
 	drasnapshot "sigs.k8s.io/cluster-autoscaler/pkg/simulator/dynamicresources/snapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
@@ -1200,6 +1203,375 @@ func TestDraProcessorResourceComparator(t *testing.T) {
 				assert.Empty(t, mockComparator.reportedTemplateSlices)
 				assert.Empty(t, mockComparator.reportedNodeSlices)
 			}
+		})
+	}
+}
+
+type fakeAllObjectsLister[T any] struct {
+	objects []T
+}
+
+func (l *fakeAllObjectsLister[T]) ListAll() ([]T, error) {
+	return l.objects, nil
+}
+
+func TestCountMatchingDraDevices(t *testing.T) {
+	defaultLimit := config.DraLimits{
+		Driver:               "gpu.nvidia.com",
+		DeviceAttributeName:  "productName",
+		DeviceAttributeValue: "A100",
+	}
+
+	tests := map[string]struct {
+		slices   []*resourceapi.ResourceSlice
+		limit    config.DraLimits
+		expected int64
+	}{
+		"NoSlices": {
+			slices:   nil,
+			limit:    defaultLimit,
+			expected: 0,
+		},
+		"DriverMismatch": {
+			slices: []*resourceapi.ResourceSlice{
+				{
+					Spec: resourceapi.ResourceSliceSpec{
+						Driver: "other.driver",
+						Devices: []resourceapi.Device{
+							{
+								Name: "dev-0",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("A100")},
+								},
+							},
+						},
+					},
+				},
+			},
+			limit:    defaultLimit,
+			expected: 0,
+		},
+		"AttributeNameMismatch": {
+			slices: []*resourceapi.ResourceSlice{
+				{
+					Spec: resourceapi.ResourceSliceSpec{
+						Driver: "gpu.nvidia.com",
+						Devices: []resourceapi.Device{
+							{
+								Name: "dev-0",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"model": {StringValue: ptr.To("A100")},
+								},
+							},
+						},
+					},
+				},
+			},
+			limit:    defaultLimit,
+			expected: 0,
+		},
+		"AttributeValueMismatch": {
+			slices: []*resourceapi.ResourceSlice{
+				{
+					Spec: resourceapi.ResourceSliceSpec{
+						Driver: "gpu.nvidia.com",
+						Devices: []resourceapi.Device{
+							{
+								Name: "dev-0",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("H100")},
+								},
+							},
+						},
+					},
+				},
+			},
+			limit:    defaultLimit,
+			expected: 0,
+		},
+		"SingleMatch": {
+			slices: []*resourceapi.ResourceSlice{
+				{
+					Spec: resourceapi.ResourceSliceSpec{
+						Driver: "gpu.nvidia.com",
+						Devices: []resourceapi.Device{
+							{
+								Name: "dev-0",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("A100")},
+								},
+							},
+						},
+					},
+				},
+			},
+			limit:    defaultLimit,
+			expected: 1,
+		},
+		"MultipleMatchesAcrossSlices": {
+			slices: []*resourceapi.ResourceSlice{
+				{
+					Spec: resourceapi.ResourceSliceSpec{
+						Driver: "gpu.nvidia.com",
+						Devices: []resourceapi.Device{
+							{
+								Name: "dev-0",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("A100")},
+								},
+							},
+							{
+								Name: "dev-1",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("A100")},
+								},
+							},
+						},
+					},
+				},
+				{
+					Spec: resourceapi.ResourceSliceSpec{
+						Driver: "gpu.nvidia.com",
+						Devices: []resourceapi.Device{
+							{
+								Name: "dev-2",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("A100")},
+								},
+							},
+							{
+								Name: "dev-3",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("A100")},
+								},
+							},
+						},
+					},
+				},
+			},
+			limit:    defaultLimit,
+			expected: 4,
+		},
+		"MixedMatchNoMatch": {
+			slices: []*resourceapi.ResourceSlice{
+				{
+					Spec: resourceapi.ResourceSliceSpec{
+						Driver: "gpu.nvidia.com",
+						Devices: []resourceapi.Device{
+							{
+								Name: "dev-0",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("A100")},
+								},
+							},
+							{
+								Name: "dev-1",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("H100")},
+								},
+							},
+							{
+								Name: "dev-2",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"model": {StringValue: ptr.To("A100")},
+								},
+							},
+						},
+					},
+				},
+			},
+			limit:    defaultLimit,
+			expected: 1,
+		},
+		"NonStringAttributeIgnored": {
+			slices: []*resourceapi.ResourceSlice{
+				{
+					Spec: resourceapi.ResourceSliceSpec{
+						Driver: "gpu.nvidia.com",
+						Devices: []resourceapi.Device{
+							{
+								Name: "dev-0",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: nil},
+								},
+							},
+						},
+					},
+				},
+			},
+			limit:    defaultLimit,
+			expected: 0,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			result := countMatchingDraDevices(tc.slices, tc.limit)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+func TestGetNodeResourceTargets(t *testing.T) {
+	gpuLimit := config.DraLimits{
+		Driver:               "gpu.nvidia.com",
+		DeviceAttributeName:  "productName",
+		DeviceAttributeValue: "A100",
+	}
+	networkLimit := config.DraLimits{
+		Driver:               "net.example.com",
+		DeviceAttributeName:  "speed",
+		DeviceAttributeValue: "100G",
+	}
+
+	tests := map[string]struct {
+		draLimits       []config.DraLimits
+		nodeSlices      []*resourceapi.ResourceSlice
+		templateSlices  []*resourceapi.ResourceSlice
+		useDraSnapshot  bool
+		expectedTargets []CustomResourceTarget
+	}{
+		"NoDRALimitsConfigured": {
+			draLimits:       nil,
+			expectedTargets: nil,
+		},
+		"DRALimitsWithMatchingDevicesViaDraSnapshot": {
+			draLimits: []config.DraLimits{gpuLimit},
+			nodeSlices: []*resourceapi.ResourceSlice{
+				{
+					Spec: resourceapi.ResourceSliceSpec{
+						Driver: "gpu.nvidia.com",
+						Devices: []resourceapi.Device{
+							{
+								Name: "gpu-0",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("A100")},
+								},
+							},
+							{
+								Name: "gpu-1",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("A100")},
+								},
+							},
+						},
+					},
+				},
+			},
+			useDraSnapshot: true,
+			expectedTargets: []CustomResourceTarget{
+				{ResourceType: gpuLimit.ResourceKey(), ResourceCount: 2},
+			},
+		},
+		"DRALimitsFallbackToNodeGroupTemplate": {
+			draLimits: []config.DraLimits{gpuLimit},
+			templateSlices: []*resourceapi.ResourceSlice{
+				{
+					Spec: resourceapi.ResourceSliceSpec{
+						Driver: "gpu.nvidia.com",
+						Devices: []resourceapi.Device{
+							{
+								Name: "gpu-0",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("A100")},
+								},
+							},
+							{
+								Name: "gpu-1",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("A100")},
+								},
+							},
+							{
+								Name: "gpu-2",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("A100")},
+								},
+							},
+						},
+					},
+				},
+			},
+			useDraSnapshot: false,
+			expectedTargets: []CustomResourceTarget{
+				{ResourceType: gpuLimit.ResourceKey(), ResourceCount: 3},
+			},
+		},
+		"MultipleDRALimitsPartialMatch": {
+			draLimits: []config.DraLimits{gpuLimit, networkLimit},
+			templateSlices: []*resourceapi.ResourceSlice{
+				{
+					Spec: resourceapi.ResourceSliceSpec{
+						Driver: "gpu.nvidia.com",
+						Devices: []resourceapi.Device{
+							{
+								Name: "gpu-0",
+								Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+									"productName": {StringValue: ptr.To("A100")},
+								},
+							},
+						},
+					},
+				},
+			},
+			useDraSnapshot: false,
+			expectedTargets: []CustomResourceTarget{
+				{ResourceType: gpuLimit.ResourceKey(), ResourceCount: 1},
+				{ResourceType: networkLimit.ResourceKey(), ResourceCount: 0},
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			node := buildTestNode("node1", true)
+			nodeGroup := "ng1"
+			machineName := fmt.Sprintf("%s_machine_template", nodeGroup)
+
+			provider := testprovider.NewTestCloudProviderBuilder().Build()
+
+			var templateNodeInfo *framework.NodeInfo
+			if tc.templateSlices != nil {
+				templateNodeInfo = framework.NewNodeInfo(buildTestNode("template", true), tc.templateSlices)
+			} else {
+				templateNodeInfo = framework.NewTestNodeInfo(buildTestNode("template", true))
+			}
+
+			provider.AddAutoprovisionedNodeGroup(nodeGroup, 0, 10, 1, machineName)
+			provider.AddNode(nodeGroup, node)
+			provider.SetMachineTemplates(map[string]*framework.NodeInfo{
+				machineName: templateNodeInfo,
+			})
+
+			autoscalingCtx := &ca_context.AutoscalingContext{
+				CloudProvider: provider,
+				TemplateNodeInfoRegistry: newMockTemplateNodeInfoRegistry(map[string]*framework.NodeInfo{
+					nodeGroup: templateNodeInfo,
+				}),
+			}
+			autoscalingCtx.AutoscalingOptions.DraTotal = tc.draLimits
+
+			if tc.useDraSnapshot {
+				nodeName := node.Name
+				for _, s := range tc.nodeSlices {
+					s.Spec.NodeName = &nodeName
+				}
+				autoscalingCtx.DraProvider = draprovider.NewProvider(
+					&fakeAllObjectsLister[*resourceapi.ResourceClaim]{},
+					&fakeAllObjectsLister[*resourceapi.ResourceSlice]{objects: tc.nodeSlices},
+					&fakeAllObjectsLister[*resourceapi.DeviceClass]{},
+				)
+			}
+
+			ng, err := provider.NodeGroupForNode(node)
+			assert.NoError(t, err)
+			assert.NotNil(t, ng)
+
+			processor := DraCustomResourcesProcessor{resourcesComparator: comparator.NewNodeResourcesComparator(noOpMetricsEmitter{})}
+			targets, autoscalerErr := processor.GetNodeResourceTargets(autoscalingCtx, node, ng)
+
+			assert.Nil(t, autoscalerErr)
+			assert.Equal(t, tc.expectedTargets, targets)
 		})
 	}
 }

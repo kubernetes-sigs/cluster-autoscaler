@@ -98,6 +98,92 @@ func TestParseSingleGpuLimit(t *testing.T) {
 	}
 }
 
+func TestParseSingleDraLimit(t *testing.T) {
+	type testcase struct {
+		input                string
+		expectError          bool
+		expectedLimits       config.DraLimits
+		expectedErrorMessage string
+	}
+
+	testcases := []testcase{
+		{
+			input:       "gpu.nvidia.com/productName=A100:0:64",
+			expectError: false,
+			expectedLimits: config.DraLimits{
+				Driver:               "gpu.nvidia.com",
+				DeviceAttributeName:  "productName",
+				DeviceAttributeValue: "A100",
+				Min:                  0,
+				Max:                  64,
+			},
+		},
+		{
+			input:       "driver.example/attr=val:0:0",
+			expectError: false,
+			expectedLimits: config.DraLimits{
+				Driver:               "driver.example",
+				DeviceAttributeName:  "attr",
+				DeviceAttributeValue: "val",
+				Min:                  0,
+				Max:                  0,
+			},
+		},
+		{
+			input:                "gpu.nvidia.com/productName:0:64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "/productName=A100:0:64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "gpu.nvidia.com/productName=A100:abc:64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "gpu.nvidia.com/productName=A100:-1:64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - lower limit \"-1\" must be non-negative",
+		},
+		{
+			input:                "gpu.nvidia.com/productName=A100:0:-1",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - upper limit \"-1\" must be non-negative",
+		},
+		{
+			input:                "gpu.nvidia.com/productName=A100:10:1",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - lower limit \"10\" is larger than upper limit \"1\"",
+		},
+		{
+			input:                "not-a-valid-format",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "gpu.nvidia.com/productName=A100",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+	}
+
+	for _, testcase := range testcases {
+		limits, err := parseSingleDraLimit(testcase.input)
+		if testcase.expectError {
+			assert.NotNil(t, err)
+			if err != nil {
+				assert.Equal(t, testcase.expectedErrorMessage, err.Error())
+			}
+		} else {
+			assert.Equal(t, testcase.expectedLimits, limits)
+		}
+	}
+}
+
 func TestParseShutdownGracePeriodsAndPriorities(t *testing.T) {
 	testCases := []struct {
 		name  string
