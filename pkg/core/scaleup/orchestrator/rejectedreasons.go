@@ -40,4 +40,6 @@ var (
 	// ScaleUpExecutionErrorReason means the node groups were considered as a scale-up candidates but the scale-up
 	// execution failed.
 	ScaleUpExecutionErrorReason = NewRejectedReasons("scale-up execution failed")
+	// NoScaleUpOptionsAvailableReason means no node groups were considered as a scale-up candidates.
+	NoScaleUpOptionsAvailableReason = NewRejectedReasons("no scale-up options available")
 )
