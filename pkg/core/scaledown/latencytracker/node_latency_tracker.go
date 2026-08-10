@@ -123,7 +123,11 @@ func (t *NodeLatencyTracker) recordAndCleanup(ctx context.Context, nodeName stri
 
 	delayReason := info.latestDelayReason
 	if delayReason == "" {
-		delayReason = "none"
+		if isRemoved {
+			delayReason = "none"
+		} else {
+			delayReason = "node_became_needed_again"
+		}
 	}
 
 	if latency > 0 {
@@ -177,5 +181,5 @@ func (t *NodeLatencyTracker) updateLatestDelayReasons(ctx context.Context, unrem
 }
 
 func isBlocker(reason simulator.UnremovableReason) bool {
-	return reason != simulator.NoReason && reason != simulator.NotUnneededLongEnough && reason != simulator.NotUnreadyLongEnough
+	return reason != simulator.NotUnneededLongEnough && reason != simulator.NotUnreadyLongEnough
 }
