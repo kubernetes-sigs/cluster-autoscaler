@@ -588,7 +588,7 @@ func parseMultipleDraLimits(flags MultiStringFlag) ([]config.DraLimits, error) {
 
 func parseSingleDraLimit(limits string) (config.DraLimits, error) {
 	re := regexp.MustCompile(
-		`^(?P<driver>[a-z0-9.-]+)/(?P<attr>[a-zA-Z_][a-zA-Z0-9_]*)=(?P<val>[^:]+):(?P<min>-?\d+):(?P<max>-?\d+)$`,
+		`^(?P<driver>[a-z0-9.-]+)/(?P<attr>[a-zA-Z_][a-zA-Z0-9_]*)=(?P<val>[^:=/]+):(?P<min>-?\d+):(?P<max>-?\d+)$`,
 	)
 	match := re.FindStringSubmatch(limits)
 	if match == nil {

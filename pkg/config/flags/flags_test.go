@@ -169,6 +169,76 @@ func TestParseSingleDraLimit(t *testing.T) {
 			expectError:          true,
 			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
 		},
+		{
+			input:                "gpu.nvidia.com//productName=A100:0:64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "gpu.nvidia.com/productName==A100:0:64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "gpu.nvidia.com/productName=A100:0:64:extra",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "gpu.nvidia.com/productName=:0:64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "gpu.nvidia.com/=A100:0:64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                ":0:64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "gpu.nvidia.com/productName=A100::64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "gpu.nvidia.com/productName=A100:0:",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "gpu.nvidia.com/product/Name=A100:0:64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "gpu.nvidia.com/product=Name=A100:0:64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "gpu/nvidia/productName=A100:0:64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "gpu.nvidia.com/productName=val=with=equals:0:64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
+		{
+			input:                "gpu.nvidia.com/productName=val/with/slashes:0:64",
+			expectError:          true,
+			expectedErrorMessage: "Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"",
+		},
 	}
 
 	for _, testcase := range testcases {
