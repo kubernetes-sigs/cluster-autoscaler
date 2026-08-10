@@ -128,6 +128,12 @@ func NewResourceLimiterFromAutoscalingOptions(options config.AutoscalingOptions)
 		minResources[gpuLimits.GpuType] = gpuLimits.Min
 		maxResources[gpuLimits.GpuType] = gpuLimits.Max
 	}
+
+	for _, draLimits := range options.DraTotal {
+		key := draLimits.ResourceKey()
+		minResources[key] = draLimits.Min
+		maxResources[key] = draLimits.Max
+	}
 	return cloudprovider.NewResourceLimiter(minResources, maxResources)
 }
 

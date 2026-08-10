@@ -19,6 +19,7 @@ package customresources
 import (
 	apiv1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 
@@ -117,10 +118,68 @@ func getNodeInfo(autoscalingCtx *ca_context.AutoscalingContext, ng cloudprovider
 	return ng.TemplateNodeInfo()
 }
 
-// GetNodeResourceTargets returns the resource targets for DRA resource slices, not implemented.
-func (p *DraCustomResourcesProcessor) GetNodeResourceTargets(_ *ca_context.AutoscalingContext, _ *apiv1.Node, _ cloudprovider.NodeGroup) ([]CustomResourceTarget, errors.AutoscalerError) {
-	// TODO(DRA): Figure out resource limits for DRA here.
-	return []CustomResourceTarget{}, nil
+// GetNodeResourceTargets returns the count of DRA devices on the node that match each configured DRA limit.
+func (p *DraCustomResourcesProcessor) GetNodeResourceTargets(autoscalingCtx *ca_context.AutoscalingContext, node *apiv1.Node, ng cloudprovider.NodeGroup) ([]CustomResourceTarget, errors.AutoscalerError) {
+	draLimits := autoscalingCtx.AutoscalingOptions.DraTotal
+	if len(draLimits) == 0 {
+		return nil, nil
+	}
+
+	slices, err := nodeResourceSlices(autoscalingCtx, node, ng)
+	if err != nil {
+		return nil, errors.ToAutoscalerError(errors.InternalError, err)
+	}
+
+	targets := make([]CustomResourceTarget, 0, len(draLimits))
+	for _, limit := range draLimits {
+		count := countMatchingDraDevices(slices, limit)
+		targets = append(targets, CustomResourceTarget{
+			ResourceType:  limit.ResourceKey(),
+			ResourceCount: count,
+		})
+	}
+	return targets, nil
+}
+
+func nodeResourceSlices(autoscalingCtx *ca_context.AutoscalingContext, node *apiv1.Node, ng cloudprovider.NodeGroup) ([]*resourceapi.ResourceSlice, error) {
+	if autoscalingCtx.DraProvider != nil {
+		draSnapshot, err := autoscalingCtx.DraProvider.Snapshot()
+		if err != nil {
+			return nil, err
+		}
+		if slices, found := draSnapshot.NodeResourceSlices(node.Name); found {
+			return slices, nil
+		}
+	}
+
+	if ng != nil {
+		nodeInfo, err := getNodeInfo(autoscalingCtx, ng)
+		if err != nil {
+			return nil, err
+		}
+		return nodeInfo.LocalResourceSlices, nil
+	}
+
+	return nil, nil
+}
+
+func countMatchingDraDevices(slices []*resourceapi.ResourceSlice, limit config.DraLimits) int64 {
+	var count int64
+	for _, slice := range slices {
+		if slice.Spec.Driver != limit.Driver {
+			continue
+		}
+		for _, device := range slice.Spec.Devices {
+			attr, ok := device.Attributes[resourceapi.QualifiedName(limit.DeviceAttributeName)]
+			if !ok {
+				continue
+			}
+			if attr.StringValue != nil && *attr.StringValue == limit.DeviceAttributeValue {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 // CleanUp cleans up processor's internal structures.

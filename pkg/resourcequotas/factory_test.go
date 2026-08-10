@@ -170,6 +170,71 @@ func TestNewMaxQuotasTracker(t *testing.T) {
 			},
 		},
 		{
+			name: "dra custom resource allowed operation",
+			crp: &fakeCustomResourcesProcessor{
+				NodeResourceTargets: func(n *apiv1.Node) []customresources.CustomResourceTarget {
+					if n.Name == "n1" {
+						return []customresources.CustomResourceTarget{
+							{
+								ResourceType:  "dra:gpu.nvidia.com/productName=A100",
+								ResourceCount: 4,
+							},
+						}
+					}
+					return nil
+				},
+			},
+			nodes: []*apiv1.Node{
+				test.BuildTestNode("n1", 1000, 2*units.GiB),
+				test.BuildTestNode("n2", 2000, 4*units.GiB),
+				test.BuildTestNode("n3", 3000, 8*units.GiB),
+			},
+			limits: map[string]int64{
+				"cpu":                                 12,
+				"memory":                              32 * units.GiB,
+				"dra:gpu.nvidia.com/productName=A100": 20,
+			},
+			newNode:   test.BuildTestNode("n4", 2000, 4*units.GiB),
+			nodeDelta: 2,
+			wantResult: &CheckDeltaResult{
+				AllowedDelta: 2,
+			},
+		},
+		{
+			name: "dra custom resource exceeded operation",
+			crp: &fakeCustomResourcesProcessor{
+				NodeResourceTargets: func(n *apiv1.Node) []customresources.CustomResourceTarget {
+					if n.Name == "n1" || n.Name == "n4" {
+						return []customresources.CustomResourceTarget{
+							{
+								ResourceType:  "dra:gpu.nvidia.com/productName=A100",
+								ResourceCount: 4,
+							},
+						}
+					}
+					return nil
+				},
+			},
+			nodes: []*apiv1.Node{
+				test.BuildTestNode("n1", 1000, 2*units.GiB),
+				test.BuildTestNode("n2", 2000, 4*units.GiB),
+				test.BuildTestNode("n3", 3000, 8*units.GiB),
+			},
+			limits: map[string]int64{
+				"cpu":                                 12,
+				"memory":                              32 * units.GiB,
+				"dra:gpu.nvidia.com/productName=A100": 4,
+			},
+			newNode:   test.BuildTestNode("n4", 2000, 4*units.GiB),
+			nodeDelta: 1,
+			wantResult: &CheckDeltaResult{
+				AllowedDelta: 0,
+				ExceededQuotas: []ExceededQuota{
+					{ID: "cluster-wide", ExceededResources: []string{"dra:gpu.nvidia.com/productName=A100"}},
+				},
+			},
+		},
+		{
 			name: "node filter config allowed operation",
 			nodeFilter: nodeExcludeFn(func(node *apiv1.Node) bool {
 				return node.Name == "n3"
@@ -390,6 +455,73 @@ func TestNewMinQuotasTracker(t *testing.T) {
 				AllowedDelta: 0,
 				ExceededQuotas: []ExceededQuota{
 					{ID: "min-quota", ExceededResources: []string{"gpu"}},
+				},
+			},
+		},
+		{
+			name: "dra custom resource allowed min operation",
+			crp: &fakeCustomResourcesProcessor{
+				NodeResourceTargets: func(n *apiv1.Node) []customresources.CustomResourceTarget {
+					if n.Name == "n1" || n.Name == "n2" {
+						return []customresources.CustomResourceTarget{
+							{
+								ResourceType:  "dra:gpu.nvidia.com/productName=A100",
+								ResourceCount: 4,
+							},
+						}
+					}
+					return nil
+				},
+			},
+			nodes: []*apiv1.Node{
+				test.BuildTestNode("n1", 1000, 2*units.GiB),
+				test.BuildTestNode("n2", 2000, 4*units.GiB),
+			},
+			quota: &FakeQuota{
+				Name:        "min-quota",
+				AppliesToFn: MatchEveryNode,
+				LimitsVal: map[string]int64{
+					"dra:gpu.nvidia.com/productName=A100": 4,
+				},
+			},
+			newNode:   test.BuildTestNode("n3", 1000, 2*units.GiB),
+			nodeDelta: 1,
+			wantResult: &CheckDeltaResult{
+				AllowedDelta: 1,
+			},
+		},
+		{
+			name: "dra custom resource exceeded min operation",
+			crp: &fakeCustomResourcesProcessor{
+				NodeResourceTargets: func(n *apiv1.Node) []customresources.CustomResourceTarget {
+					if n.Name == "n1" || n.Name == "n2" {
+						return []customresources.CustomResourceTarget{
+							{
+								ResourceType:  "dra:gpu.nvidia.com/productName=A100",
+								ResourceCount: 4,
+							},
+						}
+					}
+					return nil
+				},
+			},
+			nodes: []*apiv1.Node{
+				test.BuildTestNode("n1", 1000, 2*units.GiB),
+				test.BuildTestNode("n2", 2000, 4*units.GiB),
+			},
+			quota: &FakeQuota{
+				Name:        "min-quota",
+				AppliesToFn: MatchEveryNode,
+				LimitsVal: map[string]int64{
+					"dra:gpu.nvidia.com/productName=A100": 8,
+				},
+			},
+			newNode:   test.BuildTestNode("n1", 1000, 2*units.GiB),
+			nodeDelta: 1,
+			wantResult: &CheckDeltaResult{
+				AllowedDelta: 0,
+				ExceededQuotas: []ExceededQuota{
+					{ID: "min-quota", ExceededResources: []string{"dra:gpu.nvidia.com/productName=A100"}},
 				},
 			},
 		},

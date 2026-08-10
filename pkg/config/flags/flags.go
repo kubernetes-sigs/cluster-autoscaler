@@ -19,6 +19,7 @@ package flags
 import (
 	"flag"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -114,6 +115,7 @@ var (
 	coresTotal                  = flag.String("cores-total", minMaxFlagString(0, config.DefaultMaxClusterCores), "Minimum and maximum number of cores in cluster, in the format <min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers.")
 	memoryTotal                 = flag.String("memory-total", minMaxFlagString(0, config.DefaultMaxClusterMemory), "Minimum and maximum number of gigabytes of memory in cluster, in the format <min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers.")
 	gpuTotal                    = multiStringFlag("gpu-total", "Minimum and maximum number of different GPUs in cluster, in the format <gpu_type>:<min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers. Can be passed multiple times. CURRENTLY THIS FLAG ONLY WORKS ON GKE.")
+	draTotal                    = multiStringFlag("dra-total", "Minimum and maximum number of different DRA devices by attribute in cluster, in the format <driver>/<attribute-name>=<attribute-value>:<min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers. Can be passed multiple times. Only device attributes with string values are matched. CURRENTLY DOES NOT ACCOUNT FOR PARTITIONABLE DEVICES.")
 	cloudProviderFlag           = flag.String("cloud-provider", cloudBuilder.DefaultCloudProvider(),
 		"Cloud provider type. Available values: ["+strings.Join(cloudBuilder.AvailableCloudProviders(), ",")+"]")
 	maxBulkSoftTaintCount      = flag.Int("max-bulk-soft-taint-count", 10, "Maximum number of nodes that can be tainted/untainted PreferNoSchedule at the same time. Set to 0 to turn off such tainting.")
@@ -284,6 +286,11 @@ func createAutoscalingOptions() config.AutoscalingOptions {
 		klog.Fatalf("Failed to parse flags: %v", err)
 	}
 
+	parsedDraTotal, err := parseMultipleDraLimits(*draTotal)
+	if err != nil {
+		klog.Fatalf("Failed to parse flags: %v", err)
+	}
+
 	var parsedSchedConfig *scheduler_config.KubeSchedulerConfiguration
 	// if scheduler config flag was set by the user
 	if pflag.CommandLine.Changed(config.SchedulerConfigFileFlag) {
@@ -370,6 +377,7 @@ func createAutoscalingOptions() config.AutoscalingOptions {
 		MaxMemoryTotal:                   maxMemoryTotal,
 		MinMemoryTotal:                   minMemoryTotal,
 		GpuTotal:                         parsedGpuTotal,
+		DraTotal:                         parsedDraTotal,
 		NodeGroups:                       *nodeGroupsFlag,
 		EnforceNodeGroupMinSize:          *enforceNodeGroupMinSize,
 		ScaleDownDelayAfterAdd:           *scaleDownDelayAfterAdd,
@@ -564,6 +572,60 @@ func parseSingleGpuLimit(limits string) (config.GpuLimits, error) {
 		Max:     maxVal,
 	}
 	return parsedGpuLimits, nil
+}
+
+func parseMultipleDraLimits(flags MultiStringFlag) ([]config.DraLimits, error) {
+	parsedFlags := make([]config.DraLimits, 0, len(flags))
+	for _, flag := range flags {
+		parsedFlag, err := parseSingleDraLimit(flag)
+		if err != nil {
+			return nil, err
+		}
+		parsedFlags = append(parsedFlags, parsedFlag)
+	}
+	return parsedFlags, nil
+}
+
+func parseSingleDraLimit(limits string) (config.DraLimits, error) {
+	re := regexp.MustCompile(
+		`^(?P<driver>[a-z0-9.-]+)/(?P<attr>[a-zA-Z_][a-zA-Z0-9_]*)=(?P<val>[^:=/]+):(?P<min>-?\d+):(?P<max>-?\d+)$`,
+	)
+	match := re.FindStringSubmatch(limits)
+	if match == nil {
+		return config.DraLimits{}, fmt.Errorf("Failed to parse DRA limit - flag does not fit format:\"<driver>/<attribute>=<value>:<min>:<max>\"")
+	}
+
+	minStr := match[re.SubexpIndex("min")]
+	minVal, err := strconv.ParseInt(minStr, 10, 64)
+	if err != nil {
+		return config.DraLimits{}, fmt.Errorf("Failed to parse DRA limit - invalid min value %q: %w", minStr, err)
+	}
+
+	maxStr := match[re.SubexpIndex("max")]
+	maxVal, err := strconv.ParseInt(maxStr, 10, 64)
+	if err != nil {
+		return config.DraLimits{}, fmt.Errorf("Failed to parse DRA limit - invalid max value %q: %w", maxStr, err)
+	}
+
+	if minVal < 0 {
+		return config.DraLimits{}, fmt.Errorf("Failed to parse DRA limit - lower limit \"%d\" must be non-negative", minVal)
+	}
+
+	if maxVal < 0 {
+		return config.DraLimits{}, fmt.Errorf("Failed to parse DRA limit - upper limit \"%d\" must be non-negative", maxVal)
+	}
+
+	if minVal > maxVal {
+		return config.DraLimits{}, fmt.Errorf("Failed to parse DRA limit - lower limit \"%d\" is larger than upper limit \"%d\"", minVal, maxVal)
+	}
+
+	return config.DraLimits{
+		Driver:               match[re.SubexpIndex("driver")],
+		DeviceAttributeName:  match[re.SubexpIndex("attr")],
+		DeviceAttributeValue: match[re.SubexpIndex("val")],
+		Min:                  minVal,
+		Max:                  maxVal,
+	}, nil
 }
 
 // parseShutdownGracePeriodsAndPriorities parse priorityGracePeriodStr and returns an array of ShutdownGracePeriodByPodPriority if succeeded.

@@ -17,6 +17,7 @@ limitations under the License.
 package config
 
 import (
+	"fmt"
 	"time"
 
 	kubelet_config "k8s.io/kubernetes/pkg/kubelet/apis/config"
@@ -32,6 +33,25 @@ type GpuLimits struct {
 	Min int64
 	// Upper bound on number of GPUs of given type in cluster
 	Max int64
+}
+
+// DraLimits define lower and upper bound on DRA devices with a certain attribute in cluster.
+type DraLimits struct {
+	// Driver is the name of the DRA plugin driver (e.g. gpu.nvidia.com)
+	Driver string
+	// DeviceAttributeName is the name of attribute with which devices from the driver will be filtered to count.
+	DeviceAttributeName string
+	// DeviceAttributeValue is the value of the device attribute which devices will be filtered by in the driver.
+	DeviceAttributeValue string
+	// Min is the lower bound of the number of devices with the given attribute limitations in cluster.
+	Min int64
+	// Max is the upper bound of the number of devices with the given attribute limitations in cluster.
+	Max int64
+}
+
+// ResourceKey returns the resource key used to identify this DRA limit in the ResourceLimiter.
+func (d DraLimits) ResourceKey() string {
+	return fmt.Sprintf("dra:%s/%s=%s", d.Driver, d.DeviceAttributeName, d.DeviceAttributeValue)
 }
 
 // NodeGroupAutoscalingOptions contain various options to customize how autoscaling of
@@ -120,6 +140,8 @@ type AutoscalingOptions struct {
 	MinMemoryTotal int64
 	// GpuTotal is a list of strings with configuration of min/max limits for different GPUs.
 	GpuTotal []GpuLimits
+	// DraTotal is a list of configurations of the upper & lower bounds on DRA devices by attribute.
+	DraTotal []DraLimits
 	// NodeGroupAutoDiscovery represents one or more definition(s) of node group auto-discovery
 	NodeGroupAutoDiscovery []string
 	// EstimatorName is the estimator used to estimate the number of needed nodes in scale up.
