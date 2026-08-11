@@ -342,6 +342,8 @@ func (data *internalDeltaSnapshotData) addPodInfo(podInfo schedulerinterface.Pod
 	ni.AddPodInfo(podInfo)
 
 	data.addToPodCaches(ni, podInfo.GetPod())
+	// Invalidate nodeInfoList - keeping it stable makes binpacking scan the full node list for every pod.
+	data.nodeInfoList = nil
 	data.pvcNamespaceMap = nil
 	return nil
 }
