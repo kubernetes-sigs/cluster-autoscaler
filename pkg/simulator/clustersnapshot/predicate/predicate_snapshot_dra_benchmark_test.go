@@ -414,3 +414,117 @@ func BenchmarkScheduleRevert(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkDRAScaleUp models a CA scale-up pass on a DRA cluster that already runs a lot of
+// DRA workload: the snapshot carries backgroundClaims allocated claims, and the pods being
+// placed own UNALLOCATED claims, so the scheduler has to run the structured allocator. That
+// path calls GatherAllocatedState, which walks every claim in the snapshot on every attempt.
+func BenchmarkDRAScaleUp(b *testing.B) {
+	featuretesting.SetFeatureGateDuringTest(b, feature.DefaultFeatureGate, features.DynamicResourceAllocation, true)
+
+	const nodesProbed = 25
+	const podsPerNode = 4
+	const devicesPerSlice = 32
+	const deviceClassName = "defaultClass"
+	const driverName = "driver.foo.com"
+
+	for _, backgroundClaims := range []int{1000, 5000, 20000} {
+		b.Run(fmt.Sprintf("claims=%d", backgroundClaims), func(b *testing.B) {
+			deviceClasses := map[string]*resourceapi.DeviceClass{
+				deviceClassName: {ObjectMeta: metav1.ObjectMeta{Name: deviceClassName, UID: "defaultClassUid"}},
+			}
+
+			// Nodes we will probe, each exposing a slice of free devices.
+			nodeInfos := make([]*framework.NodeInfo, nodesProbed)
+			pendingPods := make([][]*apiv1.Pod, nodesProbed)
+			pendingClaims := make([][]*resourceapi.ResourceClaim, nodesProbed)
+			for nodeIndex := 0; nodeIndex < nodesProbed; nodeIndex++ {
+				node := BuildTestNode(fmt.Sprintf("node-%d", nodeIndex), 10000, 10000)
+				nodeSlice := createTestResourceSlice(node.Name, devicesPerSlice, 1, driverName)
+				nodeInfos[nodeIndex] = framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{nodeSlice})
+
+				pods := make([]*apiv1.Pod, podsPerNode)
+				claims := make([]*resourceapi.ResourceClaim, podsPerNode)
+				for podIndex := 0; podIndex < podsPerNode; podIndex++ {
+					// Deliberately NOT allocated - the scheduler has to allocate it.
+					claim := createTestResourceClaim(1, 1, driverName, deviceClassName)
+					pod := BuildTestPod(
+						fmt.Sprintf("pending-%d-%d", nodeIndex, podIndex),
+						1, 1,
+						WithResourceClaim(claim.Name, claim.Name, ""),
+					)
+					claims[podIndex] = drautils.TestClaimWithPodOwnership(pod, claim)
+					pods[podIndex] = pod
+				}
+				pendingPods[nodeIndex] = pods
+				pendingClaims[nodeIndex] = claims
+			}
+
+			// Claims of DRA workload already running in the cluster. These bulk up the
+			// resourceClaims PatchSet without taking devices from the probed nodes.
+			bgNode := BuildTestNode("bg-node", 10000, 10000)
+			bgSlice := createTestResourceSlice(bgNode.Name, backgroundClaims, 1, driverName)
+			background := make([]*resourceapi.ResourceClaim, backgroundClaims)
+			for i := 0; i < backgroundClaims; i++ {
+				claim := createTestResourceClaim(1, 1, driverName, deviceClassName)
+				allocated, satisfied := allocateResourceSlicesForClaim(claim, bgNode.Name, bgSlice)
+				if !satisfied {
+					b.Fatalf("setup: background claim allocation not satisfied")
+				}
+				background[i] = allocated
+			}
+
+			snapshotFactory := snapshots["basic"]
+
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				iterNodeInfos := make([]*framework.NodeInfo, nodesProbed)
+				for nodeIndex := range nodeInfos {
+					iterNodeInfos[nodeIndex] = nodeInfos[nodeIndex].DeepCopy()
+				}
+				iterClaims := make([][]*resourceapi.ResourceClaim, nodesProbed)
+				for nodeIndex := range pendingClaims {
+					cs := make([]*resourceapi.ResourceClaim, podsPerNode)
+					for j, c := range pendingClaims[nodeIndex] {
+						cs[j] = c.DeepCopy()
+					}
+					iterClaims[nodeIndex] = cs
+				}
+				b.StartTimer()
+
+				snapshot, err := snapshotFactory()
+				if err != nil {
+					b.Fatalf("failed to create snapshot: %v", err)
+				}
+				draSnapshot := drasnapshot.NewSnapshot(nil, nil, nil, deviceClasses)
+				if err := draSnapshot.AddClaims(background); err != nil {
+					b.Fatalf("failed to add background claims: %v", err)
+				}
+				for nodeIndex := range iterClaims {
+					if err := draSnapshot.AddClaims(iterClaims[nodeIndex]); err != nil {
+						b.Fatalf("failed to add pending claims: %v", err)
+					}
+				}
+				if err := snapshot.SetClusterState(nil, nil, draSnapshot, nil); err != nil {
+					b.Fatalf("failed to set cluster state: %v", err)
+				}
+
+				// Binpacking pass: probe each node, then roll the attempt back.
+				for nodeIndex := 0; nodeIndex < nodesProbed; nodeIndex++ {
+					nodeInfo := iterNodeInfos[nodeIndex]
+					snapshot.Fork()
+					if err := snapshot.AddNodeInfo(nodeInfo); err != nil {
+						b.Fatalf("failed to add node info: %v", err)
+					}
+					for podIndex := 0; podIndex < podsPerNode; podIndex++ {
+						pod := pendingPods[nodeIndex][podIndex]
+						if err := snapshot.SchedulePod(pod, nodeInfo.Node().Name); err != nil {
+							b.Fatalf("failed to schedule %s: %v", pod.Name, err)
+						}
+					}
+					snapshot.Revert()
+				}
+			}
+		})
+	}
+}
