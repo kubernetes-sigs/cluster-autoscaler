@@ -116,8 +116,8 @@ func TestGetGpuInfoForMetrics(t *testing.T) {
 	nodeGroupWithoutGpu := provider.BuildNodeGroup("ng-without-gpu", 1, 10, 1, false, false, "n1-standard-1", nil)
 
 	templates := map[string]*framework.NodeInfo{
-		nodeGroupWithoutGpu.Id(): framework.NewNodeInfo(templateWithoutGpu, nil),
-		nodeGroupWithGpu.Id():    framework.NewNodeInfo(templateWithGpu, nil),
+		nodeGroupWithoutGpu.Id(): framework.NewNodeInfo(templateWithoutGpu, nil, nil),
+		nodeGroupWithGpu.Id():    framework.NewNodeInfo(templateWithGpu, nil, nil),
 	}
 
 	provider.SetMachineTemplates(templates)

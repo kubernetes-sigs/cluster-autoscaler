@@ -3573,7 +3573,7 @@ func TestStaticAutoscalerWithNodeDeclaredFeatures(t *testing.T) {
 			assert.NoError(t, err)
 
 			for _, node := range tc.initialNodes {
-				nodeInfo := framework.NewNodeInfo(node, nil)
+				nodeInfo := framework.NewNodeInfo(node, nil, nil)
 				err = autoscalingCtx.ClusterSnapshot.AddNodeInfo(nodeInfo)
 				assert.NoError(t, err)
 			}

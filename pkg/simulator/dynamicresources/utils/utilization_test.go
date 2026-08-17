@@ -58,7 +58,7 @@ func TestDynamicResourceUtilization(t *testing.T) {
 		{
 			testName: "single slice, single pool, 6/10 devices used",
 			nodeInfo: framework.NewNodeInfo(node,
-				testResourceSlices(fooDriver, "pool1", "node", 0, 10, 1),
+				testResourceSlices(fooDriver, "pool1", "node", 0, 10, 1), nil,
 				testPodsWithClaims(fooDriver, "pool1", "node", 6, 1, false, 0)...,
 			),
 			wantUtilization: map[string]map[string]float64{
@@ -76,7 +76,7 @@ func TestDynamicResourceUtilization(t *testing.T) {
 					testResourceSlices(fooDriver, "pool1", "node", 0, 10, 2),
 					testResourceSlices(fooDriver, "pool2", "node", 0, 20, 5),
 					testResourceSlices(barDriver, "pool1", "node", 0, 8, 2),
-				),
+				), nil,
 				mergeLists(
 					testPodsWithClaims(fooDriver, "pool1", "node", 6, 2, false, 0),
 					testPodsWithClaims(fooDriver, "pool2", "node", 18, 3, false, 0),
@@ -102,7 +102,7 @@ func TestDynamicResourceUtilization(t *testing.T) {
 					testResourceSlices(fooDriver, "pool1", "node", 0, 10, 2),
 					testResourceSlices(fooDriver, "pool1", "node", 1, 20, 2),
 					testResourceSlices(fooDriver, "pool1", "node", 2, 30, 2),
-				),
+				), nil,
 				testPodsWithClaims(fooDriver, "pool1", "node", 6, 2, false, 0)...,
 			),
 			wantUtilization: map[string]map[string]float64{
@@ -120,7 +120,7 @@ func TestDynamicResourceUtilization(t *testing.T) {
 					testResourceSlices(fooDriver, "pool1", "node", 0, 10, 2),
 					testResourceSlices(fooDriver, "pool1", "node", 1, 20, 2),
 					testResourceSlices(fooDriver, "pool1", "node", 2, 30, 2)[:14],
-				),
+				), nil,
 				testPodsWithClaims(fooDriver, "pool1", "node", 6, 2, false, 0)...,
 			),
 			wantErr: cmpopts.AnyError,
@@ -132,7 +132,7 @@ func TestDynamicResourceUtilization(t *testing.T) {
 					testResourceSlices(fooDriver, "pool1", "node", 0, 10, 2)[:3],
 					testResourceSlices(fooDriver, "pool1", "node", 1, 20, 2)[:7],
 					testResourceSlices(fooDriver, "pool1", "node", 2, 30, 2),
-				),
+				), nil,
 				testPodsWithClaims(fooDriver, "pool1", "node", 6, 2, false, 0)...,
 			),
 			wantUtilization: map[string]map[string]float64{
@@ -146,7 +146,7 @@ func TestDynamicResourceUtilization(t *testing.T) {
 		{
 			testName: "partitionable devices, 2/4 partitions used",
 			nodeInfo: framework.NewNodeInfo(node,
-				testResourceSlicesWithPartitionableDevices(fooDriver, "pool1", "node", 1, 4, 2, "gpu-0"),
+				testResourceSlicesWithPartitionableDevices(fooDriver, "pool1", "node", 1, 4, 2, "gpu-0"), nil,
 				testPodsWithCustomClaims("pod", fooDriver, "pool1", "node", []string{"gpu-0-partition-0", "gpu-0-partition-1"})...,
 			),
 			wantUtilization: map[string]map[string]float64{
@@ -160,7 +160,7 @@ func TestDynamicResourceUtilization(t *testing.T) {
 		{
 			testName: "partitionable devices, multiple pods, 2/4 partitions used",
 			nodeInfo: framework.NewNodeInfo(node,
-				testResourceSlicesWithPartitionableDevices(fooDriver, "pool1", "node", 1, 4, 2, "gpu-0"),
+				testResourceSlicesWithPartitionableDevices(fooDriver, "pool1", "node", 1, 4, 2, "gpu-0"), nil,
 				mergeLists(
 					testPodsWithCustomClaims("pod-0", fooDriver, "pool1", "node", []string{"gpu-0-partition-0"}),
 					testPodsWithCustomClaims("pod-1", fooDriver, "pool1", "node", []string{"gpu-0-partition-1"}),
@@ -181,7 +181,7 @@ func TestDynamicResourceUtilization(t *testing.T) {
 					testResourceSlicesWithPartitionableDevices(fooDriver, "pool0", "node", 1, 4, 2, "gpu-0"),
 					testResourceSlicesWithPartitionableDevices(fooDriver, "pool1", "node", 1, 4, 2, "gpu-0"),
 					testResourceSlicesWithPartitionableDevices(fooDriver, "pool2", "node", 1, 4, 2, "gpu-1"),
-				),
+				), nil,
 				mergeLists(
 					testPodsWithCustomClaims("pod0", fooDriver, "pool0", "node", []string{"gpu-0-partition-0", "gpu-0-partition-1"}),
 					testPodsWithCustomClaims("pod1", fooDriver, "pool1", "node", []string{"gpu-0"}),
@@ -213,7 +213,7 @@ func TestDynamicResourceUtilization(t *testing.T) {
 					map[string]resource.Quantity{
 						"cpu": resource.MustParse("1"),
 					},
-				),
+				), nil,
 				testPodsWithCustomClaims("pod", fooDriver, "pool1", "node", []string{"gpu-0-uneven-partition"})...,
 			),
 			wantUtilization: map[string]map[string]float64{
@@ -227,7 +227,7 @@ func TestDynamicResourceUtilization(t *testing.T) {
 		{
 			testName: "multi-GPU partitionable devices, 2/8 partitions used",
 			nodeInfo: framework.NewNodeInfo(node,
-				testResourceSlicesWithPartitionableDevices(fooDriver, "pool1", "node", 1, 4, 2, "gpu-0", "gpu-1"),
+				testResourceSlicesWithPartitionableDevices(fooDriver, "pool1", "node", 1, 4, 2, "gpu-0", "gpu-1"), nil,
 				testPodsWithCustomClaims("pod", fooDriver, "pool1", "node", []string{"gpu-0-partition-0", "gpu-0-partition-1"})...,
 			),
 			wantUtilization: map[string]map[string]float64{
@@ -241,7 +241,7 @@ func TestDynamicResourceUtilization(t *testing.T) {
 		{
 			testName: "Single Pod with AdminAccess ResourceClaim doesn't count for utilization",
 			nodeInfo: framework.NewNodeInfo(node,
-				testResourceSlices(fooDriver, "pool1", "node", 0, 10, 1),
+				testResourceSlices(fooDriver, "pool1", "node", 0, 10, 1), nil,
 				testPodsWithClaims(fooDriver, "pool1", "node", 6, 1, true, 0)...,
 			),
 			wantUtilization: map[string]map[string]float64{
@@ -255,7 +255,7 @@ func TestDynamicResourceUtilization(t *testing.T) {
 		{
 			testName: "Multiple Pods with AdminAccess ResourceClaims don't count for utilization",
 			nodeInfo: framework.NewNodeInfo(node,
-				testResourceSlices(fooDriver, "pool1", "node", 0, 10, 1),
+				testResourceSlices(fooDriver, "pool1", "node", 0, 10, 1), nil,
 				mergeLists(
 					testPodsWithClaims(fooDriver, "pool1", "node", 6, 1, true, 0),
 					testPodsWithClaims(fooDriver, "pool1", "node", 6, 1, false, 6),
@@ -272,7 +272,7 @@ func TestDynamicResourceUtilization(t *testing.T) {
 		{
 			testName: "Pod with mixed AdminAccess requests counts only non-admin",
 			nodeInfo: framework.NewNodeInfo(node,
-				testResourceSlices(fooDriver, "pool1", "node", 0, 10, 1),
+				testResourceSlices(fooDriver, "pool1", "node", 0, 10, 1), nil,
 				testPodsWithMixedAdminAccessClaims(fooDriver, "pool1", "node", 6, []bool{true, true, false, false, false, false}, 0)...,
 			),
 			wantUtilization: map[string]map[string]float64{

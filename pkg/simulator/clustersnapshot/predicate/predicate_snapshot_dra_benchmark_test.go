@@ -274,7 +274,7 @@ func BenchmarkScheduleRevert(b *testing.B) {
 		nodeName := fmt.Sprintf("node-%d", nodeIndex)
 		node := BuildTestNode(nodeName, 10000, 10000)
 		nodeSlice := createTestResourceSlice(node.Name, devicesPerSlice, 1, driverName)
-		nodeInfo := framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{nodeSlice})
+		nodeInfo := framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{nodeSlice}, nil)
 
 		sharedClaim := createTestResourceClaim(devicesPerSlice, 1, driverName, deviceClassName)
 		sharedClaim, satisfied := allocateResourceSlicesForClaim(sharedClaim, nodeName, nodeSlice)

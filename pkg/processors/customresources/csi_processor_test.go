@@ -278,8 +278,7 @@ func TestFilterOutNodesWithUnreadyCSIResources(t *testing.T) {
 			for ng, nodes := range tc.nodeGroupsAllNodes {
 				machineName := fmt.Sprintf("%s_machine_template", ng)
 				if csiNode, found := tc.nodeGroupsTemplatesCSINode[ng]; found {
-					machineTemplates[machineName] = framework.NewNodeInfo(buildTestNode(fmt.Sprintf("%s_template", ng), true), nil).
-						SetCSINode(csiNode)
+					machineTemplates[machineName] = framework.NewNodeInfo(buildTestNode(fmt.Sprintf("%s_template", ng), true), nil, csiNode)
 				} else {
 					machineTemplates[machineName] = framework.NewTestNodeInfo(buildTestNode(fmt.Sprintf("%s_template", ng), true))
 				}

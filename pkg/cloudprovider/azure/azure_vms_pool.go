@@ -501,7 +501,7 @@ func (vmPool *VMPool) TemplateNodeInfo() (*framework.NodeInfo, error) {
 		return nil, err
 	}
 
-	nodeInfo := framework.NewNodeInfo(node, nil, framework.NewPodInfo(cloudprovider.BuildKubeProxy(vmPool.agentPoolName), nil))
+	nodeInfo := framework.NewNodeInfo(node, nil, nil, framework.NewPodInfo(cloudprovider.BuildKubeProxy(vmPool.agentPoolName), nil))
 
 	return nodeInfo, nil
 }

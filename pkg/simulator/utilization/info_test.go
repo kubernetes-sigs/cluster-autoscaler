@@ -276,16 +276,16 @@ func TestCalculateWithDynamicResources(t *testing.T) {
 		},
 	}
 	nodeInfoNoDra := framework.NewTestNodeInfo(node, pod1, pod2)
-	nodeInfoSlicesNoClaims := framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{resourceSlice1}, framework.NewPodInfo(pod1, nil), framework.NewPodInfo(pod2, nil))
-	nodeInfoSlicesAndClaimsPool1Higher := framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2},
+	nodeInfoSlicesNoClaims := framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{resourceSlice1}, nil, framework.NewPodInfo(pod1, nil), framework.NewPodInfo(pod2, nil))
+	nodeInfoSlicesAndClaimsPool1Higher := framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2}, nil,
 		framework.NewPodInfo(pod1, []*resourceapi.ResourceClaim{pod1Claim1, pod1Claim2}),
 		framework.NewPodInfo(pod2, []*resourceapi.ResourceClaim{pod2Claim}))
-	nodeInfoSlicesAndClaimsPool2Higher := framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2},
+	nodeInfoSlicesAndClaimsPool2Higher := framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2}, nil,
 		framework.NewPodInfo(pod2, []*resourceapi.ResourceClaim{pod2Claim}))
-	nodeInfoIncompleteSlices := framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2, incompleteResourceSlice},
+	nodeInfoIncompleteSlices := framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2, incompleteResourceSlice}, nil,
 		framework.NewPodInfo(pod1, []*resourceapi.ResourceClaim{pod1Claim1, pod1Claim2}),
 		framework.NewPodInfo(pod2, []*resourceapi.ResourceClaim{pod2Claim}))
-	nodeInfoGpuAndDra := framework.NewNodeInfo(gpuNode, []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2},
+	nodeInfoGpuAndDra := framework.NewNodeInfo(gpuNode, []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2}, nil,
 		framework.NewPodInfo(pod1, []*resourceapi.ResourceClaim{pod1Claim1, pod1Claim2}),
 		framework.NewPodInfo(pod2, []*resourceapi.ResourceClaim{pod2Claim}))
 
