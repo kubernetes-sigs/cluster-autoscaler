@@ -686,6 +686,84 @@ func TestPatchSetCache(t *testing.T) {
 	}
 }
 
+func TestPatchSetWalkCurrentPatchKeys(t *testing.T) {
+	tests := map[string]struct {
+		patchLayers []map[string]*int
+		wantKeys    map[string]bool
+	}{
+		"EmptyPatchSet": {
+			patchLayers: []map[string]*int{},
+			wantKeys:    map[string]bool{},
+		},
+		"SingleLayer": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2)}},
+			wantKeys:    map[string]bool{"a": true, "b": true},
+		},
+		"TopLayerEmpty": {
+			patchLayers: []map[string]*int{
+				{"a": ptr.To(1), "b": ptr.To(2)},
+				{}},
+			wantKeys: map[string]bool{},
+		},
+		"TopLayerOnly_LowerLayersIgnored": {
+			patchLayers: []map[string]*int{
+				{"a": ptr.To(1), "b": ptr.To(2)},
+				{"c": ptr.To(3)}},
+			wantKeys: map[string]bool{"c": true},
+		},
+		"ModificationsAndDeletions": {
+			patchLayers: []map[string]*int{
+				{"a": ptr.To(1), "b": ptr.To(2)},
+				{"c": ptr.To(3), "b": nil}},
+			wantKeys: map[string]bool{"c": true, "b": true},
+		},
+		"OnlyDeletions": {
+			patchLayers: []map[string]*int{
+				{"a": ptr.To(1), "b": ptr.To(2)},
+				{"a": nil, "b": nil}},
+			wantKeys: map[string]bool{"a": true, "b": true},
+		},
+	}
+
+	for testName, test := range tests {
+		t.Run(testName, func(t *testing.T) {
+			patchset := buildTestPatchSet(t, test.patchLayers)
+
+			gotKeys := map[string]bool{}
+			patchset.WalkCurrentPatchKeys(func(key string) bool {
+				if gotKeys[key] {
+					t.Errorf("WalkCurrentPatchKeys(): key %q visited more than once", key)
+				}
+				gotKeys[key] = true
+				return true
+			})
+
+			if !maps.Equal(gotKeys, test.wantKeys) {
+				t.Errorf("WalkCurrentPatchKeys() visited %v, want %v", gotKeys, test.wantKeys)
+			}
+		})
+	}
+}
+
+func TestPatchSetWalkCurrentPatchKeysEarlyStop(t *testing.T) {
+	// Modifications and deletions are walked as two separate ranges, so stopping has to
+	// be honoured in both - a key in either one is enough to end the walk.
+	patchset := buildTestPatchSet(t, []map[string]*int{
+		{"base": ptr.To(0)},
+		{"m1": ptr.To(1), "m2": ptr.To(2), "d1": nil, "d2": nil},
+	})
+
+	visited := 0
+	patchset.WalkCurrentPatchKeys(func(string) bool {
+		visited++
+		return false
+	})
+
+	if visited != 1 {
+		t.Errorf("WalkCurrentPatchKeys() visited %d keys after the callback returned false, want 1", visited)
+	}
+}
+
 func buildTestPatchSet[K comparable, V any](t *testing.T, patchLayers []map[K]*V) *PatchSet[K, V] {
 	t.Helper()
 

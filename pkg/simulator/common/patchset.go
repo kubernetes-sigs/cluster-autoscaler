@@ -222,6 +222,28 @@ func (p *PatchSet[K, V]) InCurrentPatch(key K) bool {
 	return found
 }
 
+// WalkCurrentPatchKeys calls f for every key modified or deleted in the topmost patch
+// layer, stopping early if f returns false. These are exactly the keys whose effective
+// value can change when the layer is reverted, which lets callers maintaining state
+// derived from the PatchSet refresh only what a Revert affects.
+func (p *PatchSet[K, V]) WalkCurrentPatchKeys(f func(K) bool) {
+	if len(p.patches) == 0 {
+		return
+	}
+
+	currentPatch := p.patches[len(p.patches)-1]
+	for key := range currentPatch.modified {
+		if !f(key) {
+			return
+		}
+	}
+	for key := range currentPatch.deleted {
+		if !f(key) {
+			return
+		}
+	}
+}
+
 // totalKeyCount calculates an approximate total number of key-value
 // pairs across all patches taking the highest number of records possible
 // this calculation does not consider deleted records - thus it is likely
