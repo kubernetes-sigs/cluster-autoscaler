@@ -44,44 +44,45 @@ func (ct snapshotClaimTracker) Get(namespace, claimName string) (*resourceapi.Re
 	return claim, nil
 }
 
+// ListAllAllocatedDevices returns every device consumed by the ResourceClaims in the
+// snapshot.
+//
+// The returned set is the snapshot's own rather than a copy: it must not be modified, and
+// it is only valid until the next change to the snapshot's ResourceClaims. Handing it over
+// directly is what keeps the per-attempt walk over every claim off this path. The scheduler
+// honours that - the DRA plugin folds the set into a structured.AllocatedState and passes it
+// to structured.NewAllocator, which only ever reads it (Set.Has, range, map lookup).
 func (ct snapshotClaimTracker) ListAllAllocatedDevices() (sets.Set[structured.DeviceID], error) {
-	result := sets.New[structured.DeviceID]()
-	for _, claim := range ct.snapshot.listResourceClaims() {
-		foreachAllocatedDevice(claim,
-			func(deviceID structured.DeviceID) {
-				result.Insert(deviceID)
-			}, false, func(structured.SharedDeviceID) {}, func(capacity structured.DeviceConsumedCapacity) {})
-	}
-	return result, nil
+	tracker := ct.snapshot.allocationTracker()
+	tracker.ensureBuilt(ct.snapshot.walkResourceClaims)
+	return tracker.allDevices.set, nil
 }
 
+// GatherAllocatedState returns the state of all devices consumed by the ResourceClaims in
+// the snapshot.
+//
+// The scheduler calls this once per PreFilter, that is once per pod scheduling attempt, so
+// the state is maintained as ResourceClaims change rather than recomputed here.
+//
+// The returned collections are the snapshot's own rather than copies: they must not be
+// modified, and they are only valid until the next change to the snapshot's ResourceClaims.
+// The DRA scheduler plugin dereferences the AllocatedState into structured.NewAllocator, and
+// the allocator only ever reads the collections (Set.Has, range, map lookup), so nothing
+// downstream writes through the alias. The AllocatedState wrapper itself is built fresh on
+// every call, so reassigning its fields below is safe.
 func (ct snapshotClaimTracker) GatherAllocatedState() (*structured.AllocatedState, error) {
-	allocatedDevices := sets.New[structured.DeviceID]()
-	allocatedSharedDeviceIDs := sets.New[structured.SharedDeviceID]()
-	aggregatedCapacity := structured.NewConsumedCapacityCollection()
+	tracker := ct.snapshot.allocationTracker()
+	tracker.ensureBuilt(ct.snapshot.walkResourceClaims)
 
-	enabledConsumableCapacity := utilfeature.DefaultFeatureGate.Enabled(features.DRAConsumableCapacity)
-
-	for _, claim := range ct.snapshot.listResourceClaims() {
-		foreachAllocatedDevice(claim,
-			func(deviceID structured.DeviceID) {
-				allocatedDevices.Insert(deviceID)
-			},
-			enabledConsumableCapacity,
-			func(sharedDeviceID structured.SharedDeviceID) {
-				allocatedSharedDeviceIDs.Insert(sharedDeviceID)
-			},
-			func(capacity structured.DeviceConsumedCapacity) {
-				aggregatedCapacity.Insert(capacity)
-			},
-		)
+	state := tracker.allocatedState()
+	if !utilfeature.DefaultFeatureGate.Enabled(features.DRAConsumableCapacity) {
+		// Without the feature the shared devices are reported as ordinary allocated ones,
+		// matching what foreachAllocatedDevice does when told sharing is disabled.
+		state.AllocatedDevices = tracker.allDevices.set
+		state.AllocatedSharedDeviceIDs = sets.New[structured.SharedDeviceID]()
+		state.AggregatedCapacity = structured.NewConsumedCapacityCollection()
 	}
-
-	return &structured.AllocatedState{
-		AllocatedDevices:         allocatedDevices,
-		AllocatedSharedDeviceIDs: allocatedSharedDeviceIDs,
-		AggregatedCapacity:       aggregatedCapacity,
-	}, nil
+	return state, nil
 }
 
 func (ct snapshotClaimTracker) SignalClaimPendingAllocation(claimUid types.UID, allocatedClaim *resourceapi.ResourceClaim) error {
@@ -143,11 +144,7 @@ func foreachAllocatedDevice(claim *resourceapi.ResourceClaim,
 	enabledConsumableCapacity bool,
 	sharedDeviceCallback func(structured.SharedDeviceID),
 	consumedCapacityCallback func(structured.DeviceConsumedCapacity)) {
-	if claim.Status.Allocation == nil {
-		return
-	}
-	for _, result := range claim.Status.Allocation.Devices.Results {
-		deviceID := structured.MakeDeviceID(result.Driver, result.Pool, result.Device)
+	forEachAllocatedResult(claim, func(deviceID structured.DeviceID, result *resourceapi.DeviceRequestAllocationResult) {
 
 		// Execute sharedDeviceCallback and consumedCapacityCallback correspondingly
 		// if DRAConsumableCapacity feature is enabled
@@ -160,11 +157,27 @@ func foreachAllocatedDevice(claim *resourceapi.ResourceClaim,
 					deviceConsumedCapacity := structured.NewDeviceConsumedCapacity(deviceID, result.ConsumedCapacity)
 					consumedCapacityCallback(deviceConsumedCapacity)
 				}
-				continue
+				return
 			}
 		}
 
 		// Otherwise, execute dedicatedDeviceCallback
 		dedicatedDeviceCallback(deviceID)
+	})
+}
+
+// forEachAllocatedResult invokes the provided callback for each allocation result in the
+// claim that counts as consuming its device, along with the DeviceID derived from it.
+//
+// This is the single place where an allocation result is turned into a DeviceID, so that
+// foreachAllocatedDevice and allocatedStateTracker cannot drift apart on which devices count
+// as allocated.
+func forEachAllocatedResult(claim *resourceapi.ResourceClaim, callback func(structured.DeviceID, *resourceapi.DeviceRequestAllocationResult)) {
+	if claim.Status.Allocation == nil {
+		return
+	}
+	for resultIndex := range claim.Status.Allocation.Devices.Results {
+		result := &claim.Status.Allocation.Devices.Results[resultIndex]
+		callback(structured.MakeDeviceID(result.Driver, result.Pool, result.Device), result)
 	}
 }
