@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/strategy"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
@@ -292,7 +293,8 @@ func TestStaticAutoscalerCSI(t *testing.T) {
 			deleteOptions := options.NewNodeDeleteOptions(autoscaler.AutoscalingOptions)
 			drainabilityRules := rules.Default(deleteOptions)
 			factory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{CustomResourcesProcessor: autoscaler.processors.CustomResourcesProcessor, QuotaProvider: resourcequotas.NewCloudMinProvider(autoscaler.AutoscalingContext.CloudProvider)})
-			newSDPlanner := sdplanner.New(autoscaler.AutoscalingContext, autoscaler.processors, deleteOptions, drainabilityRules, factory)
+			sdStrategy, _ := strategy.NewStrategy("")
+			newSDPlanner := sdplanner.New(autoscaler.AutoscalingContext, autoscaler.processors, deleteOptions, drainabilityRules, factory, sdStrategy)
 			autoscaler.scaleDownPlanner = newSDPlanner
 			autoscaler.processorCallbacks.scaleDownPlanner = newSDPlanner
 
