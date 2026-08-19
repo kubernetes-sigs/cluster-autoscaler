@@ -387,6 +387,8 @@ type AutoscalingOptions struct {
 	PendingPodsBatchingTimeout time.Duration
 	// GracefulDegradationEnabled tells if graceful degradation for unschedulable pods is enabled.
 	GracefulDegradationEnabled bool
+	// ScaleDownStrategy is the dimension and weight string for scaledown strategy.
+	ScaleDownStrategy string
 }
 
 // KubeClientOptions specify options for kube client
