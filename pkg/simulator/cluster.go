@@ -297,7 +297,7 @@ func (r *RemovalSimulator) replaceWithTaintedGhostNode(nodeName string, timestam
 		Value:  fmt.Sprint(timestamp.Unix()),
 		Effect: apiv1.TaintEffectNoSchedule,
 	})
-	ghostNodeInfo := framework.NewNodeInfo(taintedNode, nodeInfo.LocalResourceSlices)
+	ghostNodeInfo := framework.NewNodeInfo(taintedNode, nodeInfo.LocalResourceSlices, nil)
 	if nodeInfo.CSINode != nil {
 		ghostNodeInfo.SetCSINode(nodeInfo.CSINode)
 	}

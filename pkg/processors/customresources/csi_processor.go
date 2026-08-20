@@ -54,8 +54,7 @@ func (p *CSICustomResourcesProcessor) FilterOutNodesWithUnreadyResources(autosca
 			continue
 		}
 
-		// TODO: Use TemplateNodeInfoRegistry after #8882 is merged
-		templateNodeInfo, err := ng.TemplateNodeInfo()
+		templateNodeInfo, err := getNodeInfo(autoscalingCtx, ng)
 		if err != nil {
 			newReadyNodes = append(newReadyNodes, node)
 			klog.Warningf("Failed to get template node info for node group %s with error: %v", ng.Id(), err)

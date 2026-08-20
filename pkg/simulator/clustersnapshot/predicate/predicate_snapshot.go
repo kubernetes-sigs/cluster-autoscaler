@@ -22,6 +22,7 @@ import (
 
 	apiv1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/dynamic-resource-allocation/resourceclaim"
 	schedulerinterface "k8s.io/kube-scheduler/framework"
@@ -89,15 +90,15 @@ func (s *PredicateSnapshot) SetClusterState(nodes []*apiv1.Node, scheduledPods [
 		if s.draEnabled && draSnapshot != nil {
 			slices, _ = draSnapshot.NodeResourceSlices(node.Name)
 		}
-		ni := framework.NewNodeInfo(node, slices)
-
+		var csiNode *storagev1.CSINode
 		if s.enableCSINodeAwareScheduling && csiSnapshot != nil {
-			csiNode, err := csiSnapshot.Get(node.Name)
+			var err error
+			csiNode, err = csiSnapshot.Get(node.Name)
 			if err != nil {
 				return fmt.Errorf("couldn't obtain csi node: %v", err)
 			}
-			ni.SetCSINode(csiNode)
 		}
+		ni := framework.NewNodeInfo(node, slices, csiNode)
 
 		nodeInfos[i] = ni
 		nodeNameToIdx[node.Name] = i

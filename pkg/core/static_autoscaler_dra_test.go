@@ -351,7 +351,7 @@ func TestStaticAutoscalerDynamicResources(t *testing.T) {
 
 				templateNode := BuildTestNode(fmt.Sprintf("%s-template", nodeGroupDef.name), nodeGroupDef.cpu, nodeGroupDef.mem)
 				templateSlices := nodeGroupDef.slicesTemplateFunc(templateNode.Name)
-				templateNodeInfo := framework.NewNodeInfo(templateNode, templateSlices)
+				templateNodeInfo := framework.NewNodeInfo(templateNode, templateSlices, nil)
 				for _, pod := range tc.templatePods[nodeGroupDef.name] {
 					WithDSController()(pod.pod)
 					templateNodeInfo.AddPod(framework.NewPodInfo(pod.pod, pod.claims))

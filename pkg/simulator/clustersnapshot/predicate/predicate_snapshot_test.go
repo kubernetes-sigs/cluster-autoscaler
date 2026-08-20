@@ -536,8 +536,7 @@ func validTestCases(t *testing.T, snapshotName string) []modificationTestCase {
 				draSnapshot: drasnapshot.NewSnapshot(nil, nil, nil, deviceClasses),
 			},
 			op: func(snapshot clustersnapshot.ClusterSnapshot) error {
-				nodeInfo := framework.NewNodeInfo(node, resourceSlices)
-				nodeInfo.CSINode = csiNode
+				nodeInfo := framework.NewNodeInfo(node, resourceSlices, csiNode)
 				return snapshot.AddNodeInfo(nodeInfo)
 			},
 			// LocalResourceSlices from the NodeInfo should get added to the DRA snapshot.
@@ -562,8 +561,7 @@ func validTestCases(t *testing.T, snapshotName string) []modificationTestCase {
 					drautils.TestClaimWithAllocation(podOwnedClaim, podOwnedClaimAlloc),
 					drautils.TestClaimWithAllocation(sharedClaim, sharedClaimAlloc),
 				})
-				nodeInfo := framework.NewNodeInfo(node, resourceSlices, podInfo)
-				nodeInfo.CSINode = csiNode
+				nodeInfo := framework.NewNodeInfo(node, resourceSlices, csiNode, podInfo)
 				return snapshot.AddNodeInfo(nodeInfo)
 			},
 			// The shared claim should just get a reservation for the pod added in the DRA snapshot.
@@ -587,8 +585,7 @@ func validTestCases(t *testing.T, snapshotName string) []modificationTestCase {
 				draSnapshot: drasnapshot.NewSnapshot(nil, map[string][]*resourceapi.ResourceSlice{node.Name: resourceSlices}, nil, deviceClasses),
 			},
 			op: func(snapshot clustersnapshot.ClusterSnapshot) error {
-				nodeInfo := framework.NewNodeInfo(node, resourceSlices)
-				nodeInfo.CSINode = csiNode
+				nodeInfo := framework.NewNodeInfo(node, resourceSlices, csiNode)
 				return snapshot.AddNodeInfo(nodeInfo)
 			},
 			// LocalResourceSlices for the Node already exist in the DRA snapshot, so trying to add them again should be an error.
@@ -612,7 +609,7 @@ func validTestCases(t *testing.T, snapshotName string) []modificationTestCase {
 					drautils.TestClaimWithAllocation(podOwnedClaim, podOwnedClaimAlloc),
 					drautils.TestClaimWithAllocation(sharedClaim, sharedClaimAlloc),
 				})
-				return snapshot.AddNodeInfo(framework.NewNodeInfo(node, resourceSlices, podInfo))
+				return snapshot.AddNodeInfo(framework.NewNodeInfo(node, resourceSlices, nil, podInfo))
 			},
 			// The pod-owned claim already exists in the DRA snapshot, so trying to add it again should be an error.
 			wantErr: cmpopts.AnyError,
@@ -639,7 +636,7 @@ func validTestCases(t *testing.T, snapshotName string) []modificationTestCase {
 					podOwnedClaim.DeepCopy(),
 					drautils.TestClaimWithAllocation(sharedClaim, sharedClaimAlloc),
 				})
-				return snapshot.AddNodeInfo(framework.NewNodeInfo(node, resourceSlices, podInfo))
+				return snapshot.AddNodeInfo(framework.NewNodeInfo(node, resourceSlices, nil, podInfo))
 			},
 			// The added pod-owned claim isn't allocated, so AddNodeInfo should fail.
 			wantErr: cmpopts.AnyError,
@@ -666,7 +663,7 @@ func validTestCases(t *testing.T, snapshotName string) []modificationTestCase {
 					drautils.TestClaimWithAllocation(podOwnedClaim, podOwnedClaimAllocWrongNode),
 					drautils.TestClaimWithAllocation(sharedClaim, sharedClaimAlloc),
 				})
-				return snapshot.AddNodeInfo(framework.NewNodeInfo(node, resourceSlices, podInfo))
+				return snapshot.AddNodeInfo(framework.NewNodeInfo(node, resourceSlices, nil, podInfo))
 			},
 			// The added pod-owned claim is allocated to a different Node than the one being added, so AddNodeInfo should fail.
 			wantErr: cmpopts.AnyError,
@@ -693,7 +690,7 @@ func validTestCases(t *testing.T, snapshotName string) []modificationTestCase {
 					drautils.TestClaimWithAllocation(podOwnedClaim, podOwnedClaimAlloc),
 					fullyReservedClaim(drautils.TestClaimWithAllocation(sharedClaim, sharedClaimAlloc)),
 				})
-				return snapshot.AddNodeInfo(framework.NewNodeInfo(node, resourceSlices, podInfo))
+				return snapshot.AddNodeInfo(framework.NewNodeInfo(node, resourceSlices, nil, podInfo))
 			},
 			// The shared claim referenced by the pod is already at the max reservation count, and no more reservations can be added - this should be an error to match scheduler behavior.
 			wantErr: cmpopts.AnyError,
@@ -719,7 +716,7 @@ func validTestCases(t *testing.T, snapshotName string) []modificationTestCase {
 				podInfo := framework.NewPodInfo(podWithClaims, []*resourceapi.ResourceClaim{
 					drautils.TestClaimWithAllocation(sharedClaim, sharedClaimAlloc),
 				})
-				return snapshot.AddNodeInfo(framework.NewNodeInfo(node, resourceSlices, podInfo))
+				return snapshot.AddNodeInfo(framework.NewNodeInfo(node, resourceSlices, nil, podInfo))
 			},
 			// The added pod references a pod-owned claim that isn't present in the PodInfo - this should be an error.
 			wantErr: cmpopts.AnyError,
@@ -816,8 +813,7 @@ func validTestCases(t *testing.T, snapshotName string) []modificationTestCase {
 					drautils.TestClaimWithAllocation(podOwnedClaim, podOwnedClaimAlloc),
 					drautils.TestClaimWithAllocation(sharedClaim, sharedClaimAlloc),
 				})
-				nodeInfo := framework.NewNodeInfo(node, resourceSlices, podInfo)
-				nodeInfo.CSINode = csiNode
+				nodeInfo := framework.NewNodeInfo(node, resourceSlices, csiNode, podInfo)
 				return snapshot.AddNodeInfo(nodeInfo)
 			},
 			// The state should be identical to the initial one after the modifications.
@@ -1234,14 +1230,13 @@ func validTestCases(t *testing.T, snapshotName string) []modificationTestCase {
 				if err != nil {
 					return err
 				}
-				wantNodeInfo := framework.NewNodeInfo(node, resourceSlices,
+				wantNodeInfo := framework.NewNodeInfo(node, resourceSlices, csiNode,
 					framework.NewPodInfo(withNodeName(pod, node.Name), nil),
 					framework.NewPodInfo(withNodeName(podWithClaims, node.Name), []*resourceapi.ResourceClaim{
 						drautils.TestClaimWithPodReservations(drautils.TestClaimWithAllocation(podOwnedClaim, podOwnedClaimAlloc), podWithClaims),
 						drautils.TestClaimWithPodReservations(drautils.TestClaimWithAllocation(sharedClaim, sharedClaimAlloc), podWithClaims, pod),
 					}),
 				)
-				wantNodeInfo.CSINode = csiNode
 
 				if diff := cmp.Diff(wantNodeInfo, nodeInfo, nodeInfoDiffOpts...); diff != "" {
 					t.Errorf("GetNodeInfo(): unexpected output (-want +got): %s", diff)
@@ -1691,7 +1686,7 @@ func TestNodeAlreadyExists(t *testing.T) {
 		op   func(clustersnapshot.ClusterSnapshot) error
 	}{
 		{"add scheduler nodeInfo", func(snapshot clustersnapshot.ClusterSnapshot) error {
-			nodeInfo := framework.NewNodeInfo(node, nil)
+			nodeInfo := framework.NewNodeInfo(node, nil, nil)
 			return snapshot.StoreNodeInfo(nodeInfo)
 		}},
 		{"add internal NodeInfo", func(snapshot clustersnapshot.ClusterSnapshot) error {

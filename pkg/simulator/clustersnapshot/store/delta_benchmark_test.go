@@ -48,14 +48,14 @@ func BenchmarkBuildNodeInfoList(b *testing.B) {
 			nodes := clustersnapshot.CreateTestNodes(tc.nodeCount + 1000)
 			deltaStore := NewDeltaSnapshotStore()
 			for _, node := range nodes[:tc.nodeCount] {
-				nodeInfo := framework.NewNodeInfo(node, nil)
+				nodeInfo := framework.NewNodeInfo(node, nil, nil)
 				if err := deltaStore.StoreNodeInfo(nodeInfo); err != nil {
 					assert.NoError(b, err)
 				}
 			}
 			deltaStore.Fork()
 			for _, node := range nodes[tc.nodeCount:] {
-				nodeInfo := framework.NewNodeInfo(node, nil)
+				nodeInfo := framework.NewNodeInfo(node, nil, nil)
 				if err := deltaStore.StoreNodeInfo(nodeInfo); err != nil {
 					assert.NoError(b, err)
 				}
@@ -72,7 +72,7 @@ func BenchmarkBuildNodeInfoList(b *testing.B) {
 			nodes := clustersnapshot.CreateTestNodes(tc.nodeCount)
 			deltaStore := NewDeltaSnapshotStore()
 			for _, node := range nodes {
-				nodeInfo := framework.NewNodeInfo(node, nil)
+				nodeInfo := framework.NewNodeInfo(node, nil, nil)
 				if err := deltaStore.StoreNodeInfo(nodeInfo); err != nil {
 					assert.NoError(b, err)
 				}

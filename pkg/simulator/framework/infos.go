@@ -117,12 +117,8 @@ func (n *NodeInfo) DeepCopy() *NodeInfo {
 	for _, slice := range n.LocalResourceSlices {
 		newSlices = append(newSlices, slice.DeepCopy())
 	}
-	// Node() can be nil, but DeepCopy() handles nil receivers gracefully.
-	ni := NewNodeInfo(n.Node().DeepCopy(), newSlices, newPods...)
-	if n.CSINode != nil {
-		ni.SetCSINode(n.CSINode.DeepCopy())
-	}
-	return ni
+	// Node() and CSINode.DeepCopy() handle nil receivers gracefully.
+	return NewNodeInfo(n.Node().DeepCopy(), newSlices, n.CSINode.DeepCopy(), newPods...)
 }
 
 // Snapshot returns a shallow copy of NodeInfo that is efficient to create.
@@ -165,10 +161,12 @@ func (n *NodeInfo) SetCSINode(csiNode *storagev1.CSINode) *NodeInfo {
 }
 
 // NewNodeInfo returns a new internal NodeInfo from the provided data.
-func NewNodeInfo(node *apiv1.Node, slices []*resourceapi.ResourceSlice, pods ...*PodInfo) *NodeInfo {
+// csiNode is optional; pass nil when the node has no associated CSINode.
+func NewNodeInfo(node *apiv1.Node, slices []*resourceapi.ResourceSlice, csiNode *storagev1.CSINode, pods ...*PodInfo) *NodeInfo {
 	result := &NodeInfo{
 		NodeInfo:            schedulerimpl.NewNodeInfo(),
 		LocalResourceSlices: slices,
+		CSINode:             csiNode,
 	}
 	if node != nil {
 		result.SetNode(node)

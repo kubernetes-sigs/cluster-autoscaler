@@ -74,11 +74,7 @@ func SanitizedTemplateNodeInfoFromNodeInfo(example *framework.NodeInfo, nodeGrou
 	if err != nil {
 		return nil, errors.ToAutoscalerError(errors.InternalError, err)
 	}
-	templateNodeInfo := framework.NewNodeInfo(sanitizedExample.Node(), sanitizedExample.LocalResourceSlices, expectedPods...)
-
-	// Add back sanitized CSINode info which was kinda discarded when we created templateNodeInfo object
-	// TODO: refactor this code to use update `NewNodeInfo` signature, so as this is no longer necessary.
-	templateNodeInfo.CSINode = sanitizedExample.CSINode
+	templateNodeInfo := framework.NewNodeInfo(sanitizedExample.Node(), sanitizedExample.LocalResourceSlices, sanitizedExample.CSINode, expectedPods...)
 
 	// Allow this node to be recognized as a template node, so scale up issues like https://github.com/kubernetes/autoscaler/issues/9700 can be mitigated.
 	templateNodeInfo.Node().Labels["cluster-autoscaler.kubernetes.io/template-node"] = "true"
@@ -102,11 +98,7 @@ func createSanitizedNodeInfo(nodeInfo *framework.NodeInfo, newNodeNameBase strin
 	if err != nil {
 		return nil, err
 	}
-	result := framework.NewNodeInfo(freshNode, freshResourceSlices)
-
-	if nodeInfo.CSINode != nil {
-		result.SetCSINode(CreateSanitizedCSINode(nodeInfo.CSINode, result))
-	}
+	result := framework.NewNodeInfo(freshNode, freshResourceSlices, CreateSanitizedCSINode(nodeInfo.CSINode, freshNode))
 
 	for _, podInfo := range nodeInfo.Pods() {
 		freshPod := createSanitizedPod(podInfo.Pod, freshNode.Name, namesSuffix)
@@ -141,18 +133,22 @@ func createSanitizedNode(node *apiv1.Node, newName string, taintConfig *taints.T
 	return newNode
 }
 
-// CreateSanitizedCSINode creates a sanitized CSINode object from a given csinode and template node info.
-func CreateSanitizedCSINode(csiNode *storagev1.CSINode, templateNodeInfo *framework.NodeInfo) *storagev1.CSINode {
+// CreateSanitizedCSINode creates a sanitized CSINode owned by the given Node.
+// If csiNode is nil, nil is returned.
+func CreateSanitizedCSINode(csiNode *storagev1.CSINode, node *apiv1.Node) *storagev1.CSINode {
+	if csiNode == nil {
+		return nil
+	}
 	newCSINode := csiNode.DeepCopy()
-	newCSINode.Name = templateNodeInfo.Node().Name
+	newCSINode.Name = node.Name
 	newCSINode.UID = uuid.NewUUID()
 
 	newCSINode.OwnerReferences = []metav1.OwnerReference{
 		{
 			APIVersion: "v1",
 			Kind:       "Node",
-			Name:       templateNodeInfo.Node().Name,
-			UID:        templateNodeInfo.Node().UID,
+			Name:       node.Name,
+			UID:        node.UID,
 		},
 	}
 	// TODO: we could add santized nodeID here, but it should not
