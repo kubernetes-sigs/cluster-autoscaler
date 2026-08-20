@@ -219,7 +219,7 @@ func (a *Actuator) taintNodesSync(NodeGroupViews []*budgets.NodeGroupView) (tain
 	var updateLatencyTracker *UpdateLatencyTracker
 	nodeDeleteDelayAfterTaint := a.nodeDeleteDelayAfterTaint
 	if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
-		updateLatencyTracker = NewUpdateLatencyTracker(a.autoscalingCtx.AutoscalingKubeClients.ListerRegistry.AllNodeLister())
+		updateLatencyTracker = NewUpdateLatencyTracker(a.autoscalingCtx.AutoscalingKubeClients.ListerRegistry.AllNodeLister(), a.autoscalingCtx.MaxScaleDownParallelism)
 		go updateLatencyTracker.Start()
 	}
 
@@ -289,9 +289,6 @@ func (a *Actuator) taintNodesSync(NodeGroupViews []*budgets.NodeGroupView) (tain
 		close(taintedNodes)
 		failedCount := len(failedTaintedNodes)
 		if failedCount > 0 {
-			for nodeWithError := range failedTaintedNodes {
-				a.autoscalingCtx.Recorder.Eventf(nodeWithError.node, apiv1.EventTypeWarning, "ScaleDownFailed", "failed to mark the node as toBeDeleted/unschedulable: %v", nodeWithError.err)
-			}
 			// Clean up already applied taints in case of issues.
 			for taintedNode := range taintedNodes {
 				globalNodesToClean = append(globalNodesToClean, taintedNode)

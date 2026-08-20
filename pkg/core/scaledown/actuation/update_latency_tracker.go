@@ -26,7 +26,7 @@ import (
 
 const sleepDurationWhenPolling = 50 * time.Millisecond
 
-var waitForTaintingTimeoutDuration = 30 * time.Second
+const waitForTaintingTimeoutDuration = 30 * time.Second
 
 type nodeTaintStartTime struct {
 	nodeName  string
@@ -43,7 +43,7 @@ type UpdateLatencyTracker struct {
 	// Sends node tainting start timestamps to the tracker
 	StartTimeChan            chan nodeTaintStartTime
 	sleepDurationWhenPolling time.Duration
-	// ExpectedNodeCountChan receives the capacity limit seeded precisely to the count
+	// ExpectedNodeCountChan receives the capacity limit needed precisely to the count
 	// of successfully tainted nodes. This instructs the tracker to discard start stamps
 	// of any node that failed its API request to bypass the hang.
 	ExpectedNodeCountChan chan int
@@ -55,13 +55,13 @@ type UpdateLatencyTracker struct {
 }
 
 // NewUpdateLatencyTracker returns a new NewUpdateLatencyTracker object
-func NewUpdateLatencyTracker(nodeLister kubernetes.NodeLister) *UpdateLatencyTracker {
+func NewUpdateLatencyTracker(nodeLister kubernetes.NodeLister, maxNodes int) *UpdateLatencyTracker {
 	return &UpdateLatencyTracker{
 		startTimestamp:           map[string]time.Time{},
 		finishTimestamp:          map[string]time.Time{},
 		remainingNodeCount:       0,
 		nodeLister:               nodeLister,
-		StartTimeChan:            make(chan nodeTaintStartTime, 10000),
+		StartTimeChan:            make(chan nodeTaintStartTime, maxNodes),
 		sleepDurationWhenPolling: sleepDurationWhenPolling,
 		ExpectedNodeCountChan:    make(chan int, 1),
 		ResultChan:               make(chan time.Duration),
@@ -97,17 +97,16 @@ func (u *UpdateLatencyTracker) Start() {
 // drainStartTimeChan pulls all pending items out  of u.StartTimeChan.
 // Returns immediately if u.StartTimeChan is empty.
 func (u *UpdateLatencyTracker) drainStartTimeChan() {
-DrainLoop:
 	for {
 		select {
 		case ntst, ok := <-u.StartTimeChan:
 			if !ok {
-				break DrainLoop
+				return
 			}
 			u.startTimestamp[ntst.nodeName] = ntst.startTime
 		default:
 			// Channel is empty, safely exit without blocking.
-			break DrainLoop
+			return
 		}
 	}
 }
