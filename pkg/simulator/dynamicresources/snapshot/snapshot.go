@@ -47,6 +47,47 @@ type Snapshot struct {
 	resourceClaims *common.PatchSet[ResourceClaimId, *resourceapi.ResourceClaim]
 	resourceSlices *common.PatchSet[string, []*resourceapi.ResourceSlice]
 	deviceClasses  *common.PatchSet[string, *resourceapi.DeviceClass]
+
+	// allocatedState is derived from resourceClaims and maintained as they change, so
+	// that the scheduler can be answered without walking every claim on every attempt.
+	// Access it through allocationTracker(), never directly - a Snapshot can be built as
+	// a struct literal (see CloneTestSnapshot) and leave this nil.
+	//
+	// Every write to resourceClaims has to go through setResourceClaim/deleteResourceClaim
+	// to keep this in sync.
+	allocatedState *allocatedStateTracker
+}
+
+// allocationTracker returns the tracker holding the state derived from the ResourceClaims,
+// creating it if needed.
+func (s *Snapshot) allocationTracker() *allocatedStateTracker {
+	if s.allocatedState == nil {
+		s.allocatedState = newAllocatedStateTracker()
+	}
+	return s.allocatedState
+}
+
+// walkResourceClaims iterates over all effective ResourceClaims in the Snapshot.
+func (s *Snapshot) walkResourceClaims(f func(*resourceapi.ResourceClaim) bool) {
+	for _, claim := range s.listResourceClaims() {
+		if !f(claim) {
+			return
+		}
+	}
+}
+
+// setResourceClaim adds or updates a ResourceClaim in the current patch layer, keeping the
+// derived allocated state in sync.
+func (s *Snapshot) setResourceClaim(claimId ResourceClaimId, claim *resourceapi.ResourceClaim) {
+	s.resourceClaims.SetCurrent(claimId, claim)
+	s.allocationTracker().apply(claimId, claim)
+}
+
+// deleteResourceClaim marks a ResourceClaim as deleted in the current patch layer, keeping
+// the derived allocated state in sync.
+func (s *Snapshot) deleteResourceClaim(claimId ResourceClaimId) {
+	s.resourceClaims.DeleteCurrent(claimId)
+	s.allocationTracker().withdraw(claimId)
 }
 
 // nonNodeLocalResourceSlicesIdentifier is a special key used in the resourceSlices patchSet
@@ -116,7 +157,7 @@ func (s *Snapshot) AddClaims(newClaims []*resourceapi.ResourceClaim) error {
 	}
 
 	for _, claim := range newClaims {
-		s.resourceClaims.SetCurrent(GetClaimId(claim), claim)
+		s.setResourceClaim(GetClaimId(claim), claim)
 	}
 
 	return nil
@@ -142,13 +183,13 @@ func (s *Snapshot) RemovePodOwnedClaims(pod *apiv1.Pod) {
 		// TODO(autoscaler/issues/9570): KEP-5729 changed IsForPod to be able to work
 		// with pod groups, re-evaluate whether they need to be considered here.
 		if err := resourceclaim.IsForPod(pod, claim, false); err == nil {
-			s.resourceClaims.DeleteCurrent(claimId)
+			s.deleteResourceClaim(claimId)
 			continue
 		}
 
 		claim := s.ensureClaimWritable(claim)
 		drautils.ClearPodReservationInPlace(claim, pod)
-		s.resourceClaims.SetCurrent(claimId, claim)
+		s.setResourceClaim(claimId, claim)
 	}
 }
 
@@ -173,7 +214,7 @@ func (s *Snapshot) ReservePodClaims(pod *apiv1.Pod) error {
 		claimId := GetClaimId(claim)
 		claim := s.ensureClaimWritable(claim)
 		drautils.AddPodReservationInPlace(claim, pod)
-		s.resourceClaims.SetCurrent(claimId, claim)
+		s.setResourceClaim(claimId, claim)
 	}
 
 	return nil
@@ -198,7 +239,7 @@ func (s *Snapshot) UnreservePodClaims(pod *apiv1.Pod) error {
 			drautils.DeallocateClaimInPlace(claim)
 		}
 
-		s.resourceClaims.SetCurrent(claimId, claim)
+		s.setResourceClaim(claimId, claim)
 	}
 	return nil
 }
@@ -231,14 +272,42 @@ func (s *Snapshot) Commit() {
 	s.deviceClasses.Commit()
 	s.resourceClaims.Commit()
 	s.resourceSlices.Commit()
+	// The effective value of every claim is unchanged by a Commit, so the derived
+	// allocated state stays valid.
 }
 
 // Revert removes the topmost patch layer for all resource types, discarding
 // any modifications or deletions recorded there.
 func (s *Snapshot) Revert() {
+	// A Revert changes the effective value of exactly the claims recorded in the layer
+	// being dropped, without any of them going through setResourceClaim. Collect them
+	// first, then re-read them once the layer is gone.
+	//
+	// This walks the dropped layer a second time, so it is O(P) in the size of that layer.
+	// PatchSet.Revert is already O(P), so the operation stays in the same complexity class
+	// and only picks up a larger constant.
+	//
+	// Skipped entirely when nothing has been derived from the claims yet, which
+	// is the case for the whole life of a snapshot whenever DRA is disabled -
+	// going through allocationTracker() here would build a tracker just to ask
+	// whether it exists.
+	trackerBuilt := s.allocatedState != nil && s.allocatedState.isBuilt()
+
+	var revertedClaimIds []ResourceClaimId
+	if trackerBuilt {
+		s.resourceClaims.WalkCurrentPatchKeys(func(claimId ResourceClaimId) bool {
+			revertedClaimIds = append(revertedClaimIds, claimId)
+			return true
+		})
+	}
+
 	s.deviceClasses.Revert()
 	s.resourceClaims.Revert()
 	s.resourceSlices.Revert()
+
+	if trackerBuilt {
+		s.allocatedState.refresh(revertedClaimIds, s.getResourceClaim)
+	}
 }
 
 // Fork adds a new, empty patch layer to the top of the stack for all
@@ -248,6 +317,7 @@ func (s *Snapshot) Fork() {
 	s.deviceClasses.Fork()
 	s.resourceClaims.Fork()
 	s.resourceSlices.Fork()
+	// An empty layer changes nothing, so the derived allocated state stays valid.
 }
 
 // listDeviceClasses retrieves all effective DeviceClasses from the snapshot.
@@ -276,7 +346,7 @@ func (s *Snapshot) listResourceClaims() []*resourceapi.ResourceClaim {
 // This is typically used internally when a claim's state (like allocation) changes.
 func (s *Snapshot) configureResourceClaim(claim *resourceapi.ResourceClaim) {
 	claimId := ResourceClaimId{Name: claim.Name, Namespace: claim.Namespace}
-	s.resourceClaims.SetCurrent(claimId, claim)
+	s.setResourceClaim(claimId, claim)
 }
 
 // getResourceClaim retrieves a specific ResourceClaim by its ID from the snapshot.
