@@ -26,6 +26,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
 	"k8s.io/klog/v2"
@@ -35,6 +36,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/provreq"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/status"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/conditions"
+	provreqpods "sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/pods"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqclient"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqwrapper"
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
@@ -62,14 +64,16 @@ type checkCapacityProvClass struct {
 	checkCapacityProvisioningRequestMaxBatchSize int
 	checkCapacityProvisioningRequestBatchTimebox time.Duration
 	provreqInjector                              *provreq.ProvisioningRequestPodsInjector
+	simulationWorkloadBuilder                    *provreqpods.SimulationWorkloadBuilder
 }
 
 // New create check-capacity scale-up mode.
 func New(
 	client *provreqclient.ProvisioningRequestClient,
 	provreqInjector *provreq.ProvisioningRequestPodsInjector,
+	simulationWorkloadBuilder *provreqpods.SimulationWorkloadBuilder,
 ) *checkCapacityProvClass {
-	return &checkCapacityProvClass{client: client, provreqInjector: provreqInjector}
+	return &checkCapacityProvClass{client: client, provreqInjector: provreqInjector, simulationWorkloadBuilder: simulationWorkloadBuilder}
 }
 
 func (o *checkCapacityProvClass) Initialize(
@@ -120,6 +124,9 @@ func (o *checkCapacityProvClass) Provision(
 
 	// Add accepted condition to ProvisioningRequests.
 	for _, pr := range prs {
+		if pr.Err != nil {
+			continue
+		}
 		conditions.AddOrUpdateCondition(pr.PrWrapper, v1.Accepted, metav1.ConditionTrue, conditions.AcceptedReason, conditions.AcceptedMsg, metav1.Now())
 	}
 
@@ -140,7 +147,8 @@ func (o *checkCapacityProvClass) getProvisioningRequestsAndPods(unschedulablePod
 		if len(prs) == 0 {
 			return nil, nil
 		}
-		return []provreq.ProvisioningRequestWithPods{{PrWrapper: prs[0], Pods: unschedulablePods}}, nil
+		workload, err := o.simulationWorkloadBuilder.ForProvisioningRequest(prs[0])
+		return []provreq.ProvisioningRequestWithPods{{PrWrapper: prs[0], Workload: workload, Err: err}}, nil
 	}
 
 	batch, err := o.provreqInjector.GetCheckCapacityBatch(o.checkCapacityProvisioningRequestMaxBatchSize)
@@ -158,12 +166,22 @@ func (o *checkCapacityProvClass) isBatchEnabled() bool {
 func (o *checkCapacityProvClass) checkCapacityBatch(reqs []provreq.ProvisioningRequestWithPods, combinedStatus *combinedStatusSet, startTime time.Time) []*provreqwrapper.ProvisioningRequest {
 	updates := make([]*provreqwrapper.ProvisioningRequest, 0, len(reqs))
 	for _, req := range reqs {
-		if err := o.checkCapacity(req.Pods, req.PrWrapper, combinedStatus); err != nil {
-			klog.Errorf("error checking capacity %v", err)
-			continue
+		shouldUpdate := true
+		if req.Err != nil {
+			err := fmt.Errorf("could not create simulation workload for ProvisioningRequest %s/%s: %w", req.PrWrapper.Namespace, req.PrWrapper.Name, req.Err)
+			conditions.AddOrUpdateCondition(req.PrWrapper, v1.Failed, metav1.ConditionTrue, conditions.FailedToCreatePodsReason, err.Error(), metav1.Now())
+			klog.Errorf("error checking capacity: %v", err)
+		} else if err := o.checkCapacity(req.Workload, req.PrWrapper, combinedStatus); err != nil {
+			addInternalError(combinedStatus, err)
+			klog.Errorf("error checking capacity: %v", err)
+			// Failed requests are filtered before this point, so a true condition
+			// here was set by checkCapacity during this iteration.
+			shouldUpdate = apimeta.IsStatusConditionTrue(req.PrWrapper.Status.Conditions, v1.Failed)
 		}
 
-		updates = append(updates, req.PrWrapper)
+		if shouldUpdate {
+			updates = append(updates, req.PrWrapper)
+		}
 
 		// timebox checkCapacity when batch processing.
 		if o.isBatchEnabled() && time.Since(startTime) > o.checkCapacityProvisioningRequestBatchTimebox {
@@ -175,16 +193,26 @@ func (o *checkCapacityProvClass) checkCapacityBatch(reqs []provreq.ProvisioningR
 }
 
 // checkCapacity checks if there is capacity, updates combinedStatus and Conditions. If capacity is found, it commits to the clusterSnapshot.
-func (o *checkCapacityProvClass) checkCapacity(unschedulablePods []*apiv1.Pod, provReq *provreqwrapper.ProvisioningRequest, combinedStatus *combinedStatusSet) error {
+func (o *checkCapacityProvClass) checkCapacity(workload *provreqpods.SimulationWorkload, provReq *provreqwrapper.ProvisioningRequest, combinedStatus *combinedStatusSet) error {
 	o.autoscalingCtx.ClusterSnapshot.Fork()
+	if err := o.autoscalingCtx.ClusterSnapshot.DraSnapshot().AddClaims(workload.Claims); err != nil {
+		o.autoscalingCtx.ClusterSnapshot.Revert()
+		simulationErr := fmt.Errorf("could not add simulated ResourceClaims for ProvisioningRequest %s/%s: %w", provReq.Namespace, provReq.Name, err)
+		conditions.AddOrUpdateCondition(provReq, v1.Failed, metav1.ConditionTrue, conditions.FailedToCreatePodsReason, simulationErr.Error(), metav1.Now())
+		return simulationErr
+	}
 
 	// Case 1: Capacity fits.
-	schedulingResult, err := o.schedulingSimulator.TrySchedulePods(context.Background(), o.autoscalingCtx.ClusterSnapshot, unschedulablePods, true, clustersnapshot.SchedulingOptions{})
-	if err == nil && len(schedulingResult.Statuses) == len(unschedulablePods) {
+	schedulingResult, err := o.schedulingSimulator.TrySchedulePods(context.Background(), o.autoscalingCtx.ClusterSnapshot, workload.Pods, true, clustersnapshot.SchedulingOptions{})
+	if err != nil {
+		o.autoscalingCtx.ClusterSnapshot.Revert()
+		return fmt.Errorf("could not simulate ProvisioningRequest %s/%s: %w", provReq.Namespace, provReq.Name, err)
+	}
+	if len(schedulingResult.Statuses) == len(workload.Pods) {
 		commitError := o.autoscalingCtx.ClusterSnapshot.Commit()
 		if commitError != nil {
 			o.autoscalingCtx.ClusterSnapshot.Revert()
-			return commitError
+			return fmt.Errorf("could not commit simulation for ProvisioningRequest %s/%s: %w", provReq.Namespace, provReq.Name, commitError)
 		}
 		combinedStatus.Add(&status.ScaleUpStatus{Result: status.ScaleUpSuccessful})
 		conditions.AddOrUpdateCondition(provReq, v1.Provisioned, metav1.ConditionTrue, conditions.CapacityIsFoundReason, conditions.CapacityIsFoundMsg, metav1.Now())
@@ -203,7 +231,12 @@ func (o *checkCapacityProvClass) checkCapacity(unschedulablePods []*apiv1.Pod, p
 		}
 		conditions.AddOrUpdateCondition(provReq, v1.Provisioned, metav1.ConditionFalse, conditions.CapacityIsNotFoundReason, "Capacity is not found, CA will try to find it later.", metav1.Now())
 	}
-	return err
+	return nil
+}
+
+func addInternalError(combinedStatus *combinedStatusSet, err error) {
+	scaleUpStatus, _ := status.UpdateScaleUpError(&status.ScaleUpStatus{}, errors.NewAutoscalerErrorf(errors.InternalError, "error during ScaleUp: %s", err.Error()))
+	combinedStatus.Add(scaleUpStatus)
 }
 
 // updateRequests calls the client to update ProvisioningRequests, in parallel.
