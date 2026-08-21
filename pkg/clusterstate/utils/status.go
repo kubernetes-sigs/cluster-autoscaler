@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"sort"
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -39,6 +41,8 @@ const (
 	ConfigMapLastUpdatedKey = "cluster-autoscaler.kubernetes.io/last-updated"
 	// ConfigMapLastUpdateFormat it the timestamp format used for last update annotation in status ConfigMap
 	ConfigMapLastUpdateFormat = "2006-01-02 15:04:05.999999999 -0700 MST"
+	// maxStatusConfigMapSize is the maximum number of bytes we can write to a config map. The limit comes from 1MB value limit of etcd with a safety buffer.
+	maxStatusConfigMapSize = 1000000
 )
 
 // LogEventRecorder records events on some top-level object, to give user (without access to logs) a view of most important CA actions.
@@ -99,9 +103,9 @@ func WriteStatusConfigMap(kubeClient kube_client.Interface, namespace string, st
 	var errMsg string
 	maps := kubeClient.CoreV1().ConfigMaps(namespace)
 	configMap, getStatusError = maps.Get(context.TODO(), statusConfigMapName, metav1.GetOptions{})
-	statusYaml, err := yaml.Marshal(status)
+	statusYaml, err := marshalAndTruncateStatus(status, maxStatusConfigMapSize)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to marshal status configmap: %v", err)
+		return nil, err
 	}
 	statusMsg := string(statusYaml)
 	if getStatusError == nil {
@@ -155,4 +159,102 @@ func DeleteStatusConfigMap(kubeClient kube_client.Interface, namespace string, s
 		klog.Error("Failed to delete status configmap")
 	}
 	return err
+}
+
+// marshalAndTruncateStatus marshals the ClusterAutoscalerStatus to YAML.
+// If the resulting YAML exceeds maxStatusConfigMapSize, it uses binary search
+// to find the maximum number of NodeGroups that can be included without exceeding the limit.
+func marshalAndTruncateStatus(status api.ClusterAutoscalerStatus, maxStatusConfigMapSize int) ([]byte, error) {
+	statusYaml, err := yaml.Marshal(status)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal status configmap: %v", err)
+	}
+
+	if len(statusYaml) <= maxStatusConfigMapSize || len(status.NodeGroups) == 0 {
+		return statusYaml, nil
+	}
+
+	// Sort NodeGroups to ensure the most important ones are kept if truncation is necessary.
+	// Priority: Unhealthy > ScaleUp Backoff/Error > Active ScaleUp > Active ScaleDown.
+	slices.SortStableFunc(status.NodeGroups, func(a, b api.NodeGroupStatus) int {
+		// Priority 1: Unhealthy NodeGroups
+		aUnhealthy := a.Health.Status == api.ClusterAutoscalerUnhealthy
+		bUnhealthy := b.Health.Status == api.ClusterAutoscalerUnhealthy
+		if aUnhealthy != bUnhealthy {
+			if aUnhealthy {
+				return -1
+			}
+			return 1
+		}
+
+		// Priority 2: ScaleUp is Backoff or Unhealthy
+		aBackoff := a.ScaleUp.Status == api.ClusterAutoscalerBackoff || a.ScaleUp.Status == api.ClusterAutoscalerUnhealthy
+		bBackoff := b.ScaleUp.Status == api.ClusterAutoscalerBackoff || b.ScaleUp.Status == api.ClusterAutoscalerUnhealthy
+		if aBackoff != bBackoff {
+			if aBackoff {
+				return -1
+			}
+			return 1
+		}
+
+		// Priority 3: ScaleUp is InProgress or Needed
+		aActiveScaleUp := a.ScaleUp.Status == api.ClusterAutoscalerInProgress || a.ScaleUp.Status == api.ClusterAutoscalerNeeded
+		bActiveScaleUp := b.ScaleUp.Status == api.ClusterAutoscalerInProgress || b.ScaleUp.Status == api.ClusterAutoscalerNeeded
+		if aActiveScaleUp != bActiveScaleUp {
+			if aActiveScaleUp {
+				return -1
+			}
+			return 1
+		}
+
+		// Priority 4: ScaleDown Candidates Present
+		aActiveScaleDown := a.ScaleDown.Status == api.ClusterAutoscalerCandidatesPresent
+		bActiveScaleDown := b.ScaleDown.Status == api.ClusterAutoscalerCandidatesPresent
+		if aActiveScaleDown != bActiveScaleDown {
+			if aActiveScaleDown {
+				return -1
+			}
+			return 1
+		}
+
+		return 0
+	})
+
+	originalNodeGroups := status.NodeGroups
+	var bestYaml []byte
+	var marshalErr error
+
+	// Search for the first length where the marshaled YAML size strictly exceeds maxStatusConfigMapSize.
+	failedLength := sort.Search(len(originalNodeGroups)+1, func(length int) bool {
+		status.NodeGroups = originalNodeGroups[:length]
+		midYaml, err := yaml.Marshal(status)
+		if err != nil {
+			marshalErr = err
+			return true // Treat error as exceeding size to stop expanding
+		}
+
+		if len(midYaml) <= maxStatusConfigMapSize {
+			bestYaml = midYaml
+			return false // Length fits, try a larger length
+		}
+		return true // Length exceeds limit, try a smaller length
+	})
+
+	if marshalErr != nil {
+		return nil, fmt.Errorf("failed to marshal status configmap during truncation: %v", marshalErr)
+	}
+
+	if failedLength <= len(originalNodeGroups) {
+		finalLength := max(failedLength-1, 0)
+		klog.Infof("Status configmap size limit exceeded. Truncated from %d to %d NodeGroups", len(originalNodeGroups), finalLength)
+	}
+
+	// bestYaml holds the yaml for failedLength - 1.
+	// If even 0 node groups exceeds the limit, bestYaml will be nil.
+	if bestYaml == nil {
+		status.NodeGroups = originalNodeGroups[:0]
+		return yaml.Marshal(status)
+	}
+
+	return bestYaml, nil
 }
