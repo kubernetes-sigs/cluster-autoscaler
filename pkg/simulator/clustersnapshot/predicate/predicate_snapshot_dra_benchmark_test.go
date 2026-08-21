@@ -279,7 +279,7 @@ func BenchmarkScheduleRevert(b *testing.B) {
 		sharedClaim := createTestResourceClaim(devicesPerSlice, 1, driverName, deviceClassName)
 		sharedClaim, satisfied := allocateResourceSlicesForClaim(sharedClaim, nodeName, nodeSlice)
 		if !satisfied {
-			b.Errorf("Error during setup, claim allocation cannot be satistied")
+			b.Fatalf("Error during setup, claim allocation cannot be satisfied")
 		}
 
 		claimsOnNode := make([]*resourceapi.ResourceClaim, maxPodsCount)
@@ -297,7 +297,7 @@ func BenchmarkScheduleRevert(b *testing.B) {
 			ownedClaim = drautils.TestClaimWithPodOwnership(pod, ownedClaim)
 			ownedClaim, satisfied := allocateResourceSlicesForClaim(ownedClaim, nodeName, nodeSlice)
 			if !satisfied {
-				b.Errorf("Error during setup, claim allocation cannot be satistied")
+				b.Fatalf("Error during setup, claim allocation cannot be satisfied")
 			}
 
 			podsOnNode[podIndex] = pod
@@ -310,15 +310,26 @@ func BenchmarkScheduleRevert(b *testing.B) {
 		owningPods[nodeIndex] = podsOnNode
 	}
 
-	b.ResetTimer()
 	for snapshotName, snapshotFactory := range snapshots {
 		b.Run(snapshotName, func(b *testing.B) {
 			for cfgName, cfg := range configurations {
 				b.Run(cfgName, func(b *testing.B) {
 					for i := 0; i < b.N; i++ {
+						// AddNodeInfo pushes the claims of the pods already sitting on a NodeInfo
+						// into the DRA snapshot, and SchedulePod adds pods to the NodeInfo it
+						// schedules onto. Reusing the NodeInfos built above would therefore make
+						// the second iteration re-add claims the first one already registered.
+						// Every iteration gets its own copies, built outside the measurement.
+						b.StopTimer()
+						iterNodeInfos := make([]*framework.NodeInfo, cfg.nodesCount)
+						for nodeIndex := 0; nodeIndex < cfg.nodesCount; nodeIndex++ {
+							iterNodeInfos[nodeIndex] = nodeInfos[nodeIndex].DeepCopy()
+						}
+						b.StartTimer()
+
 						snapshot, err := snapshotFactory()
 						if err != nil {
-							b.Errorf("Failed to create a snapshot: %v", err)
+							b.Fatalf("Failed to create a snapshot: %v", err)
 						}
 
 						draSnapshot := drasnapshot.NewSnapshot(
@@ -328,31 +339,38 @@ func BenchmarkScheduleRevert(b *testing.B) {
 							devicesClasses,
 						)
 
-						draSnapshot.AddClaims(sharedClaims)
+						if err := draSnapshot.AddClaims(sharedClaims[:cfg.nodesCount]); err != nil {
+							b.Fatalf("Failed to add shared claims: %v", err)
+						}
 						for nodeIndex := 0; nodeIndex < cfg.nodesCount; nodeIndex++ {
-							draSnapshot.AddClaims(ownedClaims[nodeIndex])
+							if err := draSnapshot.AddClaims(ownedClaims[nodeIndex][:cfg.ownedClaimPods]); err != nil {
+								b.Fatalf("Failed to add owned claims: %v", err)
+							}
 						}
 
 						err = snapshot.SetClusterState(nil, nil, draSnapshot, nil)
 						if err != nil {
-							b.Errorf("Failed to set cluster state: %v", err)
+							b.Fatalf("Failed to set cluster state: %v", err)
 						}
 
 						for nodeIndex := 0; nodeIndex < cfg.nodesCount; nodeIndex++ {
-							nodeInfo := nodeInfos[nodeIndex]
+							nodeInfo := iterNodeInfos[nodeIndex]
 							for i := 0; i < cfg.forks; i++ {
 								snapshot.Fork()
 							}
 
 							err := snapshot.AddNodeInfo(nodeInfo)
 							if err != nil {
-								b.Errorf("Failed to add node info to snapshot: %v", err)
+								b.Fatalf("Failed to add node info to snapshot: %v", err)
 							}
 
 							sharedClaim := sharedClaims[nodeIndex]
 							for podIndex := 0; podIndex < cfg.sharedClaimPods; podIndex++ {
 								pod := BuildTestPod(
-									fmt.Sprintf("pod-%d", podIndex),
+									// The name has to be unique across nodes, otherwise configurations
+									// that commit instead of reverting end up scheduling several pods
+									// with the same key into one snapshot.
+									fmt.Sprintf("shared-pod-%d-%d", nodeIndex, podIndex),
 									1,
 									1,
 									WithResourceClaim(sharedClaim.Name, sharedClaim.Name, ""),
@@ -360,7 +378,7 @@ func BenchmarkScheduleRevert(b *testing.B) {
 
 								err := snapshot.SchedulePod(pod, nodeInfo.Node().Name)
 								if err != nil {
-									b.Errorf(
+									b.Fatalf(
 										"Failed to schedule a pod %s to node %s: %v",
 										pod.Name,
 										nodeInfo.Node().Name,
@@ -373,7 +391,7 @@ func BenchmarkScheduleRevert(b *testing.B) {
 								owningPod := owningPods[nodeIndex][podIndex]
 								err := snapshot.SchedulePod(owningPod, nodeInfo.Node().Name)
 								if err != nil {
-									b.Errorf(
+									b.Fatalf(
 										"Failed to schedule a pod %s to node %s: %v",
 										owningPod.Name,
 										nodeInfo.Node().Name,
