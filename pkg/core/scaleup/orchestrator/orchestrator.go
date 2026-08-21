@@ -1077,6 +1077,7 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(args scaleUpCtx) (scaleUpPlan, *sta
 
 	if len(options) == 0 {
 		klog.V(1).Info("No expansion options")
+		args.podEquivalenceGroups = markAllGroupsAsUnschedulable(args.podEquivalenceGroups, NoScaleUpOptionsAvailableReason)
 		return scaleUpPlan{}, o.noOptionsAvailableStatus(args), nil
 	}
 
