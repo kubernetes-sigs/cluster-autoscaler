@@ -18,7 +18,6 @@ package nodes
 
 import (
 	"slices"
-	"strconv"
 
 	v1 "k8s.io/api/core/v1"
 	klog "k8s.io/klog/v2"
@@ -26,7 +25,7 @@ import (
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
-	"sigs.k8s.io/cluster-autoscaler/pkg/utils/annotations"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/atomic"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/klogx"
 )
 
@@ -132,15 +131,15 @@ func (p *AtomicResizeFilteringProcessor) FilterUnremovableNodes(autoscalingCtx *
 			klog.V(2).Infof("Scheduling atomic scale down for all %v nodes from node group %s", len(consideredNodes), nodeGroup.Id())
 			nodesToBeRemoved = append(nodesToBeRemoved, consideredNodes...)
 		} else {
-			registeredNodes, err := p.getAllRegisteredNodesForNodeGroup(nodeGroup, allNodes)
+			registeredCount, err := atomic.CountRegisteredNodesForGroup(nodeGroup, allNodes)
 			if err != nil {
 				klog.Errorf("Failed to get registered nodes for group %s: %v", nodeGroup.Id(), err)
 				unremovableNodes = p.atomicScaleDownFailed(consideredNodes, ngSize, unremovableNodes, nodeGroup)
-			} else if len(registeredNodes) == len(consideredNodes) {
+			} else if registeredCount == len(consideredNodes) {
 				klog.V(2).Infof("Scheduling atomic scale down for all %v registered nodes from node group %s", len(consideredNodes), nodeGroup.Id())
 				nodesToBeRemoved = append(nodesToBeRemoved, consideredNodes...)
 			} else {
-				unremovableNodes = p.atomicScaleDownFailed(consideredNodes, len(registeredNodes), unremovableNodes, nodeGroup)
+				unremovableNodes = p.atomicScaleDownFailed(consideredNodes, registeredCount, unremovableNodes, nodeGroup)
 			}
 		}
 	}
@@ -167,29 +166,6 @@ func allNodes(s clustersnapshot.ClusterSnapshot) ([]*v1.Node, error) {
 		nodes[i] = ni.Node()
 	}
 	return nodes, nil
-}
-
-func (p *AtomicResizeFilteringProcessor) getAllRegisteredNodesForNodeGroup(nodeGroup cloudprovider.NodeGroup, allNodes []*v1.Node) ([]*v1.Node, error) {
-	allNodesInNodeGroup, err := nodeGroup.Nodes()
-	if err != nil {
-		return nil, err
-	}
-	nodeByNodeName := map[string]cloudprovider.Instance{}
-	for _, node := range allNodesInNodeGroup {
-		nodeByNodeName[node.Id] = node
-	}
-	var registeredNodesForNodeGroup []*v1.Node
-	for _, node := range allNodes {
-		if val, ok := node.Annotations[annotations.NodeUpcomingAnnotation]; ok {
-			if res, ok := strconv.ParseBool(val); ok == nil && res {
-				continue
-			}
-		}
-		if _, ok := nodeByNodeName[node.Spec.ProviderID]; ok {
-			registeredNodesForNodeGroup = append(registeredNodesForNodeGroup, node)
-		}
-	}
-	return registeredNodesForNodeGroup, nil
 }
 
 // CleanUp is called at CA termination
