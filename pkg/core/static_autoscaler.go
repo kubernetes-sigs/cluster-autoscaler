@@ -918,6 +918,17 @@ func (a *StaticAutoscaler) scaleDown(ctx context.Context, state *loopState) caer
 			scaleDownStatus.NodeDeleteResults = nodeDeletionResults
 			scaleDownStatus.NodeDeleteResultsAsOf = nodeDeletionResultsAsOf
 			a.scaleDownActuator.ClearResultsNotNewerThan(scaleDownStatus.NodeDeleteResultsAsOf)
+			// Node deletions run asynchronously after StartDeletion returns, so their
+			// outcomes never surface through the error returned by StartDeletion.
+			// Refresh lastScaleDownFailTime when any drained result failed, so that the
+			// cooldown configured via --scale-down-delay-after-failure is honored.
+			for nodeName, nodeDeletionResult := range nodeDeletionResults {
+				if nodeDeletionResult.Err != nil {
+					logger.V(1).Info("Node deletion failed, starting scale down fail cooldown", "node", nodeName, "err", nodeDeletionResult.Err)
+					a.lastScaleDownFailTime = nodeDeletionResultsAsOf
+					break
+				}
+			}
 			scaleDownStatus.SetUnremovableNodesInfo(ctx, a.scaleDownPlanner.UnremovableNodes(), a.scaleDownPlanner.NodeUtilizationMap(), a.CloudProvider)
 			a.processors.ScaleDownStatusProcessor.Process(ctx, a.AutoscalingContext, scaleDownStatus)
 		}
