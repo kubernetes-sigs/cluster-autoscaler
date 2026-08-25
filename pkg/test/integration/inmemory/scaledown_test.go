@@ -17,7 +17,6 @@ limitations under the License.
 package inmemory
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"testing/synctest"
@@ -76,7 +75,7 @@ func TestScaleDown_PartialFailure(t *testing.T) {
 				fakes := infra.Fakes
 
 				synctest.Test(t, func(t *testing.T) {
-					ctx, cancel := context.WithCancel(context.Background())
+					ctx, cancel := synctestutils.GetTestContext(t)
 					defer synctestutils.TearDown(cancel)
 
 					autoscaler, _, err := integration.DefaultAutoscalingBuilder(options, infra).Build(ctx)
@@ -124,10 +123,10 @@ func TestScaleDown_PartialFailure(t *testing.T) {
 					})
 
 					// 1st loop: Marks non-atomic nodes as unneeded. Atomic node groups bypass unneeded time and attempt scale-down immediately, but fail due to taint errors.
-					synctestutils.RunOnceAfter(t, autoscaler, 10*time.Second)
+					synctestutils.RunOnceAfter(ctx, t, autoscaler, 10*time.Second)
 
 					// 2nd loop: timer exceeds unneeded time, deletion triggered
-					synctestutils.RunOnceAfter(t, autoscaler, time.Minute+time.Second)
+					synctestutils.RunOnceAfter(ctx, t, autoscaler, time.Minute+time.Second)
 
 					// Wait for Actuator.deleteNodesAsync to wake up from its nodeDeleteDelayAfterTaint sleep
 					time.Sleep(2 * time.Second)
@@ -136,19 +135,19 @@ func TestScaleDown_PartialFailure(t *testing.T) {
 					// Verify expected target sizes after partial deletion
 					atomicGroup := fakes.CloudProvider.GetNodeGroup("ng-atomic")
 					assert.NotNil(t, atomicGroup, "expected ng-atomic group to exist")
-					atomicSize, err := atomicGroup.TargetSize()
+					atomicSize, err := atomicGroup.TargetSize(ctx)
 					assert.NoError(t, err)
 					assert.Equal(t, tc.expectedTargetSizeAtomic, atomicSize, "atomic target size mismatch")
 
 					nonAtomicGroup := fakes.CloudProvider.GetNodeGroup("ng-nonatomic")
 					assert.NotNil(t, nonAtomicGroup, "expected ng-nonatomic group to exist")
-					nonAtomicSize, err := nonAtomicGroup.TargetSize()
+					nonAtomicSize, err := nonAtomicGroup.TargetSize(ctx)
 					assert.NoError(t, err)
 					assert.Equal(t, tc.expectedTargetSizeNonAtomic, nonAtomicSize, fmt.Sprintf("nonatomic target size mismatch, PartialTaintActuation enabled: %v", tc.partialTaintActuationEnabled))
 
 					happyPathGroup := fakes.CloudProvider.GetNodeGroup("ng-happy-path")
 					assert.NotNil(t, happyPathGroup, "expected ng-happy-path group to exist")
-					happyPathSize, err := happyPathGroup.TargetSize()
+					happyPathSize, err := happyPathGroup.TargetSize(ctx)
 					assert.NoError(t, err)
 
 					if tc.partialTaintActuationEnabled {
@@ -212,7 +211,7 @@ func TestScaleDown_HappyPath(t *testing.T) {
 					fakes := infra.Fakes
 
 					synctest.Test(t, func(t *testing.T) {
-						ctx, cancel := context.WithCancel(context.Background())
+						ctx, cancel := synctestutils.GetTestContext(t)
 						defer synctestutils.TearDown(cancel)
 
 						autoscaler, _, err := integration.DefaultAutoscalingBuilder(options, infra).Build(ctx)
@@ -225,10 +224,10 @@ func TestScaleDown_HappyPath(t *testing.T) {
 						)
 
 						// 1st loop: Marks non-atomic nodes as unneeded.
-						synctestutils.MustRunOnceAfter(t, autoscaler, 10*time.Second)
+						synctestutils.MustRunOnceAfter(ctx, t, autoscaler, 10*time.Second)
 
 						// 2nd loop: timer exceeds unneeded time, deletion triggered for non-atomic nodes
-						synctestutils.MustRunOnceAfter(t, autoscaler, time.Minute+time.Second)
+						synctestutils.MustRunOnceAfter(ctx, t, autoscaler, time.Minute+time.Second)
 
 						// Wait for Actuator.deleteNodesAsync to wake up from its nodeDeleteDelayAfterTaint sleep
 						time.Sleep(2 * time.Second)
@@ -237,7 +236,7 @@ func TestScaleDown_HappyPath(t *testing.T) {
 						// Verify expected target sizes after deletion
 						group := fakes.CloudProvider.GetNodeGroup("ng")
 						assert.NotNil(t, group, "expected ng group to exist")
-						size, err := group.TargetSize()
+						size, err := group.TargetSize(ctx)
 						assert.NoError(t, err)
 						assert.Equal(t, 0, size, "expected target size to be 0 for happy path scaledown")
 

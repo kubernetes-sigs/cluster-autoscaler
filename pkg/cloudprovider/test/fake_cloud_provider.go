@@ -17,9 +17,9 @@ limitations under the License.
 package test
 
 import (
-	"k8s.io/apimachinery/pkg/types"
 	"context"
 	"fmt"
+	"k8s.io/apimachinery/pkg/types"
 	"strings"
 	"sync"
 	"time"
@@ -543,7 +543,7 @@ func (n *NodeGroup) addNodeFromTemplate(nodeName string) *apiv1.Node {
 func cloneNodeForNodeGroup(templateNode *apiv1.Node, ngName, nodeName string) *apiv1.Node {
 	node := templateNode.DeepCopy()
 	node.Name = nodeName
-		node.UID = types.UID(nodeName)
+	node.UID = types.UID(nodeName)
 	node.Spec.ProviderID = fmt.Sprintf("fake-provider/%s/%s", ngName, node.Name)
 	return node
 }

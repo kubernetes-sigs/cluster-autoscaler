@@ -17,7 +17,6 @@ limitations under the License.
 package actuation
 
 import (
-	"context"
 	"fmt"
 	"runtime"
 	"sync"
@@ -28,6 +27,7 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
+	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 )
 
 type mockClock struct {
@@ -167,6 +167,8 @@ func TestUpdateLatencyCalculation(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
+			ctx := GetTestContext(t)
+
 			mc := NewMockClock(tc.startTime)
 			nodes := map[string]*apiv1.Node{}
 			for _, name := range tc.nodes {
@@ -183,7 +185,7 @@ func TestUpdateLatencyCalculation(t *testing.T) {
 				// Without this, the Start() loop could starve the main test thread on single-core setups (e.g. GOMAXPROCS=1).
 				runtime.Gosched()
 			}
-			go updateLatencyTracker.Start(context.TODO())
+			go updateLatencyTracker.Start(ctx)
 			for _, node := range nodes {
 				updateLatencyTracker.StartTimeChan <- nodeTaintStartTime{node.Name, tc.startTime}
 			}

@@ -17,10 +17,12 @@ limitations under the License.
 package test
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -31,6 +33,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
+	"k8s.io/klog/v2/ktesting"
 	kube_types "k8s.io/kubernetes/pkg/kubelet/types"
 )
 
@@ -375,7 +379,7 @@ func BuildTestNode(name string, millicpuCapacity int64, memCapacity int64, opts 
 	node := &apiv1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:     name,
-				UID:      types.UID(name),
+			UID:      types.UID(name),
 			SelfLink: fmt.Sprintf("/api/v1/nodes/%s", name),
 			Labels:   map[string]string{},
 		},
@@ -658,4 +662,15 @@ func IgnoreObjectOrder[T interface{ GetName() string }]() cmp.Option {
 	return cmpopts.SortSlices(func(c1, c2 T) bool {
 		return c1.GetName() < c2.GetName()
 	})
+}
+
+// GetTestContext returns context to be used in unit tests
+// Logger in this context contains test name in the metadata.
+func GetTestContext(t *testing.T) context.Context {
+	logger, ctx := ktesting.NewTestContext(t)
+	// Append test name to logs
+	logger = klog.LoggerWithValues(logger, "test", t.Name())
+	// Re-wrap the updated logger back into the context
+	ctx = klog.NewContext(ctx, logger)
+	return ctx
 }

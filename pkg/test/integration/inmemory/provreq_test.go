@@ -70,7 +70,7 @@ func TestProvReqFullLifecycle(t *testing.T) {
 		tg1, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(context.TODO())
 		assert.Equal(t, 1, tg1)
 
-		synctestutils.MustRunOnceAfter(t, autoscaler, 10*time.Second)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, 10*time.Second)
 
 		// The NodeGroup should have scaled up by 1 due to the PR
 		tg1After, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(context.TODO())
@@ -84,10 +84,10 @@ func TestProvReqFullLifecycle(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Run CA once to trigger the unneeded evaluation
-		synctestutils.MustRunOnceAfter(t, autoscaler, 10*time.Second)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, 10*time.Second)
 
 		// Step time forward by the ScaleDownUnneededTime (10 mins) + buffer (5 mins)
-		synctestutils.MustRunOnceAfter(t, autoscaler, 15*time.Minute)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, 15*time.Minute)
 
 		tg1Final, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(context.TODO())
 		assert.Equal(t, 1, tg1Final)

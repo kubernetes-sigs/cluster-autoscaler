@@ -18,23 +18,26 @@ package synctest
 
 import (
 	"context"
-	"github.com/stretchr/testify/assert"
-	"sigs.k8s.io/cluster-autoscaler/pkg/core"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"k8s.io/klog/v2"
+	"k8s.io/klog/v2/ktesting"
+	"sigs.k8s.io/cluster-autoscaler/pkg/core"
 )
 
 // RunOnceAfter advances the virtual clock by the specified duration and then
 // executes a single Cluster Autoscaler cycle.
-func RunOnceAfter(t *testing.T, autoscaler core.Autoscaler, d time.Duration) error {
+func RunOnceAfter(ctx context.Context, t *testing.T, autoscaler core.Autoscaler, d time.Duration) error {
 	t.Helper()
 
 	// Ensure any pending work is done before changing the time.
 	synctest.Wait()
 
 	time.Sleep(d)
-	err := autoscaler.RunOnce(t.Context(), time.Now())
+	err := autoscaler.RunOnce(ctx, time.Now())
 
 	// Let side-effects of the RunOnce finish.
 	synctest.Wait()
@@ -44,9 +47,9 @@ func RunOnceAfter(t *testing.T, autoscaler core.Autoscaler, d time.Duration) err
 // MustRunOnceAfter is a helper that calls RunOnceAfter and
 // immediately fails the test if an error occurs.
 // Use this for "happy path" simulation steps.
-func MustRunOnceAfter(t *testing.T, autoscaler core.Autoscaler, d time.Duration) {
+func MustRunOnceAfter(ctx context.Context, t *testing.T, autoscaler core.Autoscaler, d time.Duration) {
 	t.Helper()
-	err := RunOnceAfter(t, autoscaler, d)
+	err := RunOnceAfter(ctx, t, autoscaler, d)
 	assert.NoError(t, err)
 }
 
@@ -58,4 +61,11 @@ func TearDown(cancel context.CancelFunc) {
 	// closed context channel, and terminate gracefully.
 	time.Sleep(1 * time.Minute)
 	synctest.Wait()
+}
+
+func GetTestContext(t *testing.T) (context.Context, context.CancelFunc) {
+	logger := ktesting.NewLogger(t, ktesting.DefaultConfig)
+	logger = klog.LoggerWithValues(logger, "test", t.Name())
+	ctx, cancel := context.WithCancel(t.Context())
+	return klog.NewContext(ctx, logger), cancel
 }

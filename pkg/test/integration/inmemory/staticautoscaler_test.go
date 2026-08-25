@@ -63,7 +63,7 @@ func TestStaticAutoscaler_FullLifecycle(t *testing.T) {
 		fakes.K8s.AddPod(p)
 
 		// Run a loop, CA should scale up a single Node for the pending Pod.
-		synctestutils.MustRunOnceAfter(t, autoscaler, stepDuration)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, stepDuration)
 		tg1, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(context.TODO())
 		assert.Equal(t, 2, tg1)
 		assert.Equal(t, 2, len(fakes.K8s.Nodes().Items))
@@ -72,9 +72,9 @@ func TestStaticAutoscaler_FullLifecycle(t *testing.T) {
 		fakes.K8s.DeletePod(p.Namespace, p.Name)
 
 		// Run CA loop once to mark the Node as unneeded.
-		synctestutils.MustRunOnceAfter(t, autoscaler, stepDuration)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, stepDuration)
 		// Run another CA loop after the unneeded time elapses, CA should delete the Node.
-		synctestutils.MustRunOnceAfter(t, autoscaler, unneededTime+time.Nanosecond)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, unneededTime+time.Nanosecond)
 
 		finalSize, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(context.TODO())
 		assert.Equal(t, 1, finalSize)
@@ -105,14 +105,14 @@ func TestScaleUp_ResourceLimits(t *testing.T) {
 		// Scale-up should be blocked.
 		fakes.CloudProvider.SetResourceLimit(cloudprovider.ResourceNameCores, 0, 1)
 
-		synctestutils.MustRunOnceAfter(t, autoscaler, unneededTime)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, unneededTime)
 		size, _ := fakes.CloudProvider.GetNodeGroup("ng").TargetSize(context.TODO())
 		assert.Equal(t, 1, size, "Should not scale up when max cores limit is reached")
 
 		// Scale-up should succeed.
 		fakes.CloudProvider.SetResourceLimit(cloudprovider.ResourceNameCores, 0, 2)
 
-		synctestutils.MustRunOnceAfter(t, autoscaler, unneededTime)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, unneededTime)
 		newSize, _ := fakes.CloudProvider.GetNodeGroup("ng").TargetSize(context.TODO())
 		assert.Equal(t, 2, newSize, "Should scale up after resource limit is increased")
 	})

@@ -17,7 +17,6 @@ limitations under the License.
 package actuation
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -1382,6 +1381,7 @@ func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suf
 }
 
 func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
+	ctx := GetTestContext(t)
 	// Insert all nodes into a map to support live node updates and GETs.
 	emptyNodeGroupViews, drainNodeGroupViews := []*budgets.NodeGroupView{}, []*budgets.NodeGroupView{}
 	allEmptyNodes, allDrainNodes := []*apiv1.Node{}, []*apiv1.Node{}
@@ -1594,9 +1594,9 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 	var gotScaleDownNodes []*status.ScaleDownNode
 	var gotErr error
 	if force {
-		gotResult, gotScaleDownNodes, gotErr = actuator.StartForceDeletion(context.TODO(), allEmptyNodes, allDrainNodes)
+		gotResult, gotScaleDownNodes, gotErr = actuator.StartForceDeletion(ctx, allEmptyNodes, allDrainNodes)
 	} else {
-		gotResult, gotScaleDownNodes, gotErr = actuator.StartDeletion(context.TODO(), allEmptyNodes, allDrainNodes)
+		gotResult, gotScaleDownNodes, gotErr = actuator.StartDeletion(ctx, allEmptyNodes, allDrainNodes)
 	}
 
 	if diff := cmp.Diff(tc.wantErr, gotErr, cmpopts.EquateErrors()); diff != "" {
@@ -1833,6 +1833,7 @@ func TestStartDeletionInBatchBasic(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			ctx := GetTestContext(t)
 			test := test
 			gotFailedRequest := func(nodeGroupId string) bool {
 				val, _ := test.failedRequests[nodeGroupId]
@@ -1903,7 +1904,7 @@ func TestStartDeletionInBatchBasic(t *testing.T) {
 			}
 
 			for _, nodes := range deleteNodes {
-				actuator.StartDeletion(context.TODO(), nodes, []*apiv1.Node{})
+				actuator.StartDeletion(ctx, nodes, []*apiv1.Node{})
 				time.Sleep(deleteInterval)
 			}
 			wantDeletedNodes := 0

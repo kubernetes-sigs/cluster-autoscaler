@@ -97,11 +97,11 @@ func RunTestClusterStateRegistryScaleUpWithDeletedNodes(t *testing.T, setupFacto
 
 		// ======== STEP 1: Force CA to scale down some empty Nodes ========
 		// The remaining Nodes from the NodeGroup that don't have a Pod scheduled are empty. Run CA loop once to start tracking them as unneeded.
-		if err := synctestutils.RunOnceAfter(t, autoscaler, 0); err != nil {
+		if err := synctestutils.RunOnceAfter(ctx, t, autoscaler, 0); err != nil {
 			t.Fatalf("RunOnce() unexpected error: %v", err)
 		}
 		// Run CA loop again after the unneeded threshold has passed, CA should start scaling down the empty Nodes.
-		if err := synctestutils.RunOnceAfter(t, autoscaler, sdUnneededTime+time.Microsecond); err != nil {
+		if err := synctestutils.RunOnceAfter(ctx, t, autoscaler, sdUnneededTime+time.Microsecond); err != nil {
 			t.Fatalf("RunOnce() unexpected error: %v", err)
 		}
 		// RunOnceAfter() above only returns after all goroutines in the bubble are blocked, so we're guaranteed that DeleteNodes() already decreased the
@@ -117,7 +117,7 @@ func RunTestClusterStateRegistryScaleUpWithDeletedNodes(t *testing.T, setupFacto
 			k8s.AddPod(pod)
 		}
 		// Run CA loop with the new pending Pods, CA should scale up a dedicated Node for each pending Pod.
-		if err := synctestutils.RunOnceAfter(t, autoscaler, stepDuration); err != nil {
+		if err := synctestutils.RunOnceAfter(ctx, t, autoscaler, stepDuration); err != nil {
 			t.Fatalf("RunOnce() unexpected error: %v", err)
 		}
 		// RunOnceAfter() above only returns after all goroutines in the bubble are blocked, so we're guaranteed that IncreaseSize() already increased the
@@ -127,7 +127,7 @@ func RunTestClusterStateRegistryScaleUpWithDeletedNodes(t *testing.T, setupFacto
 
 		// ======== STEP 3: Assert that CA doesn't scale up again for the same Pods ========
 		// Run CA loop after a short delay. The deleted Nodes should still be present, and the new Nodes still shouldn't.
-		if err := synctestutils.RunOnceAfter(t, autoscaler, stepDuration); err != nil {
+		if err := synctestutils.RunOnceAfter(ctx, t, autoscaler, stepDuration); err != nil {
 			t.Fatalf("RunOnce() unexpected error: %v", err)
 		}
 		// CA shouldn't scale up, because the pending Pods should be packed on upcoming Nodes from the previous scale-up. The sizes should be identical to the previous step.
@@ -135,7 +135,7 @@ func RunTestClusterStateRegistryScaleUpWithDeletedNodes(t *testing.T, setupFacto
 
 		// ======== STEP 4: Assert that deleted Nodes disappear from the API at the expected time ========
 		// Run CA loop after nodeGarbageCollectionDelay (3 times stepDuration) elapses since the scale-down.
-		if err := synctestutils.RunOnceAfter(t, autoscaler, stepDuration); err != nil {
+		if err := synctestutils.RunOnceAfter(ctx, t, autoscaler, stepDuration); err != nil {
 			t.Fatalf("RunOnce() unexpected error: %v", err)
 		}
 		// The Nodes should be gone from the API, so we should only see the original Nodes that had Pods scheduled. No changes to the targetSize are expected.
@@ -143,7 +143,7 @@ func RunTestClusterStateRegistryScaleUpWithDeletedNodes(t *testing.T, setupFacto
 
 		// ======== STEP 5: Assert that scaled-up Nodes appear in the API at the expected time ========
 		// Run CA loop after nodeRegistrationDelay elapses since the scale-up.
-		if err := synctestutils.RunOnceAfter(t, autoscaler, stepDuration+time.Microsecond); err != nil {
+		if err := synctestutils.RunOnceAfter(ctx, t, autoscaler, stepDuration+time.Microsecond); err != nil {
 			t.Fatalf("RunOnce() unexpected error: %v", err)
 		}
 		// The new Nodes should finally be visible in the API. No changes to the targetSize are expected.
@@ -151,7 +151,7 @@ func RunTestClusterStateRegistryScaleUpWithDeletedNodes(t *testing.T, setupFacto
 
 		// ======== STEP 6: Assert that the final state is stable  ========
 		// Run CA loop after a long delay to verify that the final state is stable.
-		if err := synctestutils.RunOnceAfter(t, autoscaler, 100*stepDuration); err != nil {
+		if err := synctestutils.RunOnceAfter(ctx, t, autoscaler, 100*stepDuration); err != nil {
 			t.Fatalf("RunOnce() unexpected error: %v", err)
 		}
 		// Sizes should be identical to the previous step.

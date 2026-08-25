@@ -235,10 +235,6 @@ func (a *Actuator) taintNodesSync(ctx context.Context, nodeGroupViews []*budgets
 	nodesToTaint := make([]*apiv1.Node, 0)
 	var updateLatencyTracker *UpdateLatencyTracker
 	nodeDeleteDelayAfterTaint := a.nodeDeleteDelayAfterTaint
-	if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
-		updateLatencyTracker = NewUpdateLatencyTracker(a.autoscalingCtx.AutoscalingKubeClients.ListerRegistry.AllNodeLister())
-		go updateLatencyTracker.Start(ctx)
-	}
 
 	for _, bucket := range nodeGroupViews {
 		for _, node := range bucket.Nodes {
@@ -252,7 +248,7 @@ func (a *Actuator) taintNodesSync(ctx context.Context, nodeGroupViews []*budgets
 		for _, node := range nodesToTaint {
 			updateLatencyTracker.StartTimeChan <- nodeTaintStartTime{node.Name, time.Now()}
 		}
-		go updateLatencyTracker.Start()
+		go updateLatencyTracker.Start(ctx)
 	}
 
 	// Taint nodes concurrently and record failures
@@ -279,7 +275,7 @@ func (a *Actuator) taintNodesSync(ctx context.Context, nodeGroupViews []*budgets
 			if _, found := failedNodes[taintedNode.UID]; found {
 				continue
 			}
-			_, _ = taints.CleanToBeDeleted(ctx,taintedNode, a.autoscalingCtx.ClientSet, a.autoscalingCtx.CordonNodeBeforeTerminate)
+			_, _ = taints.CleanToBeDeleted(ctx, taintedNode, a.autoscalingCtx.ClientSet, a.autoscalingCtx.CordonNodeBeforeTerminate)
 		}
 		// No need to record taint propagation latency, all taints are cleaned up.
 		if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
@@ -309,7 +305,7 @@ func (a *Actuator) taintNodesSync(ctx context.Context, nodeGroupViews []*budgets
 		klog.Infof("couldn't taint %d nodes with ToBeDeleted, proceeding with partial scale down or bucket cleanup", len(failedNodes))
 
 		for _, bucket := range nodeGroupViews {
-			bucketWithSuccessfulNodes, bucketNodesToClean := a.resolveBucketFailures(bucket, failedNodes)
+			bucketWithSuccessfulNodes, bucketNodesToClean := a.resolveBucketFailures(ctx, bucket, failedNodes)
 			if bucketWithSuccessfulNodes != nil {
 				successfulNodeGroupViews = append(successfulNodeGroupViews, bucketWithSuccessfulNodes)
 			}
@@ -334,8 +330,8 @@ func (a *Actuator) taintNodesSync(ctx context.Context, nodeGroupViews []*budgets
 //   - If the node is from a regular, non-atomic nodegorup, other successfully tainted nodes from this nodegroup can be deleted.
 //
 // Returns a nodegroup view that contains nodes that can be deleted, and a list of nodes from which the taint has to be cleaned up.
-func (a *Actuator) resolveBucketFailures(bucket *budgets.NodeGroupView, failedNodes map[types.UID]struct{}) (*budgets.NodeGroupView, []*apiv1.Node) {
-	opts, err := bucket.Group.GetOptions(a.autoscalingCtx.NodeGroupDefaults)
+func (a *Actuator) resolveBucketFailures(ctx context.Context, bucket *budgets.NodeGroupView, failedNodes map[types.UID]struct{}) (*budgets.NodeGroupView, []*apiv1.Node) {
+	opts, err := bucket.Group.GetOptions(ctx, a.autoscalingCtx.NodeGroupDefaults)
 	isAtomic := false
 	if err != nil {
 		klog.Warningf("Failed to get options for node group %v: %v, assuming atomic node group to be safe", bucket.Group.Id(), err)
