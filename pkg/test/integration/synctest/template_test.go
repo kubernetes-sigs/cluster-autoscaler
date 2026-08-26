@@ -63,7 +63,7 @@ func TestStaticAutoscaler_Template(t *testing.T) {
 		fakes.CloudProvider.AddNodeGroup("ng", fakecloudprovider.WithNode(n))
 		fakes.K8s.AddPod(test.BuildScheduledTestPod("p", 600, 100, n.Name))
 
-		err = RunOnceAfter(t, autoscaler, unneededTime)
+		err = RunOnceAfter(ctx, t, autoscaler, unneededTime)
 		assert.NoError(t, err)
 		// Make assertions.
 		size, _ := fakes.CloudProvider.GetNodeGroup("ng").TargetSize(context.TODO())

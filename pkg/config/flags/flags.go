@@ -211,6 +211,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&p.o.PendingPodsBatchingTimeout, "pending-pods-batching-timeout", 4*time.Minute, "The maximum time spends when running scheduling simulations when preparing the batch of pods passed to scale up logic. This timeout is used in core filter-out pod list processor.")
 	fs.BoolVar(&p.o.GracefulDegradationEnabled, "enable-graceful-degradation", false, "Enables graceful degradation for unschedulable pods. When enabled, scheduling simulations during filter out pod list processor will be stopped after a timeout(specified by scheduling-simulation-timeout) and CA will proceed with a sub set of pods.")
 	fs.BoolVar(&p.o.InterPodAffinityHostnameFastPath, "enable-inter-pod-affinity-hostname-fast-path", false, "Enable the InterPodAffinityHostnameFastPath scheduler feature gate.")
+	fs.BoolVar(&p.o.PartialTaintActuationEnabled, "partial-taint-actuation-enabled", false, "If true, Cluster Autoscaler will proceed with deleting successfully tainted nodes in non-atomic nodegroups even if individual node taints fail in the same batch.")
 
 	// Deprecated flags
 	fs.StringArrayVar(&p.ignoreTaints, "ignore-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group (Deprecated, use startup-taints instead)")
