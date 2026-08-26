@@ -63,6 +63,8 @@ func TearDown(cancel context.CancelFunc) {
 	synctest.Wait()
 }
 
+// GetTestContext returns a cancellable context to be used in unit tests and the cancellation function.
+// Logger in this context contains test name in the metadata.
 func GetTestContext(t *testing.T) (context.Context, context.CancelFunc) {
 	logger := ktesting.NewLogger(t, ktesting.DefaultConfig)
 	logger = klog.LoggerWithValues(logger, "test", t.Name())

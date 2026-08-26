@@ -74,8 +74,11 @@ func NewUpdateLatencyTracker(nodeLister kubernetes.NodeLister, maxNodes int) *Up
 // Start starts listening for node tainting start timestamps and update the timestamps that
 // the taint appears for the first time for a particular node. Listen ExpectedNodeCountChan for stop/await signals
 func (u *UpdateLatencyTracker) Start(ctx context.Context) {
+	defer close(u.ResultChan)
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case expectedCount, ok := <-u.ExpectedNodeCountChan:
 			if ok {
 				u.drainStartTimeChan()
@@ -91,6 +94,7 @@ func (u *UpdateLatencyTracker) Start(ctx context.Context) {
 			u.remainingNodeCount += 1
 			continue
 		default:
+			u.drainStartTimeChan()
 		}
 		u.updateFinishTime(ctx)
 		u.sleep(u.sleepDurationWhenPolling)
@@ -151,15 +155,22 @@ func (u *UpdateLatencyTracker) await(ctx context.Context) {
 	logger := klog.FromContext(ctx)
 	waitingForTaintingStartTime := u.now()
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		switch {
 		case u.remainingNodeCount <= 0:
 			latency := u.calculateLatency()
-			u.ResultChan <- latency
+			select {
+			case u.ResultChan <- latency:
+			case <-ctx.Done():
+			}
 			return
 		case u.now().After(waitingForTaintingStartTime.Add(waitForTaintingTimeoutDuration)):
 			logger.Error(nil, "Timeout before tainting all nodes, latency measurement will be stale")
-
-			close(u.ResultChan)
 			return
 		default:
 			u.sleep(u.sleepDurationWhenPolling)

@@ -2080,6 +2080,8 @@ type partialTaintingTestCase struct {
 	nodeGroupName   string
 	nodeGroups      map[string]*testprovider.TestNodeGroup
 	emptyNodes      []nodeGroupViewInfo
+	drainNodes      []nodeGroupViewInfo
+	pods            map[string][]*apiv1.Pod
 	failedNodeTaint map[string]bool
 	enabled         expectedActuationResult
 	disabled        expectedActuationResult
@@ -2136,6 +2138,39 @@ func TestStartDeletion_PartialTaintActuation(t *testing.T) {
 				deletedNodes: nil,
 			},
 		},
+		{
+			description:   "atomic node group: empty node fails taint, non-empty node is not scaled down",
+			nodeGroupName: "atomic-2",
+			nodeGroups: map[string]*testprovider.TestNodeGroup{
+				"atomic-2": sizedNodeGroup("atomic-2", 2, true, ignoreDaemonSetsUtilization),
+			},
+			emptyNodes: []nodeGroupViewInfo{
+				{"atomic-2", 0, 1},
+			},
+			drainNodes: []nodeGroupViewInfo{
+				{"atomic-2", 1, 2},
+			},
+			pods: map[string][]*apiv1.Pod{
+				"atomic-2-node-1": {
+					{
+						ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "default", UID: "uid"},
+					},
+				},
+			},
+			failedNodeTaint: map[string]bool{
+				"atomic-2-node-0": true,
+			},
+			disabled: expectedActuationResult{
+				status:       status.ScaleDownError,
+				err:          caerrors.NewAutoscalerErrorf(caerrors.ApiCallError, "couldn't taint 1 nodes with ToBeDeleted"),
+				deletedNodes: nil,
+			},
+			enabled: expectedActuationResult{
+				status:       status.ScaleDownError,
+				err:          caerrors.NewAutoscalerErrorf(caerrors.ApiCallError, "couldn't taint 1 nodes with ToBeDeleted and no nodes can be scaled down"),
+				deletedNodes: nil,
+			},
+		},
 	}
 
 	buildExpected := func(wantResult status.ScaleDownResult, wantDeleted []string, nodeGroupName string) (scaleDownStatusInfo, map[string]status.NodeDeleteResult, map[string][][]apiv1.Taint) {
@@ -2167,6 +2202,8 @@ func TestStartDeletion_PartialTaintActuation(t *testing.T) {
 				baseTC := startDeletionTestCase{
 					nodeGroups:                    tc.nodeGroups,
 					emptyNodes:                    tc.emptyNodes,
+					drainNodes:                    tc.drainNodes,
+					pods:                          tc.pods,
 					failedNodeTaint:               tc.failedNodeTaint,
 					wantStatus:                    statusInfo,
 					wantErr:                       tc.disabled.err,
@@ -2184,6 +2221,8 @@ func TestStartDeletion_PartialTaintActuation(t *testing.T) {
 				baseTC := startDeletionTestCase{
 					nodeGroups:                    tc.nodeGroups,
 					emptyNodes:                    tc.emptyNodes,
+					drainNodes:                    tc.drainNodes,
+					pods:                          tc.pods,
 					failedNodeTaint:               tc.failedNodeTaint,
 					wantStatus:                    statusInfo,
 					wantErr:                       tc.enabled.err,
