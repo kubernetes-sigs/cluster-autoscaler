@@ -213,6 +213,10 @@ func (o *checkCapacityProvClass) checkCapacity(ctx context.Context, workload *pr
 		o.autoscalingCtx.ClusterSnapshot.Revert()
 		return fmt.Errorf("could not simulate ProvisioningRequest %s/%s: %w", provReq.Namespace, provReq.Name, err)
 	}
+	if err := ctx.Err(); err != nil {
+		o.autoscalingCtx.ClusterSnapshot.Revert()
+		return fmt.Errorf("could not simulate ProvisioningRequest %s/%s because scheduling was interrupted: %w", provReq.Namespace, provReq.Name, err)
+	}
 	if len(schedulingResult.Statuses) == len(workload.Pods) {
 		commitError := o.autoscalingCtx.ClusterSnapshot.Commit()
 		if commitError != nil {

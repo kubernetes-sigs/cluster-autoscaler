@@ -516,8 +516,9 @@ func setupTest(t *testing.T, client *provreqclient.ProvisioningRequestClient, no
 	clusterState.UpdateNodes(context.Background(), nodes, now)
 
 	var injector *provreq.ProvisioningRequestPodsInjector
+	simulationWorkloadBuilder := pods.NewSimulationWorkloadBuilder(nil)
 	if batchProcessing {
-		injector = provreq.NewFakePodsInjector(client, clocktesting.NewFakePassiveClock(now))
+		injector = provreq.NewFakePodsInjector(client, clocktesting.NewFakePassiveClock(now), simulationWorkloadBuilder)
 	}
 
 	quotasTrackerFactory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{
@@ -526,7 +527,7 @@ func setupTest(t *testing.T, client *provreqclient.ProvisioningRequestClient, no
 	})
 	orchestrator := &provReqOrchestrator{
 		client:              client,
-		provisioningClasses: []ProvisioningClass{checkcapacity.New(client, injector, pods.NewSimulationWorkloadBuilder(nil)), besteffortatomic.New(client)},
+		provisioningClasses: []ProvisioningClass{checkcapacity.New(client, injector, simulationWorkloadBuilder), besteffortatomic.New(client)},
 	}
 	orchestrator.Initialize(&autoscalingCtx, processors, clusterState, estimatorBuilder, taints.TaintConfig{}, quotasTrackerFactory)
 	return orchestrator, nodeInfos

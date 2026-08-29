@@ -30,6 +30,7 @@ import (
 	provreqv1 "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
 	resourcelisters "k8s.io/client-go/listers/resource/v1"
 	"k8s.io/client-go/tools/cache"
+	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/conditions"
 	provreqpods "sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/pods"
@@ -43,7 +44,7 @@ func TestGetCheckCapacityBatchCarriesMaterializedClaims(t *testing.T) {
 	builder := provreqpods.NewSimulationWorkloadBuilder(injectorTemplateLister(t,
 		&resourcev1.ResourceClaimTemplate{ObjectMeta: metav1.ObjectMeta{Name: "gpu-template", Namespace: "ns"}},
 	))
-	injector := NewProvisioningRequestPodsInjector(client, time.Minute, 10*time.Minute, 100, true, "", builder)
+	injector := NewFakePodsInjector(client, clocktesting.NewFakePassiveClock(time.Now()), builder)
 
 	batch, err := injector.GetCheckCapacityBatch(t.Context(), 1)
 	require.NoError(t, err)

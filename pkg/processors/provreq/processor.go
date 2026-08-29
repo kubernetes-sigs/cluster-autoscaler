@@ -18,7 +18,6 @@ package provreq
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -145,11 +144,21 @@ func (p *provReqProcessor) Process(ctx context.Context, autoscalingCtx *ca_conte
 // bookCapacity schedule fake pods for ProvisioningRequest that should have reserved capacity
 // in the cluster.
 func (p *provReqProcessor) bookCapacity(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext) error {
-	logger := klog.FromContext(ctx)
 	provReqs, err := p.client.ProvisioningRequests(ctx)
 	if err != nil {
 		return fmt.Errorf("couldn't fetch ProvisioningRequests in the cluster: %v", err)
 	}
+	return p.bookProvisioningRequests(ctx, autoscalingCtx, provReqs)
+}
+
+type capacityBooking struct {
+	provReq  *provreqwrapper.ProvisioningRequest
+	pods     []*apiv1.Pod
+	workload *provreq_pods.SimulationWorkload
+}
+
+func (p *provReqProcessor) bookProvisioningRequests(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, provReqs []*provreqwrapper.ProvisioningRequest) error {
+	logger := klog.FromContext(ctx)
 	nodeInfos, err := autoscalingCtx.ClusterSnapshot.ListNodeInfos()
 	if err != nil {
 		return fmt.Errorf("couldn't list nodes: %v", err)
@@ -163,17 +172,7 @@ func (p *provReqProcessor) bookCapacity(ctx context.Context, autoscalingCtx *ca_
 			}
 		}
 	}
-	podsToCreate := []*apiv1.Pod{}
-	var bookingErrors []error
-	flushPods := func() {
-		if len(podsToCreate) == 0 {
-			return
-		}
-		if err := p.bookPods(ctx, autoscalingCtx, podsToCreate); err != nil {
-			bookingErrors = append(bookingErrors, err)
-		}
-		podsToCreate = nil
-	}
+	var bookings []capacityBooking
 	for _, provReq := range provReqs {
 		if !conditions.ShouldCapacityBeBooked(ctx, provReq, p.checkCapacityProcessorInstance) {
 			continue
@@ -187,12 +186,12 @@ func (p *provReqProcessor) bookCapacity(ctx context.Context, autoscalingCtx *ca_
 			continue
 		}
 		if provisioningrequest.SupportedCheckCapacityClass(ctx, provReq.ProvisioningRequest, p.checkCapacityProcessorInstance) {
-			// Preserve the lister order across provisioning classes while still
-			// keeping each check-capacity request in its own DRA transaction.
-			flushPods()
-			if err := p.bookCheckCapacityProvisioningRequest(ctx, autoscalingCtx, provReq); err != nil {
-				bookingErrors = append(bookingErrors, err)
+			workload, err := p.simulationWorkloadBuilder.ForProvisioningRequest(provReq)
+			if err != nil {
+				p.markFailedToBookCapacity(ctx, provReq, fmt.Sprintf("Couldn't create simulation workload: %v", err))
+				continue
 			}
+			bookings = append(bookings, capacityBooking{provReq: provReq, pods: workload.Pods, workload: workload})
 			continue
 		}
 		pods, err := provreq_pods.PodsForProvisioningRequest(provReq)
@@ -203,63 +202,66 @@ func (p *provReqProcessor) bookCapacity(ctx context.Context, autoscalingCtx *ca_
 			p.markFailedToBookCapacity(ctx, provReq, fmt.Sprintf("Couldn't create pods, err: %v", err))
 			continue
 		}
-		podsToCreate = append(podsToCreate, pods...)
+		bookings = append(bookings, capacityBooking{pods: pods})
 	}
-	flushPods()
-	return errors.Join(bookingErrors...)
+	return p.bookCapacityBookings(ctx, autoscalingCtx, bookings)
 }
 
-func (p *provReqProcessor) bookPods(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, pods []*apiv1.Pod) error {
+func (p *provReqProcessor) bookCapacityBookings(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, bookings []capacityBooking) error {
+	if len(bookings) == 0 {
+		return nil
+	}
+
+	// Schedule all booking Pods together so pod priority is applied globally.
 	autoscalingCtx.ClusterSnapshot.Fork()
-	if _, err := p.injector.TrySchedulePods(ctx, autoscalingCtx.ClusterSnapshot, pods, false, clustersnapshot.SchedulingOptions{}); err != nil {
+	validBookings := make([]capacityBooking, 0, len(bookings))
+	var pods []*apiv1.Pod
+	for _, booking := range bookings {
+		if booking.workload != nil {
+			if err := autoscalingCtx.ClusterSnapshot.DraSnapshot().AddClaims(booking.workload.Claims); err != nil {
+				p.markFailedToBookCapacity(ctx, booking.provReq, fmt.Sprintf("Couldn't add simulated ResourceClaims: %v", err))
+				continue
+			}
+		}
+		validBookings = append(validBookings, booking)
+		pods = append(pods, booking.pods...)
+	}
+	if len(pods) == 0 {
+		autoscalingCtx.ClusterSnapshot.Revert()
+		return nil
+	}
+
+	schedulingResult, err := p.injector.TrySchedulePods(ctx, autoscalingCtx.ClusterSnapshot, pods, false, clustersnapshot.SchedulingOptions{})
+	if err != nil {
 		autoscalingCtx.ClusterSnapshot.Revert()
 		return err
 	}
-	if err := autoscalingCtx.ClusterSnapshot.Commit(); err != nil {
+	if err := ctx.Err(); err != nil {
 		autoscalingCtx.ClusterSnapshot.Revert()
-		return fmt.Errorf("couldn't commit booked capacity: %w", err)
-	}
-	return nil
-}
-
-func (p *provReqProcessor) bookCheckCapacityProvisioningRequest(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, provReq *provreqwrapper.ProvisioningRequest) error {
-	workload, err := p.simulationWorkloadBuilder.ForProvisioningRequest(provReq)
-	if err != nil {
-		p.markFailedToBookCapacity(ctx, provReq, fmt.Sprintf("Couldn't create simulation workload: %v", err))
-		return nil
+		return fmt.Errorf("couldn't book capacity because scheduling was interrupted: %w", err)
 	}
 
-	autoscalingCtx.ClusterSnapshot.Fork()
-	if err := autoscalingCtx.ClusterSnapshot.DraSnapshot().AddClaims(workload.Claims); err != nil {
-		autoscalingCtx.ClusterSnapshot.Revert()
-		p.markFailedToBookCapacity(ctx, provReq, fmt.Sprintf("Couldn't add simulated ResourceClaims: %v", err))
-		return nil
-	}
-
-	schedulingResult, err := p.injector.TrySchedulePods(ctx, autoscalingCtx.ClusterSnapshot, workload.Pods, false, clustersnapshot.SchedulingOptions{})
-	if err != nil {
-		autoscalingCtx.ClusterSnapshot.Revert()
-		return fmt.Errorf("couldn't book capacity for ProvisioningRequest %s/%s: %w", provReq.Namespace, provReq.Name, err)
-	}
-
-	// Booking is best-effort: retain claims for Pods which scheduled and discard
-	// claims belonging to virtual Pods which did not schedule. Match by UID because
-	// the simulator may return statuses in a different order than the input.
+	// Retain claims only for Pods that scheduled; statuses may be reordered.
 	scheduledPods := make(map[types.UID]struct{}, len(schedulingResult.Statuses))
 	for _, schedulingStatus := range schedulingResult.Statuses {
 		if schedulingStatus.Pod != nil {
 			scheduledPods[schedulingStatus.Pod.UID] = struct{}{}
 		}
 	}
-	for _, pod := range workload.Pods {
-		if _, found := scheduledPods[pod.UID]; !found {
-			autoscalingCtx.ClusterSnapshot.DraSnapshot().RemovePodOwnedClaims(ctx, pod)
+	for _, booking := range validBookings {
+		if booking.workload == nil {
+			continue
+		}
+		for _, pod := range booking.pods {
+			if _, found := scheduledPods[pod.UID]; !found {
+				autoscalingCtx.ClusterSnapshot.DraSnapshot().RemovePodOwnedClaims(ctx, pod)
+			}
 		}
 	}
 
 	if err := autoscalingCtx.ClusterSnapshot.Commit(); err != nil {
 		autoscalingCtx.ClusterSnapshot.Revert()
-		return fmt.Errorf("couldn't commit booked capacity for ProvisioningRequest %s/%s: %w", provReq.Namespace, provReq.Name, err)
+		return fmt.Errorf("couldn't commit booked capacity: %w", err)
 	}
 	return nil
 }

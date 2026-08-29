@@ -17,6 +17,7 @@ limitations under the License.
 package checkcapacity
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -254,6 +255,48 @@ func TestCheckCapacityBatchTreatsSchedulingErrorAsInternalError(t *testing.T) {
 	assertInternalScaleUpError(t, &combinedStatus, "scheduling failed")
 }
 
+func TestCheckCapacityBatchTreatsCanceledSimulationAsInternalError(t *testing.T) {
+	baseSnapshot := testsnapshot.NewTestSnapshotOrDie(t)
+	node := testutils.BuildTestNode("node", 10000, 10000, testutils.IsReady(true))
+	require.NoError(t, baseSnapshot.SetClusterState(t.Context(), []*corev1.Node{node}, nil, nil, nil))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	snapshot := &cancelAfterFirstScheduleSnapshot{ClusterSnapshot: baseSnapshot, cancel: cancel}
+	checkCapacityClass := newCheckCapacityTestClass(snapshot)
+	pr := provreqclient.ProvisioningRequestWrapperForTesting("test-ns", "test-pr")
+	pr.Spec.Parameters = map[string]provreqv1.Parameter{NoRetryParameterKey: "true"}
+	combinedStatus := NewCombinedStatusSet()
+	claim := &resourcev1.ResourceClaim{ObjectMeta: metav1.ObjectMeta{Name: "simulated-claim", Namespace: "test-ns"}}
+
+	updates := checkCapacityClass.checkCapacityBatch(
+		ctx,
+		[]provreq.ProvisioningRequestWithPods{
+			{
+				PrWrapper: pr,
+				Workload: &provreqpods.SimulationWorkload{
+					Pods: []*corev1.Pod{
+						testutils.BuildTestPod("virtual-pod-1", 100, 100),
+						testutils.BuildTestPod("virtual-pod-2", 100, 100),
+					},
+					Claims: []*resourcev1.ResourceClaim{claim},
+				},
+			},
+		},
+		&combinedStatus,
+		time.Now(),
+	)
+
+	assert.Empty(t, updates, "a canceled simulation must not trigger a ProvisioningRequest update")
+	assertNoCapacityMissCondition(t, pr)
+	assertInternalScaleUpError(t, &combinedStatus, context.Canceled.Error())
+	assert.Equal(t, 1, snapshot.scheduled, "the test must cancel after a partial simulation")
+	nodeInfos, err := snapshot.ListNodeInfos()
+	require.NoError(t, err)
+	require.Len(t, nodeInfos, 1)
+	assert.Empty(t, nodeInfos[0].Pods(), "a canceled simulation must revert partially scheduled Pods")
+	require.NoError(t, snapshot.DraSnapshot().AddClaims([]*resourcev1.ResourceClaim{claim.DeepCopy()}), "a canceled simulation must revert materialized claims")
+}
+
 func TestCheckCapacityBatchTreatsAddClaimsErrorAsInternalError(t *testing.T) {
 	snapshot := testsnapshot.NewTestSnapshotOrDie(t)
 	require.NoError(t, snapshot.SetClusterState(t.Context(), nil, nil, nil, nil))
@@ -480,6 +523,23 @@ type schedulingInternalErrorSnapshot struct {
 
 func (s *schedulingInternalErrorSnapshot) SchedulePodOnAnyNodeMatching(pod *corev1.Pod, _ clustersnapshot.SchedulingOptions) (string, clustersnapshot.SchedulingError) {
 	return "", clustersnapshot.NewSchedulingInternalError(pod, "scheduling failed")
+}
+
+type cancelAfterFirstScheduleSnapshot struct {
+	clustersnapshot.ClusterSnapshot
+	cancel    context.CancelFunc
+	scheduled int
+}
+
+func (s *cancelAfterFirstScheduleSnapshot) SchedulePodOnAnyNodeMatching(pod *corev1.Pod, opts clustersnapshot.SchedulingOptions) (string, clustersnapshot.SchedulingError) {
+	nodeName, err := s.ClusterSnapshot.SchedulePodOnAnyNodeMatching(pod, opts)
+	if err == nil && nodeName != "" {
+		s.scheduled++
+		if s.scheduled == 1 {
+			s.cancel()
+		}
+	}
+	return nodeName, err
 }
 
 type claimObservingSnapshot struct {
