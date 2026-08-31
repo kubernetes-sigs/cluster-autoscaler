@@ -695,6 +695,9 @@ func TestPatchSetWalkCurrentPatchKeys(t *testing.T) {
 			patchLayers: []map[string]*int{},
 			wantKeys:    map[string]bool{},
 		},
+		// The base layer is the topmost one here, so its keys are reported - but Revert
+		// would not drop it. Callers driving a refresh off this have to check IsForked;
+		// see TestPatchSetIsForked.
 		"SingleLayer": {
 			patchLayers: []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2)}},
 			wantKeys:    map[string]bool{"a": true, "b": true},
@@ -743,6 +746,48 @@ func TestPatchSetWalkCurrentPatchKeys(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPatchSetIsForked pins down that IsForked tracks exactly the condition under which
+// Revert drops a layer, across the Fork/Commit/Revert cycle. Callers maintaining derived
+// state use it to skip work for a Revert that is about to change nothing.
+func TestPatchSetIsForked(t *testing.T) {
+	patchset := buildTestPatchSet(t, []map[string]*int{{"base": ptr.To(0)}})
+
+	assertForked := func(step string, want bool) {
+		t.Helper()
+		if got := patchset.IsForked(); got != want {
+			t.Errorf("%s: IsForked() = %v, want %v", step, got, want)
+		}
+	}
+
+	// The base layer alone is not a fork, and Revert leaves it alone.
+	assertForked("base only", false)
+	patchset.Revert()
+	assertForked("after Revert on the base layer", false)
+	if got := patchset.AsMap(); !maps.Equal(got, map[string]int{"base": 0}) {
+		t.Errorf("Revert on the base layer changed the contents: got %v", got)
+	}
+
+	patchset.Fork()
+	assertForked("after Fork", true)
+
+	// Both ways of collapsing a layer take it back to unforked.
+	patchset.Revert()
+	assertForked("after Revert", false)
+
+	patchset.Fork()
+	patchset.Commit()
+	assertForked("after Commit", false)
+
+	// Nesting: only the outermost layer being gone makes it unforked again.
+	patchset.Fork()
+	patchset.Fork()
+	assertForked("after two Forks", true)
+	patchset.Revert()
+	assertForked("after one of two Reverts", true)
+	patchset.Revert()
+	assertForked("after both Reverts", false)
 }
 
 func TestPatchSetWalkCurrentPatchKeysEarlyStop(t *testing.T) {

@@ -44,14 +44,51 @@ func (ct snapshotClaimTracker) Get(namespace, claimName string) (*resourceapi.Re
 	return claim, nil
 }
 
-// ListAllAllocatedDevices returns every device consumed by the ResourceClaims in the
-// snapshot.
+// Borrowed collections
 //
-// The returned set is the snapshot's own rather than a copy: it must not be modified, and
-// it is only valid until the next change to the snapshot's ResourceClaims. Handing it over
-// directly is what keeps the per-attempt walk over every claim off this path. The scheduler
-// honours that - the DRA plugin folds the set into a structured.AllocatedState and passes it
-// to structured.NewAllocator, which only ever reads it (Set.Has, range, map lookup).
+// ListAllAllocatedDevices and GatherAllocatedState hand back the snapshot's own live
+// collections instead of copies. Copying them would put an O(allocated devices) walk back on
+// a path the scheduler takes once per pod placement attempt, which is the cost this whole
+// mechanism exists to remove, so the borrow is deliberate. It comes with two conditions on
+// the caller:
+//
+//   - Read only. Writing through a returned collection corrupts the snapshot's derived
+//     state, and nothing recomputes it.
+//   - Valid until the next write. Any change to the snapshot's ResourceClaims - including
+//     Fork, Commit and Revert - may mutate the collection in place. Callers that need a
+//     value across a write have to call again afterwards, or copy it themselves.
+//
+// fwk.ResourceClaimTracker states neither condition, so this is a contract Cluster
+// Autoscaler adds on top of the interface rather than one the interface grants. That is only
+// sound because every caller is known and checked:
+//
+//   - k8s.io/dynamic-resource-allocation/structured, which is where the DRA scheduler plugin
+//     sends the result. All three allocator variants (stable, incubating, experimental) and
+//     structured.IsDeviceAllocated only ever read - Set.Has, len, range, map index.
+//   - Cluster Autoscaler's own code, which does not call either method outside tests.
+//
+// TestSnapshotClaimTrackerBorrowedCollectionsAreReadOnly pins the first bullet down against
+// the real allocator, so a Kubernetes bump that starts writing through the alias fails there
+// instead of silently skewing the snapshot.
+//
+// Be aware of what that leaves standing. Nothing detects a violation at runtime: a consumer
+// that writes through one of these collections corrupts the snapshot's derived state
+// silently and permanently, because nothing recomputes it. The test above covers the
+// consumer that exists today, so a violation should surface as a test failure on a
+// Kubernetes bump rather than in a cluster - but that is the whole of the protection, and it
+// only covers callers the test drives. A cheap runtime check is not available either: the
+// collections are maps, so the affordable signal is their size, and that misses both a
+// balanced insert-and-delete and a resource.Quantity edited in place inside an
+// AggregatedCapacity entry that already exists. Anything that caught those would need a deep
+// comparison on every write, which costs exactly what handing the collections out saves.
+//
+// If a future caller needs these to be safe rather than merely known-safe, the fix is to
+// state the contract in k8s.io/dynamic-resource-allocation/structured/schedulerapi, whose
+// types are declared a scheduler/autoscaler contract that Cluster Autoscaler has approval
+// rights over, rather than to add a partial guard here.
+
+// ListAllAllocatedDevices returns every device consumed by the ResourceClaims in the
+// snapshot. The returned set is borrowed - see "Borrowed collections" above.
 func (ct snapshotClaimTracker) ListAllAllocatedDevices() (sets.Set[structured.DeviceID], error) {
 	tracker := ct.snapshot.allocationTracker()
 	tracker.ensureBuilt(ct.snapshot.walkResourceClaims)
@@ -59,25 +96,22 @@ func (ct snapshotClaimTracker) ListAllAllocatedDevices() (sets.Set[structured.De
 }
 
 // GatherAllocatedState returns the state of all devices consumed by the ResourceClaims in
-// the snapshot.
+// the snapshot. The collections behind the returned AllocatedState are borrowed - see
+// "Borrowed collections" above.
 //
 // The scheduler calls this once per PreFilter, that is once per pod scheduling attempt, so
 // the state is maintained as ResourceClaims change rather than recomputed here.
-//
-// The returned collections are the snapshot's own rather than copies: they must not be
-// modified, and they are only valid until the next change to the snapshot's ResourceClaims.
-// The DRA scheduler plugin dereferences the AllocatedState into structured.NewAllocator, and
-// the allocator only ever reads the collections (Set.Has, range, map lookup), so nothing
-// downstream writes through the alias. The AllocatedState wrapper itself is built fresh on
-// every call, so reassigning its fields below is safe.
 func (ct snapshotClaimTracker) GatherAllocatedState() (*structured.AllocatedState, error) {
 	tracker := ct.snapshot.allocationTracker()
 	tracker.ensureBuilt(ct.snapshot.walkResourceClaims)
 
+	// The AllocatedState wrapper is built fresh on every call, so the fields below can be
+	// reassigned without disturbing the tracker or an earlier caller's copy of the struct.
 	state := tracker.allocatedState()
 	if !utilfeature.DefaultFeatureGate.Enabled(features.DRAConsumableCapacity) {
-		// Without the feature the shared devices are reported as ordinary allocated ones,
-		// matching what foreachAllocatedDevice does when told sharing is disabled.
+		// With the feature off, shared devices are reported as ordinary allocated ones and
+		// sharing is not reported at all. The two empty collections are freshly allocated
+		// rather than borrowed, but callers should not rely on that distinction.
 		state.AllocatedDevices = tracker.allDevices.set
 		state.AllocatedSharedDeviceIDs = sets.New[structured.SharedDeviceID]()
 		state.AggregatedCapacity = structured.NewConsumedCapacityCollection()
@@ -134,44 +168,12 @@ func (ct snapshotClaimTracker) AssumedClaimRestore(namespace, claimName string) 
 	panic("snapshotClaimTracker.AssumedClaimRestore() was called - this should never happen")
 }
 
-// foreachAllocatedDevice invokes the provided callback for each
-// device in the claim's allocation result which was allocated
-// exclusively for the claim.
-//
-// This method is a fork of a corresponding scheduler logic
-func foreachAllocatedDevice(claim *resourceapi.ResourceClaim,
-	dedicatedDeviceCallback func(deviceID structured.DeviceID),
-	enabledConsumableCapacity bool,
-	sharedDeviceCallback func(structured.SharedDeviceID),
-	consumedCapacityCallback func(structured.DeviceConsumedCapacity)) {
-	forEachAllocatedResult(claim, func(deviceID structured.DeviceID, result *resourceapi.DeviceRequestAllocationResult) {
-
-		// Execute sharedDeviceCallback and consumedCapacityCallback correspondingly
-		// if DRAConsumableCapacity feature is enabled
-		if enabledConsumableCapacity {
-			shared := result.ShareID != nil
-			if shared {
-				sharedDeviceID := structured.MakeSharedDeviceID(deviceID, result.ShareID)
-				sharedDeviceCallback(sharedDeviceID)
-				if result.ConsumedCapacity != nil {
-					deviceConsumedCapacity := structured.NewDeviceConsumedCapacity(deviceID, result.ConsumedCapacity)
-					consumedCapacityCallback(deviceConsumedCapacity)
-				}
-				return
-			}
-		}
-
-		// Otherwise, execute dedicatedDeviceCallback
-		dedicatedDeviceCallback(deviceID)
-	})
-}
-
 // forEachAllocatedResult invokes the provided callback for each allocation result in the
 // claim that counts as consuming its device, along with the DeviceID derived from it.
 //
-// This is the single place where an allocation result is turned into a DeviceID, so that
-// foreachAllocatedDevice and allocatedStateTracker cannot drift apart on which devices count
-// as allocated.
+// This replaces foreachAllocatedDevice, which was a fork of the corresponding scheduler
+// logic. Splitting the devices between dedicated and shared now happens in
+// allocatedStateTracker.apply, which is the only place that needs it.
 func forEachAllocatedResult(claim *resourceapi.ResourceClaim, callback func(structured.DeviceID, *resourceapi.DeviceRequestAllocationResult)) {
 	if claim.Status.Allocation == nil {
 		return

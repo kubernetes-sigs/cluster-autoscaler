@@ -19,6 +19,7 @@ package snapshot
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math/rand"
 	"testing"
 
@@ -43,20 +44,34 @@ import (
 // referenceAllocatedState recomputes the allocated state from scratch, the way
 // GatherAllocatedState used to before the state was maintained incrementally. The
 // incremental tracker has to agree with this at all times.
+//
+// It deliberately shares no traversal code with the implementation it checks: it walks the
+// allocation results itself rather than going through forEachAllocatedResult, and lists the
+// claims with listResourceClaims rather than the Snapshot.walkResourceClaims wrapper the
+// tracker builds itself from. Both of those are part of what is under test here, and a
+// reference that called them would agree with a broken tracker about a skipped or
+// double-counted result.
 func referenceAllocatedState(snapshot *Snapshot, enabledConsumableCapacity bool) *structured.AllocatedState {
 	devices := sets.New[structured.DeviceID]()
 	sharedDeviceIDs := sets.New[structured.SharedDeviceID]()
 	capacity := structured.NewConsumedCapacityCollection()
 
-	snapshot.walkResourceClaims(func(claim *resourceapi.ResourceClaim) bool {
-		foreachAllocatedDevice(claim,
-			func(deviceID structured.DeviceID) { devices.Insert(deviceID) },
-			enabledConsumableCapacity,
-			func(sharedDeviceID structured.SharedDeviceID) { sharedDeviceIDs.Insert(sharedDeviceID) },
-			func(deviceCapacity structured.DeviceConsumedCapacity) { capacity.Insert(deviceCapacity) },
-		)
-		return true
-	})
+	for _, claim := range snapshot.listResourceClaims() {
+		if claim.Status.Allocation == nil {
+			continue
+		}
+		for _, result := range claim.Status.Allocation.Devices.Results {
+			deviceID := structured.MakeDeviceID(result.Driver, result.Pool, result.Device)
+			if enabledConsumableCapacity && result.ShareID != nil {
+				sharedDeviceIDs.Insert(structured.MakeSharedDeviceID(deviceID, result.ShareID))
+				if result.ConsumedCapacity != nil {
+					capacity.Insert(structured.NewDeviceConsumedCapacity(deviceID, result.ConsumedCapacity))
+				}
+				continue
+			}
+			devices.Insert(deviceID)
+		}
+	}
 
 	return &structured.AllocatedState{
 		AllocatedDevices:         devices,
@@ -279,6 +294,78 @@ func TestAllocatedStateTrackerRandomizedOperations(t *testing.T) {
 	}
 }
 
+// TestAllocatedStateRevertWithoutForkRefreshesNothing checks that a Revert with no Fork
+// under it does not refresh anything, and that a Revert with one still does.
+//
+// PatchSet.Revert keeps the bottom layer, so at that depth it discards nothing and no
+// claim's effective value changes. The topmost layer is then the base layer holding every
+// claim in the snapshot, so a refresh driven off it would re-read the whole cluster's worth
+// of claims to conclude nothing moved - turning a no-op into the O(claims) walk this
+// mechanism exists to avoid.
+//
+// A refresh replaces a claim's contribution with a freshly allocated one, so contribution
+// identity is an exact witness for whether a claim was re-read. That lets this drive the
+// real Snapshot.Revert rather than a copy of its logic, which a guard in the wrong place
+// would otherwise satisfy.
+func TestAllocatedStateRevertWithoutForkRefreshesNothing(t *testing.T) {
+	newSnapshotWithClaims := func(t *testing.T) *Snapshot {
+		t.Helper()
+		claims := map[ResourceClaimId]*resourceapi.ResourceClaim{}
+		for i := 0; i < 3; i++ {
+			claim := allocatedStateTestClaim("default", fmt.Sprintf("claim-%d", i),
+				allocationForDevices(dedicatedResult("driver", "pool", fmt.Sprintf("dev-%d", i))))
+			claims[GetClaimId(claim)] = claim
+		}
+		snapshot := NewSnapshot(claims, nil, nil, nil)
+		// Build the state, so the contributions below exist.
+		assertStateMatchesReference(t, snapshot, "initial")
+		if got := len(snapshot.allocatedState.contributions); got != 3 {
+			t.Fatalf("expected a contribution per claim, got %d", got)
+		}
+		return snapshot
+	}
+
+	refreshedClaims := func(before map[ResourceClaimId]*claimContribution, snapshot *Snapshot) []ResourceClaimId {
+		var refreshed []ResourceClaimId
+		for claimId, contribution := range before {
+			if snapshot.allocatedState.contributions[claimId] != contribution {
+				refreshed = append(refreshed, claimId)
+			}
+		}
+		return refreshed
+	}
+
+	t.Run("withoutFork", func(t *testing.T) {
+		snapshot := newSnapshotWithClaims(t)
+		before := maps.Clone(snapshot.allocatedState.contributions)
+
+		snapshot.Revert()
+
+		if refreshed := refreshedClaims(before, snapshot); len(refreshed) != 0 {
+			t.Errorf("Revert with no Fork under it re-read %d claims (%v), want none", len(refreshed), refreshed)
+		}
+		assertStateMatchesReference(t, snapshot, "after Revert without Fork")
+	})
+
+	// The control: without this, a guard that suppressed every refresh would also pass.
+	t.Run("withFork", func(t *testing.T) {
+		snapshot := newSnapshotWithClaims(t)
+		snapshot.Fork()
+		changed := allocatedStateTestClaim("default", "claim-0",
+			allocationForDevices(dedicatedResult("driver", "pool", "dev-changed")))
+		snapshot.configureResourceClaim(changed)
+		before := maps.Clone(snapshot.allocatedState.contributions)
+
+		snapshot.Revert()
+
+		refreshed := refreshedClaims(before, snapshot)
+		if len(refreshed) != 1 || refreshed[0] != GetClaimId(changed) {
+			t.Errorf("Revert with a Fork under it re-read %v, want just %v", refreshed, GetClaimId(changed))
+		}
+		assertStateMatchesReference(t, snapshot, "after Revert with Fork")
+	})
+}
+
 // TestAllocatedStateTrackerBuildsLazily checks that mutations applied before the state is
 // ever read are still reflected, since the tracker skips updates until its first full pass.
 func TestAllocatedStateTrackerBuildsLazily(t *testing.T) {
@@ -292,13 +379,79 @@ func TestAllocatedStateTrackerBuildsLazily(t *testing.T) {
 	// First read of the state - has to pick up the claim added before any read.
 	assertStateMatchesReference(t, snapshot, "after first read")
 
+	if want := structured.MakeDeviceID("driver", "pool", "dev-1"); !deviceAllocated(t, snapshot, want) {
+		t.Errorf("GatherAllocatedState(): device %v missing from the allocated state", want)
+	}
+}
+
+// TestAllocatedStateTrackerConsumedCapacityIsCopied checks that a claim's consumed capacity
+// is copied into the contribution rather than referenced.
+//
+// structured.NewDeviceConsumedCapacity only shallow-copies each resource.Quantity out of the
+// claim, so the copy still points at the same inf.Dec whenever the quantity is held in
+// decimal form - which is what a value too large for int64 gets parsed into. The Snapshot
+// rewrites claims in place, so arithmetic reaching that quantity would move the number the
+// contribution recorded, and withdraw would then subtract something other than what apply
+// added. Nothing recomputes the aggregate, so the skew would be permanent.
+func TestAllocatedStateTrackerConsumedCapacityIsCopied(t *testing.T) {
+	featuretesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DRAConsumableCapacity, true)
+
+	// A fractional binary quantity. Any of these lands in resource.Quantity's inf.Dec
+	// form rather than its int64 form - that is a property of the fractional binary
+	// suffix, not of the magnitude, and it holds for "0.5Gi" too even though that is a
+	// whole number of bytes. The inf.Dec sits behind a pointer, and that pointer is what
+	// the contribution would otherwise share with the claim.
+	const decFormQuantity = "0.1Gi"
+
+	result := dedicatedResult("driver", "pool", "dev-1")
+	result.ShareID = ptr.To(types.UID("share-a"))
+	result.ConsumedCapacity = map[resourceapi.QualifiedName]resource.Quantity{
+		"memory": resource.MustParse(decFormQuantity),
+	}
+	claim := allocatedStateTestClaim("default", "shared", allocationForDevices(result))
+
+	snapshot := NewSnapshot(map[ResourceClaimId]*resourceapi.ResourceClaim{GetClaimId(claim): claim}, nil, nil, nil)
+	// Build the state, so the claim's capacity is recorded as a contribution.
+	assertStateMatchesReference(t, snapshot, "initial")
+
+	// Mutate the claim's quantity in place, the way an update rewriting the claim would.
+	// Quantity.Add on a decimal-form value writes through the shared inf.Dec pointer.
+	stored, found := snapshot.getResourceClaim(GetClaimId(claim))
+	if !found {
+		t.Fatalf("getResourceClaim(): claim not found")
+	}
+	capacity := stored.Status.Allocation.Devices.Results[0].ConsumedCapacity
+	quantity := capacity["memory"]
+	quantity.Add(resource.MustParse(decFormQuantity))
+	capacity["memory"] = quantity
+
+	// Withdrawing has to remove exactly what was added, leaving nothing behind.
+	snapshot.deleteResourceClaim(GetClaimId(claim))
+
 	state, err := snapshot.ResourceClaims().GatherAllocatedState()
 	if err != nil {
 		t.Fatalf("GatherAllocatedState(): %v", err)
 	}
-	if want := structured.MakeDeviceID("driver", "pool", "dev-1"); !state.AllocatedDevices.Has(want) {
-		t.Errorf("GatherAllocatedState(): device %v missing from %v", want, state.AllocatedDevices)
+	if len(state.AggregatedCapacity) != 0 {
+		t.Errorf("AggregatedCapacity should be empty once the only claim is gone, got %v", state.AggregatedCapacity)
 	}
+}
+
+// deviceAllocated reads the currently allocated devices out of the snapshot and reports
+// whether deviceID is among them.
+//
+// The state has to be re-read after every write: GatherAllocatedState borrows the snapshot's
+// own collections, so a value fetched before a write is not a live view of what comes after
+// it, and holding one across a write is exactly what the method documents callers must not
+// do.
+func deviceAllocated(t *testing.T, snapshot *Snapshot, deviceID structured.DeviceID) bool {
+	t.Helper()
+
+	state, err := snapshot.ResourceClaims().GatherAllocatedState()
+	if err != nil {
+		t.Fatalf("GatherAllocatedState(): %v", err)
+	}
+	return state.AllocatedDevices.Has(deviceID)
 }
 
 // TestAllocatedStateTrackerDuplicateDevice checks the reference counting: a device claimed by
@@ -312,21 +465,17 @@ func TestAllocatedStateTrackerDuplicateDevice(t *testing.T) {
 	}, nil, nil, nil)
 
 	deviceID := structured.MakeDeviceID("driver", "pool", "dev-1")
-	state, err := snapshot.ResourceClaims().GatherAllocatedState()
-	if err != nil {
-		t.Fatalf("GatherAllocatedState(): %v", err)
-	}
-	if !state.AllocatedDevices.Has(deviceID) {
+	if !deviceAllocated(t, snapshot, deviceID) {
 		t.Fatalf("device %v should be allocated", deviceID)
 	}
 
 	snapshot.deleteResourceClaim(GetClaimId(first))
-	if !state.AllocatedDevices.Has(deviceID) {
+	if !deviceAllocated(t, snapshot, deviceID) {
 		t.Errorf("device %v should still be allocated while the second claim holds it", deviceID)
 	}
 
 	snapshot.deleteResourceClaim(GetClaimId(second))
-	if state.AllocatedDevices.Has(deviceID) {
+	if deviceAllocated(t, snapshot, deviceID) {
 		t.Errorf("device %v should be released once no claim holds it", deviceID)
 	}
 }
@@ -371,11 +520,183 @@ func TestAllocatedStateTrackerAliasedClaim(t *testing.T) {
 	snapshot.deleteResourceClaim(GetClaimId(claim))
 	assertStateMatchesReference(t, snapshot, "after delete")
 
-	state, err := snapshot.ResourceClaims().GatherAllocatedState()
-	if err != nil {
-		t.Fatalf("GatherAllocatedState(): %v", err)
-	}
-	if deviceID := structured.MakeDeviceID("driver", "pool", "dev-1"); state.AllocatedDevices.Has(deviceID) {
+	if deviceID := structured.MakeDeviceID("driver", "pool", "dev-1"); deviceAllocated(t, snapshot, deviceID) {
 		t.Errorf("device %v should be released once the aliased claim is gone", deviceID)
+	}
+}
+
+// TestAllocatedStateTrackerExpectedStates pins the derived state down against expectations
+// written out by hand, for each shape an allocation result can take.
+//
+// The randomized and reference-comparison tests above check the tracker against a
+// recomputation, which establishes that the incremental path agrees with a full pass but not
+// that either is right. These cases say what the answer should be. They also cover shapes a
+// random walk reaches rarely or not at all - two claims holding the same share of a device,
+// two shares of one device in a single claim, and a shared result carrying no capacity.
+func TestAllocatedStateTrackerExpectedStates(t *testing.T) {
+	dev1 := structured.MakeDeviceID("driver", "pool", "dev-1")
+	dev2 := structured.MakeDeviceID("driver", "pool", "dev-2")
+	shareA, shareB := ptr.To(types.UID("share-a")), ptr.To(types.UID("share-b"))
+
+	// capacityOf builds an expected AggregatedCapacity holding one device's total. The
+	// totals in the cases below are worked out by hand, not derived from the claims.
+	capacityOf := func(deviceID structured.DeviceID, total int64) structured.ConsumedCapacityCollection {
+		collection := structured.NewConsumedCapacityCollection()
+		collection.Insert(structured.NewDeviceConsumedCapacity(deviceID, map[resourceapi.QualifiedName]resource.Quantity{
+			"memory": *resource.NewQuantity(total, resource.DecimalSI),
+		}))
+		return collection
+	}
+
+	for _, tc := range []struct {
+		name               string
+		consumableCapacity bool
+		claims             []*resourceapi.ResourceClaim
+		wantDevices        sets.Set[structured.DeviceID]
+		wantShared         sets.Set[structured.SharedDeviceID]
+		wantCapacity       structured.ConsumedCapacityCollection
+		wantAllDevices     sets.Set[structured.DeviceID]
+	}{
+		{
+			name:               "dedicated",
+			consumableCapacity: true,
+			claims: []*resourceapi.ResourceClaim{allocatedStateTestClaim("default", "a", allocationForDevices(
+				dedicatedResult("driver", "pool", "dev-1"),
+				dedicatedResult("driver", "pool", "dev-2"),
+			))},
+			wantDevices:    sets.New(dev1, dev2),
+			wantShared:     sets.New[structured.SharedDeviceID](),
+			wantCapacity:   structured.NewConsumedCapacityCollection(),
+			wantAllDevices: sets.New(dev1, dev2),
+		},
+		{
+			// With the gate off, sharing is not reported and the device counts as
+			// ordinarily allocated.
+			name:               "shared/gateOff",
+			consumableCapacity: false,
+			claims: []*resourceapi.ResourceClaim{allocatedStateTestClaim("default", "a", allocationForDevices(
+				sharedResult("driver", "pool", "dev-1", "share-a", 4),
+			))},
+			wantDevices:    sets.New(dev1),
+			wantShared:     sets.New[structured.SharedDeviceID](),
+			wantCapacity:   structured.NewConsumedCapacityCollection(),
+			wantAllDevices: sets.New(dev1),
+		},
+		{
+			// A shared device is not an exclusively allocated one, so it stays out of
+			// AllocatedDevices while still counting towards ListAllAllocatedDevices.
+			name:               "shared",
+			consumableCapacity: true,
+			claims: []*resourceapi.ResourceClaim{allocatedStateTestClaim("default", "a", allocationForDevices(
+				sharedResult("driver", "pool", "dev-1", "share-a", 4),
+			))},
+			wantDevices:    sets.New[structured.DeviceID](),
+			wantShared:     sets.New(structured.MakeSharedDeviceID(dev1, shareA)),
+			wantCapacity:   capacityOf(dev1, 4),
+			wantAllDevices: sets.New(dev1),
+		},
+		{
+			// Two claims holding the same share of one device: one shared entry, and the
+			// capacities add up. This is what the refcounting exists for - the entry has
+			// to survive one of the claims going away.
+			name:               "duplicateShare",
+			consumableCapacity: true,
+			claims: []*resourceapi.ResourceClaim{
+				allocatedStateTestClaim("default", "a", allocationForDevices(
+					sharedResult("driver", "pool", "dev-1", "share-a", 4))),
+				allocatedStateTestClaim("default", "b", allocationForDevices(
+					sharedResult("driver", "pool", "dev-1", "share-a", 4))),
+			},
+			wantDevices:    sets.New[structured.DeviceID](),
+			wantShared:     sets.New(structured.MakeSharedDeviceID(dev1, shareA)),
+			wantCapacity:   capacityOf(dev1, 8),
+			wantAllDevices: sets.New(dev1),
+		},
+		{
+			// Two distinct shares of one device inside a single claim: two shared entries,
+			// one device, capacities summed.
+			name:               "twoSharesOfOneDevice",
+			consumableCapacity: true,
+			claims: []*resourceapi.ResourceClaim{allocatedStateTestClaim("default", "a", allocationForDevices(
+				sharedResult("driver", "pool", "dev-1", "share-a", 4),
+				sharedResult("driver", "pool", "dev-1", "share-b", 6),
+			))},
+			wantDevices: sets.New[structured.DeviceID](),
+			wantShared: sets.New(
+				structured.MakeSharedDeviceID(dev1, shareA),
+				structured.MakeSharedDeviceID(dev1, shareB),
+			),
+			wantCapacity:   capacityOf(dev1, 10),
+			wantAllDevices: sets.New(dev1),
+		},
+		{
+			// A share can carry no consumed capacity at all, which must not create an
+			// AggregatedCapacity entry.
+			name:               "sharedWithoutCapacity",
+			consumableCapacity: true,
+			claims: []*resourceapi.ResourceClaim{allocatedStateTestClaim("default", "a", allocationForDevices(
+				sharedResult("driver", "pool", "dev-1", "share-a", 0),
+			))},
+			wantDevices:    sets.New[structured.DeviceID](),
+			wantShared:     sets.New(structured.MakeSharedDeviceID(dev1, shareA)),
+			wantCapacity:   structured.NewConsumedCapacityCollection(),
+			wantAllDevices: sets.New(dev1),
+		},
+		{
+			// Dedicated and shared together: AllocatedDevices holds only the dedicated
+			// one, ListAllAllocatedDevices holds both.
+			name:               "dedicatedAndShared",
+			consumableCapacity: true,
+			claims: []*resourceapi.ResourceClaim{
+				allocatedStateTestClaim("default", "a", allocationForDevices(
+					dedicatedResult("driver", "pool", "dev-1"))),
+				allocatedStateTestClaim("default", "b", allocationForDevices(
+					sharedResult("driver", "pool", "dev-2", "share-a", 3))),
+			},
+			wantDevices:    sets.New(dev1),
+			wantShared:     sets.New(structured.MakeSharedDeviceID(dev2, shareA)),
+			wantCapacity:   capacityOf(dev2, 3),
+			wantAllDevices: sets.New(dev1, dev2),
+		},
+		{
+			name:               "unallocated",
+			consumableCapacity: true,
+			claims:             []*resourceapi.ResourceClaim{allocatedStateTestClaim("default", "a", nil)},
+			wantDevices:        sets.New[structured.DeviceID](),
+			wantShared:         sets.New[structured.SharedDeviceID](),
+			wantCapacity:       structured.NewConsumedCapacityCollection(),
+			wantAllDevices:     sets.New[structured.DeviceID](),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			featuretesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DRAConsumableCapacity, tc.consumableCapacity)
+
+			claimMap := map[ResourceClaimId]*resourceapi.ResourceClaim{}
+			for _, claim := range tc.claims {
+				claimMap[GetClaimId(claim)] = claim
+			}
+			snapshot := NewSnapshot(claimMap, nil, nil, nil)
+
+			want := &structured.AllocatedState{
+				AllocatedDevices:         tc.wantDevices,
+				AllocatedSharedDeviceIDs: tc.wantShared,
+				AggregatedCapacity:       tc.wantCapacity,
+			}
+			got, err := snapshot.ResourceClaims().GatherAllocatedState()
+			if err != nil {
+				t.Fatalf("GatherAllocatedState(): %v", err)
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("GatherAllocatedState(): unexpected output (-want +got): %s", diff)
+			}
+
+			gotAll, err := snapshot.ResourceClaims().ListAllAllocatedDevices()
+			if err != nil {
+				t.Fatalf("ListAllAllocatedDevices(): %v", err)
+			}
+			if diff := cmp.Diff(tc.wantAllDevices, gotAll); diff != "" {
+				t.Errorf("ListAllAllocatedDevices(): unexpected output (-want +got): %s", diff)
+			}
+		})
 	}
 }

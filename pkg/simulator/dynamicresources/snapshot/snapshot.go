@@ -293,10 +293,15 @@ func (s *Snapshot) Revert() {
 	// is the case for the whole life of a snapshot whenever DRA is disabled -
 	// going through allocationTracker() here would build a tracker just to ask
 	// whether it exists.
+	//
+	// IsForked is the other half of the guard. Without a Fork under it there is no layer
+	// to drop, so PatchSet.Revert is a no-op and no claim changes - but the topmost layer
+	// is then the base layer holding every claim in the snapshot, and walking it would
+	// refresh all of them to discover that nothing moved.
 	trackerBuilt := s.allocatedState != nil && s.allocatedState.isBuilt()
 
 	var revertedClaimIds []ResourceClaimId
-	if trackerBuilt {
+	if trackerBuilt && s.resourceClaims.IsForked() {
 		s.resourceClaims.WalkCurrentPatchKeys(func(claimId ResourceClaimId) bool {
 			revertedClaimIds = append(revertedClaimIds, claimId)
 			return true
