@@ -175,6 +175,13 @@ func TestCreateAutoscalingOptions(t *testing.T) {
 			},
 		},
 		{
+			testName: "UnreadyNodesScope defaults to the whole cluster when the flag isn't passed",
+			flags:    []string{},
+			wantOptionsAsserter: func(t *testing.T, gotOptions config.AutoscalingOptions) {
+				assert.Equal(t, config.UnreadyNodesScopeCluster, gotOptions.UnreadyNodesScope)
+			},
+		},
+		{
 			testName: "CSI node aware scheduling is enabled by default",
 			flags:    []string{},
 			wantOptionsAsserter: func(t *testing.T, gotOptions config.AutoscalingOptions) {
@@ -298,6 +305,7 @@ func TestAutoscalingFlagsAllPossible(t *testing.T) {
 				"--max-bulk-soft-taint-time=1s",
 				"--max-total-unready-percentage=30",
 				"--ok-total-unready-count=5",
+				"--unready-nodes-scope=autoscaled",
 				"--scale-up-from-zero=false",
 				"--parallel-scale-up=true",
 				"--max-node-provision-time=10m",
@@ -422,6 +430,7 @@ func TestAutoscalingFlagsAllPossible(t *testing.T) {
 				assert.Equal(t, 1*time.Second, opts.MaxBulkSoftTaintTime)
 				assert.Equal(t, float64(30), opts.MaxTotalUnreadyPercentage)
 				assert.Equal(t, 5, opts.OkTotalUnreadyCount)
+				assert.Equal(t, config.UnreadyNodesScopeAutoscaled, opts.UnreadyNodesScope)
 				assert.False(t, opts.ScaleUpFromZero)
 				assert.True(t, opts.ParallelScaleUp)
 				assert.Equal(t, 10*time.Minute, opts.NodeGroupDefaults.MaxNodeProvisionTime)
@@ -648,6 +657,22 @@ func TestAutoscalingFlagsValidationEdgeCases(t *testing.T) {
 		},
 		"InvalidCoresTotal": {
 			Flags:   []string{"--cores-total=10:5"},
+			WantErr: true,
+		},
+		"UnreadyNodesScopeCluster": {
+			Flags:   []string{"--unready-nodes-scope=cluster"},
+			WantErr: false,
+		},
+		"UnreadyNodesScopeAutoscaled": {
+			Flags:   []string{"--unready-nodes-scope=autoscaled"},
+			WantErr: false,
+		},
+		"InvalidUnreadyNodesScope": {
+			Flags:   []string{"--unready-nodes-scope=nodegroup"},
+			WantErr: true,
+		},
+		"EmptyUnreadyNodesScope": {
+			Flags:   []string{"--unready-nodes-scope="},
 			WantErr: true,
 		},
 	}

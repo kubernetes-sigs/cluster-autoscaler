@@ -54,4 +54,14 @@ const (
 	DefaultScaleDownDelayAfterFailure = 3 * time.Minute
 	// DefaultScanInterval is the default scan interval for CA
 	DefaultScanInterval = 10 * time.Second
+
+	// UnreadyNodesScopeCluster makes the cluster-wide unready node check count
+	// unready nodes across every node in the cluster.
+	UnreadyNodesScopeCluster = "cluster"
+	// UnreadyNodesScopeAutoscaled makes the cluster-wide unready node check count
+	// only the nodes that belong to an autoscaled node group.
+	UnreadyNodesScopeAutoscaled = "autoscaled"
 )
+
+// AvailableUnreadyNodesScopes is a list of available scopes for the cluster-wide unready node check.
+var AvailableUnreadyNodesScopes = []string{UnreadyNodesScopeCluster, UnreadyNodesScopeAutoscaled}

@@ -122,6 +122,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&p.o.MaxBulkSoftTaintTime, "max-bulk-soft-taint-time", 3*time.Second, "Maximum duration of tainting/untainting nodes as PreferNoSchedule at the same time.")
 	fs.Float64Var(&p.o.MaxTotalUnreadyPercentage, "max-total-unready-percentage", 45, "Maximum percentage of unready nodes in the cluster.  After this is exceeded, CA halts operations")
 	fs.IntVar(&p.o.OkTotalUnreadyCount, "ok-total-unready-count", 3, "Number of allowed unready nodes, irrespective of max-total-unready-percentage")
+	fs.StringVar(&p.o.UnreadyNodesScope, "unready-nodes-scope", config.UnreadyNodesScopeCluster, "Which nodes the cluster-wide unready check gating autoscaling counts. Available values: ["+strings.Join(config.AvailableUnreadyNodesScopes, ",")+"]. \""+config.UnreadyNodesScopeCluster+"\" counts every node in the cluster, \""+config.UnreadyNodesScopeAutoscaled+"\" counts only nodes belonging to an autoscaled node group.")
 	fs.BoolVar(&p.o.ScaleUpFromZero, "scale-up-from-zero", true, "Should CA scale up when there are 0 ready nodes.")
 	fs.BoolVar(&p.o.ParallelScaleUp, "parallel-scale-up", false, "Whether to allow parallel node groups scale up. Experimental: may not work on some cloud providers, enable at your own risk.")
 	fs.DurationVar(&p.o.NodeGroupDefaults.MaxNodeProvisionTime, "max-node-provision-time", 15*time.Minute, "The default maximum time CA waits for node to be provisioned - the value can be overridden per node group")
@@ -288,6 +289,10 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 
 	if p.o.PredicateParallelism < 1 {
 		return config.AutoscalingOptions{}, fmt.Errorf("Invalid value for --predicate-parallelism flag: %d", p.o.PredicateParallelism)
+	}
+
+	if !slices.Contains(config.AvailableUnreadyNodesScopes, p.o.UnreadyNodesScope) {
+		return config.AutoscalingOptions{}, fmt.Errorf("Invalid value for --unready-nodes-scope flag: %q, available values: [%s]", p.o.UnreadyNodesScope, strings.Join(config.AvailableUnreadyNodesScopes, ","))
 	}
 
 	if p.o.DynamicResourceAllocationEnabled == false {

@@ -145,6 +145,10 @@ type AutoscalingOptions struct {
 	MaxTotalUnreadyPercentage float64
 	// OkTotalUnreadyCount is the number of allowed unready nodes, irrespective of max-total-unready-percentage
 	OkTotalUnreadyCount int
+	// UnreadyNodesScope selects which nodes the cluster-wide unready node check counts.
+	// UnreadyNodesScopeCluster counts every node in the cluster, UnreadyNodesScopeAutoscaled
+	// counts only nodes belonging to an autoscaled node group.
+	UnreadyNodesScope string
 	// ScaleUpFromZero defines if CA should scale up when there 0 ready nodes.
 	ScaleUpFromZero bool
 	// ParallelScaleUp defines whether CA can scale up node groups in parallel.

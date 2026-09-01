@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/api"
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/scaleupfailures"
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/utils"
+	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown"
 	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
 	"sigs.k8s.io/cluster-autoscaler/pkg/observers/nodegroupchange"
@@ -91,6 +92,10 @@ type ClusterStateRegistryConfig struct {
 	// Minimum number of nodes that must be unready for MaxTotalUnreadyPercentage to apply.
 	// This is to ensure that in very small clusters (e.g. 2 nodes) a single node's failure doesn't disable autoscaling.
 	OkTotalUnreadyCount int
+	// UnreadyNodesScope selects which nodes IsClusterHealthy counts. config.UnreadyNodesScopeAutoscaled
+	// restricts the check to nodes belonging to an autoscaled node group. Any other value, including the
+	// empty one, keeps the default behaviour of counting every node in the cluster.
+	UnreadyNodesScope string
 }
 
 // IncorrectNodeGroupSize contains information about how much the current size of the node group
@@ -494,10 +499,19 @@ func (csr *ClusterStateRegistry) IsClusterHealthy() bool {
 	csr.Lock()
 	defer csr.Unlock()
 
-	totalUnready := len(csr.totalReadiness.Unready)
+	unready, registered := len(csr.totalReadiness.Unready), len(csr.nodes)
+	if csr.config.UnreadyNodesScope == config.UnreadyNodesScopeAutoscaled {
+		// Nodes outside of any autoscaled node group are not tracked in perNodeGroupReadiness,
+		// so aggregating it yields the same counts restricted to the nodes CA manages.
+		unready, registered = 0, 0
+		for _, readiness := range csr.perNodeGroupReadiness {
+			unready += len(readiness.Unready)
+			registered += len(readiness.Registered)
+		}
+	}
 
-	if totalUnready > csr.config.OkTotalUnreadyCount &&
-		float64(totalUnready) > csr.config.MaxTotalUnreadyPercentage/100.0*float64(len(csr.nodes)) {
+	if unready > csr.config.OkTotalUnreadyCount &&
+		float64(unready) > csr.config.MaxTotalUnreadyPercentage/100.0*float64(registered) {
 		return false
 	}
 
