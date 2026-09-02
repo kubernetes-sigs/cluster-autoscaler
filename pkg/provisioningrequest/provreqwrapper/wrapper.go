@@ -18,6 +18,7 @@ package provreqwrapper
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -89,4 +90,20 @@ func errMissingPodTemplates(podSets []v1.PodSet, podTemplates []*apiv1.PodTempla
 		}
 	}
 	return fmt.Errorf("missing pod templates, %d pod templates were referenced, %d templates were missing: %s", len(podSets), len(missingTemplates), strings.Join(missingTemplates, ","))
+}
+
+// SortProvisioningRequests orders ProvisioningRequests deterministically, oldest first. The
+// listers backing the ProvisioningRequest client return requests in a non-deterministic order,
+// so callers that process more than one request per iteration sort them to keep the processing
+// order FIFO and reproducible.
+func SortProvisioningRequests(prs []*ProvisioningRequest) {
+	sort.Slice(prs, func(i, j int) bool {
+		if !prs[i].CreationTimestamp.Equal(&prs[j].CreationTimestamp) {
+			return prs[i].CreationTimestamp.Before(&prs[j].CreationTimestamp)
+		}
+		if prs[i].Namespace != prs[j].Namespace {
+			return prs[i].Namespace < prs[j].Namespace
+		}
+		return prs[i].Name < prs[j].Name
+	})
 }
