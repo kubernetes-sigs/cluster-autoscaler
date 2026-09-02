@@ -761,6 +761,33 @@ spend processing CheckCapacity ProvisioningRequests in a single iteration by
 setting the following flag in your Cluster Autoscaler configuration:
 `--check-capacity-provisioning-request-batch-timebox=<timebox>`. The default value is 10s.
 
+#### Batch Processing for BestEffortAtomicScaleUp ProvisioningRequests
+
+By default, Cluster Autoscaler processes a single BestEffortAtomicScaleUp
+ProvisioningRequest per iteration, so provisioning N requests takes at least N
+iterations. When a workload orchestrator such as Kueue creates one
+ProvisioningRequest per workload, this serializes scale-up across the whole queue
+and can produce one infrastructure resize per workload.
+
+Batch processing lets Cluster Autoscaler process several BestEffortAtomicScaleUp
+ProvisioningRequests as one all-or-nothing unit. Cluster
+Autoscaler can spread the resulting scale-up across similar node groups when
+similar-node-group balancing is enabled, but it does not split incompatible pod
+sets across unrelated node groups within one flattened batch.
+
+Batch processing is disabled by default and can be enabled with:
+
+1. `--best-effort-atomic-batch-processing=true` to enable the feature.
+
+2. `--best-effort-atomic-provisioning-request-max-batch-size=<batch-size>` to cap the
+number of ProvisioningRequests processed in a single iteration. The default value is 10.
+
+As with check capacity batch processing, longer iterations delay scale-ups for
+incoming pods and for other ProvisioningRequest classes, so the batch size should
+be tuned carefully. Note that a batch is only started when the next
+ProvisioningRequest due for processing is itself a BestEffortAtomicScaleUp request,
+CheckCapacity requests are not included in these batches.
+
 ### How can I enable scale-up when a CSI driver uses node-specific CSIStorageCapacity objects?
 
 Some CSI drivers publish `CSIStorageCapacity` objects with node-specific topology keys (e.g.
@@ -1002,6 +1029,8 @@ The following startup parameters are supported for cluster autoscaler:
 | `balance-similar-node-groups` | Detect similar node groups and balance the number of nodes between them |  |
 | `balancing-ignore-label` | Specifies a label to ignore in addition to the basic and cloud-provider set of labels when comparing if two node groups are similar | [] |
 | `balancing-label` | Specifies a label to use for comparing if two node groups are similar, rather than the built in heuristics. Setting this flag disables all other comparison logic, and cannot be combined with --balancing-ignore-label. | [] |
+| `best-effort-atomic-batch-processing` | Whether to flatten a batch of best-effort-atomic ProvisioningRequests into one all-or-nothing scale-up calculation. |  |
+| `best-effort-atomic-provisioning-request-max-batch-size` | Maximum number of best-effort-atomic provisioning requests to process in a single batch. | 10 |
 | `blocking-system-pod-distruption-timeout` | The timeout after which CA will evict non-pdb-assigned blocking system pods, applicable only when --skip-nodes-with-system-pods is set to true | 1h0m0s |
 | `bulk-mig-instances-listing-enabled` | Fetch GCE mig instances in bulk instead of per mig |  |
 | `bypassed-scheduler-names` | Names of schedulers to bypass. If set to non-empty value, CA will not wait for pods to reach a certain age before triggering a scale-up. |  |

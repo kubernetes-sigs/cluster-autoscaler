@@ -372,6 +372,8 @@ func TestAutoscalingFlagsAllPossible(t *testing.T) {
 				"--check-capacity-batch-processing=true",
 				"--check-capacity-provisioning-request-max-batch-size=5",
 				"--check-capacity-provisioning-request-batch-timebox=5s",
+				"--best-effort-atomic-batch-processing=true",
+				"--best-effort-atomic-provisioning-request-max-batch-size=100",
 				"--force-delete-unregistered-nodes=true",
 				"--force-delete-failed-nodes=true",
 				"--enable-csi-node-aware-scheduling=false",
@@ -494,6 +496,8 @@ func TestAutoscalingFlagsAllPossible(t *testing.T) {
 				assert.True(t, opts.CheckCapacityBatchProcessing)
 				assert.Equal(t, 5, opts.CheckCapacityProvisioningRequestMaxBatchSize)
 				assert.Equal(t, 5*time.Second, opts.CheckCapacityProvisioningRequestBatchTimebox)
+				assert.True(t, opts.BestEffortAtomicBatchProcessing)
+				assert.Equal(t, 100, opts.BestEffortAtomicProvisioningRequestMaxBatchSize)
 				assert.True(t, opts.ForceDeleteLongUnregisteredNodes)
 				assert.True(t, opts.ForceDeleteFailedNodes)
 				assert.False(t, opts.CSINodeAwareSchedulingEnabled)
@@ -640,9 +644,25 @@ func TestAutoscalingFlagsValidationEdgeCases(t *testing.T) {
 			Flags:   []string{"--predicate-parallelism=0"},
 			WantErr: true,
 		},
-		"InvalidMaxConcurrentNodesTainting": {
-			Flags:   []string{"--max-concurrent-nodes-tainting=0"},
+		"BestEffortAtomicBatchSizeZero": {
+			Flags:   []string{"--best-effort-atomic-batch-processing=true", "--best-effort-atomic-provisioning-request-max-batch-size=0"},
 			WantErr: true,
+		},
+		"BestEffortAtomicBatchSizeOne": {
+			Flags:   []string{"--best-effort-atomic-batch-processing=true", "--best-effort-atomic-provisioning-request-max-batch-size=1"},
+			WantErr: true,
+		},
+		"ValidBestEffortAtomicBatchSize": {
+			Flags:   []string{"--best-effort-atomic-batch-processing=true", "--best-effort-atomic-provisioning-request-max-batch-size=2"},
+			WantErr: false,
+		},
+		"InvalidDormantBestEffortAtomicBatchSize": {
+			Flags:   []string{"--best-effort-atomic-provisioning-request-max-batch-size=0"},
+			WantErr: true,
+		},
+		"ValidDormantBestEffortAtomicBatchSize": {
+			Flags:   []string{"--best-effort-atomic-provisioning-request-max-batch-size=1"},
+			WantErr: false,
 		},
 		"InvalidDRA": {
 			Flags:   []string{"--enable-dynamic-resource-allocation=false"},

@@ -79,13 +79,17 @@ func (b *AutoscalerBuilder) buildProvisioningRequest(
 	}
 	klog.V(2).Info("Successful initial Provisioning Request sync")
 
-	injector := provreq.NewProvisioningRequestPodsInjector(client, opts.ProvisioningRequestInitialBackoffTime, opts.ProvisioningRequestMaxBackoffTime, opts.ProvisioningRequestMaxBackoffCacheSize, opts.CheckCapacityBatchProcessing, opts.CheckCapacityProcessorInstance)
+	injector := provreq.NewProvisioningRequestPodsInjector(client, opts.ProvisioningRequestInitialBackoffTime, opts.ProvisioningRequestMaxBackoffTime, opts.ProvisioningRequestMaxBackoffCacheSize, opts.CheckCapacityBatchProcessing, opts.CheckCapacityProcessorInstance, opts.BestEffortAtomicBatchProcessing, opts.BestEffortAtomicProvisioningRequestMaxBatchSize, opts.KubeClientOpts.KubeClientBurst)
 	podListProcessor.AddProcessor(injector)
 
 	var provisioningRequestPodsInjector *provreq.ProvisioningRequestPodsInjector
 	if autoscalingOptions.CheckCapacityBatchProcessing {
 		klog.Infof("Batch processing for check capacity requests is enabled. Passing provisioning request injector to check capacity processor.")
 		provisioningRequestPodsInjector = injector
+	}
+
+	if autoscalingOptions.BestEffortAtomicBatchProcessing {
+		klog.Infof("Batch processing for best-effort-atomic requests is enabled with max batch size %d.", autoscalingOptions.BestEffortAtomicProvisioningRequestMaxBatchSize)
 	}
 
 	provreqOrchestrator := provreqorchestrator.New(client, []provreqorchestrator.ProvisioningClass{

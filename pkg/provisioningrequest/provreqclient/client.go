@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
 	v1ac "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/client/applyconfiguration/autoscaling.x-k8s.io/v1"
 	"k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/client/clientset/versioned"
@@ -136,10 +137,10 @@ func (c *ProvisioningRequestClient) ApplyProvisioningRequest(prAC *v1ac.Provisio
 	return pr, nil
 }
 
-// ProvisioningRequestsForPods check that all pods belong to one ProvisioningRequest and return it.
+// ProvisioningRequestsForPods returns the distinct ProvisioningRequests owning the supplied pods.
 func ProvisioningRequestsForPods(ctx context.Context, client *ProvisioningRequestClient, unschedulablePods []*apiv1.Pod) []*provreqwrapper.ProvisioningRequest {
 	logger := klog.FromContext(ctx)
-	prMap := make(map[string]*provreqwrapper.ProvisioningRequest)
+	prMap := make(map[types.NamespacedName]*provreqwrapper.ProvisioningRequest)
 	prList := []*provreqwrapper.ProvisioningRequest{}
 	if len(unschedulablePods) == 0 {
 		return prList
@@ -149,14 +150,16 @@ func ProvisioningRequestsForPods(ctx context.Context, client *ProvisioningReques
 			logger.Error(nil, "Pod has no OwnerReference", "pod", klog.KObj(pod))
 			continue
 		}
+		key := types.NamespacedName{Namespace: pod.Namespace, Name: pod.OwnerReferences[0].Name}
+		if _, found := prMap[key]; found {
+			continue
+		}
 		provReq, err := client.ProvisioningRequest(ctx, pod.Namespace, pod.OwnerReferences[0].Name)
 		if err != nil {
 			logger.Error(err, "Failed to retrieve ProvisioningRequest from unschedulable pod")
 			continue
 		}
-		if _, found := prMap[provReq.Name]; !found {
-			prMap[provReq.Name] = provReq
-		}
+		prMap[key] = provReq
 	}
 	for _, pr := range prMap {
 		prList = append(prList, pr)
