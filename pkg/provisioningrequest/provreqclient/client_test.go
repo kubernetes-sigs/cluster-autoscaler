@@ -24,7 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
-	"k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
+	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/pods"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqwrapper"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
@@ -52,10 +52,14 @@ func TestFetchPodTemplates(t *testing.T) {
 func TestProvisioningRequestsForPods(t *testing.T) {
 	checkCapacityProvReq := provreqwrapper.BuildTestProvisioningRequest("ns", "check-capacity", "1m", "100", "", int32(100), false, time.Now(), v1.ProvisioningClassCheckCapacity)
 	customProvReq := provreqwrapper.BuildTestProvisioningRequest("ns", "custom", "1m", "100", "", int32(100), false, time.Now(), "custom")
+	sameNameProvReqA := provreqwrapper.BuildTestProvisioningRequest("namespace-a", "same-name", "1m", "100", "", int32(1), false, time.Now(), v1.ProvisioningClassBestEffortAtomicScaleUp)
+	sameNameProvReqB := provreqwrapper.BuildTestProvisioningRequest("namespace-b", "same-name", "1m", "100", "", int32(1), false, time.Now(), v1.ProvisioningClassBestEffortAtomicScaleUp)
 	checkCapacityPods, _ := pods.PodsForProvisioningRequest(checkCapacityProvReq)
 	customProvReqPods, _ := pods.PodsForProvisioningRequest(customProvReq)
+	sameNamePodsA, _ := pods.PodsForProvisioningRequest(sameNameProvReqA)
+	sameNamePodsB, _ := pods.PodsForProvisioningRequest(sameNameProvReqB)
 	regularPod := BuildTestPod("p1", 600, 100)
-	client := NewFakeProvisioningRequestClient(context.Background(), t, checkCapacityProvReq, customProvReq)
+	client := NewFakeProvisioningRequestClient(context.Background(), t, checkCapacityProvReq, customProvReq, sameNameProvReqA, sameNameProvReqB)
 	testCases := []struct {
 		name string
 		pods []*apiv1.Pod
@@ -75,6 +79,11 @@ func TestProvisioningRequestsForPods(t *testing.T) {
 			name: "pods from different Provisioning Classes",
 			pods: append(checkCapacityPods, customProvReqPods...),
 			prs:  []*provreqwrapper.ProvisioningRequest{checkCapacityProvReq, customProvReq},
+		},
+		{
+			name: "same-named ProvisioningRequests from different namespaces",
+			pods: append(sameNamePodsA, sameNamePodsB...),
+			prs:  []*provreqwrapper.ProvisioningRequest{sameNameProvReqA, sameNameProvReqB},
 		},
 		{
 			name: "regular pod",
