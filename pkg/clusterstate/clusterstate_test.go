@@ -983,7 +983,7 @@ func TestScaleUpBackoff(t *testing.T) {
 	mockMetrics.On("RegisterFailedNodeCreations", mock.Anything, mock.Anything).Return()
 	fakeLogRecorder, _ := utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
 	nodeInfos := map[string]*framework.NodeInfo{
-		"ng1": framework.NewNodeInfo(ng1_1, nil),
+		"ng1": framework.NewNodeInfo(ng1_1, framework.NodeInfoConfig{}),
 	}
 	registry := newMockTemplateNodeInfoRegistry(nodeInfos)
 	nodeGroupConfigProcessor := nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 2 * time.Minute})
@@ -1952,7 +1952,7 @@ func TestGetUpcomingNodesSkipsWithoutScaleUpRequestOrBackoff(t *testing.T) {
 		mockMetrics.On("RegisterFailedNodeCreations", mock.Anything, mock.Anything).Return()
 
 		nodeInfos := map[string]*framework.NodeInfo{
-			"ng1": framework.NewNodeInfo(ng1_1, nil),
+			"ng1": framework.NewNodeInfo(ng1_1, framework.NodeInfoConfig{}),
 		}
 		registry := newMockTemplateNodeInfoRegistry(nodeInfos)
 		nodeGroupConfigProcessor := nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 2 * time.Minute})

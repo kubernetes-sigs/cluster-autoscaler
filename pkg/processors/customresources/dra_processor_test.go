@@ -548,7 +548,7 @@ func TestFilterOutNodesWithUnreadyDRAResources(t *testing.T) {
 			for ng, nodes := range tc.nodeGroupsAllNodes {
 				machineName := fmt.Sprintf("%s_machine_template", ng)
 				if rs, found := tc.nodeGroupsTemplatesSlices[ng]; found {
-					machineTemplates[machineName] = framework.NewNodeInfo(buildTestNode(fmt.Sprintf("%s_template", ng), true), rs)
+					machineTemplates[machineName] = framework.NewNodeInfo(buildTestNode(fmt.Sprintf("%s_template", ng), true), framework.NodeInfoConfig{Slices: rs})
 				} else {
 					machineTemplates[machineName] = framework.NewTestNodeInfo(buildTestNode(fmt.Sprintf("%s_template", ng), true))
 				}
@@ -591,7 +591,7 @@ func TestFilterOutNodesWithUnreadyDRAResources(t *testing.T) {
 }
 
 func createTemplateNodeInfo(nodeName string, slices []*resourceapi.ResourceSlice) *framework.NodeInfo {
-	return framework.NewNodeInfo(buildTestNode(nodeName, true), slices)
+	return framework.NewNodeInfo(buildTestNode(nodeName, true), framework.NodeInfoConfig{Slices: slices})
 }
 
 // buildResourceSlices builds a slice of resource slices with the given node name, driver name and number of ready pools.

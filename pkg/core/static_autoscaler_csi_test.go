@@ -204,7 +204,7 @@ func TestStaticAutoscalerCSI(t *testing.T) {
 
 				// Template nodeInfo for simulating new nodes in this node group.
 				templateNode := BuildTestNode(fmt.Sprintf("%s-template", nodeGroupDef.name), nodeGroupDef.cpu, nodeGroupDef.mem)
-				templateNodeInfo := framework.NewNodeInfo(templateNode, nil)
+				templateNodeInfo := framework.NewNodeInfo(templateNode, framework.NodeInfoConfig{})
 				if nodeGroupDef.csiNodeTemplateFunc != nil {
 					templateNodeInfo.SetCSINode(nodeGroupDef.csiNodeTemplateFunc(templateNode.Name))
 				}

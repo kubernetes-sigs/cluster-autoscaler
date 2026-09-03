@@ -326,7 +326,7 @@ func TestSnapshotAddCSINodeInfoToNodeInfo(t *testing.T) {
 			snapshot := NewSnapshot(tc.csiNodes)
 
 			node := test.BuildTestNode(tc.nodeName, 1000, 1000)
-			nodeInfo := framework.NewNodeInfo(node, nil)
+			nodeInfo := framework.NewNodeInfo(node, framework.NodeInfoConfig{})
 			resultNodeInfo, err := snapshot.AddCSINodeInfoToNodeInfo(nodeInfo)
 
 			if diff := cmp.Diff(tc.wantErr, err, cmpopts.EquateErrors()); diff != "" {
