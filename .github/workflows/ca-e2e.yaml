@@ -1,6 +1,8 @@
 name: Cluster Autoscaler E2E (kwok)
 on:
   push:
+    branches:
+      - main
     paths:
       - '**/*.go'
       - 'go.mod'
