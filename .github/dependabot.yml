@@ -22,18 +22,6 @@ updates:
     prefix: "dependabot"
     include: scope
   ignore:
-    # Update providers manually.
-    # TODO(Choraden): Cleanup this after removal of GCE and Azure cloudproviders.
-    - dependency-name: "k8s.io/cloud-provider-gcp"
-    - dependency-name: "k8s.io/cloud-provider-gcp/*"
-    - dependency-name: "cloud.google.com/go/compute"
-    - dependency-name: "cloud.google.com/go/compute/*"
-    # Update dependencies exclusively used by providers manually
-    - dependency-name: "golang.org/x/oauth2"
-    - dependency-name: "golang.org/x/sys"
-    - dependency-name: "google.golang.org/api"
-    - dependency-name: "gopkg.in/gcfg.v1"
-    - dependency-name: "sigs.k8s.io/yaml"
     # Maintain k8s version skew compatibility manually.
     - dependency-name: "k8s.io/kubernetes"
     # Maintain k8s.io staging dependencies manually.
@@ -69,6 +57,7 @@ updates:
     - dependency-name: "k8s.io/sample-cli-plugin"
     - dependency-name: "k8s.io/sample-controller"
   labels:
-    - "ok-to-test"
     - "area/cluster-autoscaler"
     - "area/dependency"
+    - "ok-to-test"
+    - "release-note-none"
