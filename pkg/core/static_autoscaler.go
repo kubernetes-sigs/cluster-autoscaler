@@ -436,12 +436,24 @@ func (a *StaticAutoscaler) RunOnce(ctx context.Context, currentTime time.Time) c
 		if !scaleUpTriggered && a.processors.ScaleUpStatusProcessor != nil {
 			a.processors.ScaleUpStatusProcessor.Process(ctx, a.AutoscalingContext, scaleUpStatus)
 		}
+		// Gather status before scaledown status processor invocation.
+		// Node deletions run asynchronously after StartDeletion returns, so their
+		// outcomes never surface through the error returned by StartDeletion.
+		// Drain the deletion results here and refresh lastScaleDownFailTime when
+		// any of them failed, so that the cooldown configured via
+		// --scale-down-delay-after-failure is honored for such failures too.
+		nodeDeletionResults, nodeDeletionResultsAsOf := a.scaleDownActuator.DeletionResults()
+		scaleDownStatus.NodeDeleteResults = nodeDeletionResults
+		scaleDownStatus.NodeDeleteResultsAsOf = nodeDeletionResultsAsOf
+		a.scaleDownActuator.ClearResultsNotNewerThan(scaleDownStatus.NodeDeleteResultsAsOf)
+		for nodeName, nodeDeletionResult := range nodeDeletionResults {
+			if nodeDeletionResult.Err != nil {
+				logger.V(1).Info("Node deletion failed, starting scale down fail cooldown", "node", nodeName, "err", nodeDeletionResult.Err)
+				a.lastScaleDownFailTime = nodeDeletionResultsAsOf
+				break
+			}
+		}
 		if a.processors.ScaleDownStatusProcessor != nil {
-			// Gather status before scaledown status processor invocation
-			nodeDeletionResults, nodeDeletionResultsAsOf := a.scaleDownActuator.DeletionResults()
-			scaleDownStatus.NodeDeleteResults = nodeDeletionResults
-			scaleDownStatus.NodeDeleteResultsAsOf = nodeDeletionResultsAsOf
-			a.scaleDownActuator.ClearResultsNotNewerThan(scaleDownStatus.NodeDeleteResultsAsOf)
 			scaleDownStatus.SetUnremovableNodesInfo(ctx, a.scaleDownPlanner.UnremovableNodes(), a.scaleDownPlanner.NodeUtilizationMap(), a.CloudProvider)
 
 			a.processors.ScaleDownStatusProcessor.Process(ctx, a.AutoscalingContext, scaleDownStatus)
