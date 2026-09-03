@@ -327,6 +327,11 @@ type AutoscalingOptions struct {
 	CheckCapacityProvisioningRequestMaxBatchSize int
 	// CheckCapacityProvisioningRequestBatchTimebox is the maximum time to spend processing a batch of provisioning requests
 	CheckCapacityProvisioningRequestBatchTimebox time.Duration
+	// BestEffortAtomicBatchProcessing is used to enable/disable batch processing of the best-effort-atomic provisioning class.
+	// All eligible ProvisioningRequests in the batch are flattened into one all-or-nothing capacity calculation.
+	BestEffortAtomicBatchProcessing bool
+	// BestEffortAtomicProvisioningRequestMaxBatchSize is the maximum number of best-effort-atomic provisioning requests to process in a single batch
+	BestEffortAtomicProvisioningRequestMaxBatchSize int
 	// ForceDeleteLongUnregisteredNodes is used to enable/disable ignoring min size constraints during removal of long unregistered nodes
 	ForceDeleteLongUnregisteredNodes bool
 	// ForceDeleteFailedNodes is used to enable/disable ignoring min size constraints during removal of failed nodes

@@ -35,14 +35,20 @@ const (
 // SupportedProvisioningClass verifies if the ProvisioningRequest with the given checkCapacityProcessorInstance is supported.
 func SupportedProvisioningClass(ctx context.Context, pr *v1.ProvisioningRequest, checkCapacityProcessorInstance string) bool {
 	if pr.Spec.ProvisioningClassName == v1.ProvisioningClassBestEffortAtomicScaleUp {
-		if checkCapacityProcessorInstance != "" {
-			// If processor instance is set, BestEffortAtomicScaleUp should not be processed.
-			return false
-		}
-		return true
+		return SupportedBestEffortAtomicClass(pr, checkCapacityProcessorInstance)
 	}
 
 	return SupportedCheckCapacityClass(ctx, pr, checkCapacityProcessorInstance)
+}
+
+// SupportedBestEffortAtomicClass verifies if the best-effort-atomic ProvisioningRequest is
+// supported by this CA instance. If a check capacity processor instance is configured, this
+// instance is dedicated to check capacity requests and does not process best-effort-atomic ones.
+func SupportedBestEffortAtomicClass(pr *v1.ProvisioningRequest, checkCapacityProcessorInstance string) bool {
+	if pr.Spec.ProvisioningClassName != v1.ProvisioningClassBestEffortAtomicScaleUp {
+		return false
+	}
+	return checkCapacityProcessorInstance == ""
 }
 
 // SupportedCheckCapacityClass verifies if the check capacity ProvisioningRequest with the given checkCapacityProcessorInstance is supported.
