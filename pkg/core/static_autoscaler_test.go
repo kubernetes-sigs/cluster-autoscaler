@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	cbv1beta1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/fakepods"
+	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/strategy"
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -344,8 +345,9 @@ func setupAutoscaler(config *autoscalerSetupConfig) (*StaticAutoscaler, error) {
 		CustomResourcesProcessor: processors.CustomResourcesProcessor,
 		QuotaProvider:            minQuotaProvider,
 	})
+	sdStrategy, _ := strategy.NewStrategy("")
 
-	sdPlanner := planner.New(&autoscalingCtx, processors, deleteOptions, drainabilityRules, minQuotasTrackerFactory)
+	sdPlanner := planner.New(&autoscalingCtx, processors, deleteOptions, drainabilityRules, minQuotasTrackerFactory, sdStrategy)
 
 	processorCallbacks.scaleDownPlanner = sdPlanner
 
@@ -3180,7 +3182,8 @@ func newScaleDownPlannerAndActuator(autoscalingCtx *ca_context.AutoscalingContex
 		nodeDeletionTracker = deletiontracker.NewNodeDeletionTracker(0 * time.Second)
 	}
 	quotasTrackerFactory := newQuotasTrackerFactory(autoscalingCtx, p)
-	planner := planner.New(autoscalingCtx, p, deleteOptions, nil, quotasTrackerFactory)
+	sdStrategy, _ := strategy.NewStrategy("")
+	planner := planner.New(autoscalingCtx, p, deleteOptions, nil, quotasTrackerFactory, sdStrategy)
 	actuator := actuation.NewActuator(autoscalingCtx, cs, nodeDeletionTracker, deleteOptions, nil, p.NodeGroupConfigProcessor)
 	return planner, actuator
 }
@@ -3314,7 +3317,8 @@ func buildStaticAutoscaler(t *testing.T, provider cloudprovider.CloudProvider, a
 	drainabilityRules := rules.Default(deleteOptions)
 
 	quotasTrackerFactory := newQuotasTrackerFactory(&autoscalingCtx, processors)
-	sdPlanner := planner.New(&autoscalingCtx, processors, deleteOptions, drainabilityRules, quotasTrackerFactory)
+	sdStrategy, _ := strategy.NewStrategy("")
+	sdPlanner := planner.New(&autoscalingCtx, processors, deleteOptions, drainabilityRules, quotasTrackerFactory, sdStrategy)
 
 	autoscaler := &StaticAutoscaler{
 		AutoscalingContext:   &autoscalingCtx,
