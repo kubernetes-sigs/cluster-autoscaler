@@ -263,3 +263,8 @@ func ObserveMaxNodeSkipEvalDurationSeconds(duration time.Duration) {
 func UpdateSkippedPodsCount(podsCount int, label string) {
 	DefaultMetrics.UpdateSkippedPodsCount(podsCount, label)
 }
+
+// UpdateNodesCountPerNodeGroup records the number of nodes per node group ID in cluster.
+func UpdateNodesCountPerNodeGroup(ready, unready, starting, suspended, longUnregistered, unregistered int, nodeGroupID string) {
+	DefaultMetrics.UpdateNodesCountPerNodeGroup(ready, unready, starting, suspended, longUnregistered, unregistered, nodeGroupID)
+}

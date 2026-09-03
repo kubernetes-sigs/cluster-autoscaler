@@ -59,6 +59,8 @@ const (
 	unregisteredLabel     = "unregistered"
 	longUnregisteredLabel = "longUnregistered"
 
+	nodeGroupIDLabel = "node_group_id"
+
 	// Underutilized node was removed because of low utilization
 	Underutilized NodeScaleDownReason = "underutilized"
 	// Empty node was removed
@@ -161,6 +163,7 @@ type caMetrics struct {
 	nodesGroupHealthiness  *k8smetrics.GaugeVec
 	nodeGroupBackOffStatus *k8smetrics.GaugeVec
 	skippedPodsCounts      *k8smetrics.GaugeVec
+	nodesCountPerNodeGroup *k8smetrics.GaugeVec
 
 	// Metrics related to autoscaler execution
 	lastActivity            *k8smetrics.GaugeVec
@@ -310,6 +313,14 @@ func newCaMetrics() *caMetrics {
 				Name:      "node_group_backoff_status",
 				Help:      "Whether or not node group is backoff for not autoscaling. 1 if it is, 0 otherwise.",
 			}, []string{"node_group", "reason"},
+		),
+
+		nodesCountPerNodeGroup: k8smetrics.NewGaugeVec(
+			&k8smetrics.GaugeOpts{
+				Namespace: caNamespace,
+				Name:      "nodes_count_per_node_group",
+				Help:      "Number of nodes per node groups in cluster.",
+			}, []string{"state", "node_group"},
 		),
 
 		/**** Metrics related to autoscaler execution ****/
@@ -606,6 +617,7 @@ func (m *caMetrics) RegisterAll(emitPerNodeGroupMetrics bool) {
 		m.mustRegister(m.nodesGroupTargetSize)
 		m.mustRegister(m.nodesGroupHealthiness)
 		m.mustRegister(m.nodeGroupBackOffStatus)
+		m.mustRegister(m.nodesCountPerNodeGroup)
 	}
 }
 
@@ -939,4 +951,14 @@ func (m *caMetrics) ObserveMaxNodeSkipEvalDurationSeconds(duration time.Duration
 // UpdateSkippedPodsCount records the number of pods skipped when doing scheduling simulations.
 func (m *caMetrics) UpdateSkippedPodsCount(podsCount int, label string) {
 	m.skippedPodsCounts.WithLabelValues(label).Set(float64(podsCount))
+}
+
+// UpdateNodesPerNodeGroupCount records the number of nodes per node group in cluster
+func (m *caMetrics) UpdateNodesCountPerNodeGroup(ready, unready, starting, suspended, longUnregistered, unregistered int, nodeGroupID string) {
+	m.nodesCountPerNodeGroup.WithLabelValues(readyLabel, nodeGroupID).Set(float64(ready))
+	m.nodesCountPerNodeGroup.WithLabelValues(unreadyLabel, nodeGroupID).Set(float64(unready))
+	m.nodesCountPerNodeGroup.WithLabelValues(startingLabel, nodeGroupID).Set(float64(starting))
+	m.nodesCountPerNodeGroup.WithLabelValues(suspendedLabel, nodeGroupID).Set(float64(suspended))
+	m.nodesCountPerNodeGroup.WithLabelValues(longUnregisteredLabel, nodeGroupID).Set(float64(longUnregistered))
+	m.nodesCountPerNodeGroup.WithLabelValues(unregisteredLabel, nodeGroupID).Set(float64(unregistered))
 }
