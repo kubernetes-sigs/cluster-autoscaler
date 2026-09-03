@@ -24,6 +24,7 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
 	"k8s.io/klog/v2"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
@@ -55,11 +56,12 @@ type provReqProcessor struct {
 	client                         *provreqclient.ProvisioningRequestClient
 	injector                       injector
 	checkCapacityProcessorInstance string
+	simulationWorkloadBuilder      *provreq_pods.SimulationWorkloadBuilder
 }
 
 // NewProvReqProcessor return ProvisioningRequestProcessor.
-func NewProvReqProcessor(client *provreqclient.ProvisioningRequestClient, checkCapacityProcessorInstance string) *provReqProcessor {
-	return &provReqProcessor{now: time.Now, maxUpdated: defaultMaxUpdated, client: client, injector: scheduling.NewHintingSimulator(), checkCapacityProcessorInstance: checkCapacityProcessorInstance}
+func NewProvReqProcessor(client *provreqclient.ProvisioningRequestClient, checkCapacityProcessorInstance string, simulationWorkloadBuilder *provreq_pods.SimulationWorkloadBuilder) *provReqProcessor {
+	return &provReqProcessor{now: time.Now, maxUpdated: defaultMaxUpdated, client: client, injector: scheduling.NewHintingSimulator(), checkCapacityProcessorInstance: checkCapacityProcessorInstance, simulationWorkloadBuilder: simulationWorkloadBuilder}
 }
 
 // Refresh implements loop.Observer interface and will be run at the start
@@ -142,11 +144,21 @@ func (p *provReqProcessor) Process(ctx context.Context, autoscalingCtx *ca_conte
 // bookCapacity schedule fake pods for ProvisioningRequest that should have reserved capacity
 // in the cluster.
 func (p *provReqProcessor) bookCapacity(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext) error {
-	logger := klog.FromContext(ctx)
 	provReqs, err := p.client.ProvisioningRequests(ctx)
 	if err != nil {
 		return fmt.Errorf("couldn't fetch ProvisioningRequests in the cluster: %v", err)
 	}
+	return p.bookProvisioningRequests(ctx, autoscalingCtx, provReqs)
+}
+
+type capacityBooking struct {
+	provReq  *provreqwrapper.ProvisioningRequest
+	pods     []*apiv1.Pod
+	workload *provreq_pods.SimulationWorkload
+}
+
+func (p *provReqProcessor) bookProvisioningRequests(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, provReqs []*provreqwrapper.ProvisioningRequest) error {
+	logger := klog.FromContext(ctx)
 	nodeInfos, err := autoscalingCtx.ClusterSnapshot.ListNodeInfos()
 	if err != nil {
 		return fmt.Errorf("couldn't list nodes: %v", err)
@@ -160,7 +172,7 @@ func (p *provReqProcessor) bookCapacity(ctx context.Context, autoscalingCtx *ca_
 			}
 		}
 	}
-	podsToCreate := []*apiv1.Pod{}
+	var bookings []capacityBooking
 	for _, provReq := range provReqs {
 		if !conditions.ShouldCapacityBeBooked(ctx, provReq, p.checkCapacityProcessorInstance) {
 			continue
@@ -173,27 +185,93 @@ func (p *provReqProcessor) bookCapacity(ctx context.Context, autoscalingCtx *ca_
 			}
 			continue
 		}
+		if provisioningrequest.SupportedCheckCapacityClass(ctx, provReq.ProvisioningRequest, p.checkCapacityProcessorInstance) {
+			workload, err := p.simulationWorkloadBuilder.ForProvisioningRequest(provReq)
+			if err != nil {
+				p.markFailedToBookCapacity(ctx, provReq, fmt.Sprintf("Couldn't create simulation workload: %v", err))
+				continue
+			}
+			bookings = append(bookings, capacityBooking{provReq: provReq, pods: workload.Pods, workload: workload})
+			continue
+		}
 		pods, err := provreq_pods.PodsForProvisioningRequest(provReq)
 		if err != nil {
 			// ClusterAutoscaler was able to create pods before, so we shouldn't have error here.
 			// If there is an error, mark PR as invalid, because we won't be able to book capacity
 			// for it anyway.
-			conditions.AddOrUpdateCondition(ctx, provReq, v1.Failed, metav1.ConditionTrue, conditions.FailedToBookCapacityReason, fmt.Sprintf("Couldn't create pods, err: %v", err), metav1.Now())
-			if _, err := p.client.UpdateProvisioningRequest(ctx, provReq.ProvisioningRequest); err != nil {
-				logger.Error(err, "failed to add Accepted condition to ProvReq", "provReq", klog.KObj(provReq))
-			}
+			p.markFailedToBookCapacity(ctx, provReq, fmt.Sprintf("Couldn't create pods, err: %v", err))
 			continue
 		}
-		podsToCreate = append(podsToCreate, pods...)
+		bookings = append(bookings, capacityBooking{pods: pods})
 	}
-	if len(podsToCreate) == 0 {
+	return p.bookCapacityBookings(ctx, autoscalingCtx, bookings)
+}
+
+func (p *provReqProcessor) bookCapacityBookings(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, bookings []capacityBooking) error {
+	if len(bookings) == 0 {
 		return nil
 	}
-	// Scheduling the pods to reserve capacity for provisioning request.
-	if _, err = p.injector.TrySchedulePods(context.Background(), autoscalingCtx.ClusterSnapshot, podsToCreate, false, clustersnapshot.SchedulingOptions{}); err != nil {
+
+	// Schedule all booking Pods together so pod priority is applied globally.
+	autoscalingCtx.ClusterSnapshot.Fork()
+	validBookings := make([]capacityBooking, 0, len(bookings))
+	var pods []*apiv1.Pod
+	for _, booking := range bookings {
+		if booking.workload != nil {
+			if err := autoscalingCtx.ClusterSnapshot.DraSnapshot().AddClaims(booking.workload.Claims); err != nil {
+				p.markFailedToBookCapacity(ctx, booking.provReq, fmt.Sprintf("Couldn't add simulated ResourceClaims: %v", err))
+				continue
+			}
+		}
+		validBookings = append(validBookings, booking)
+		pods = append(pods, booking.pods...)
+	}
+	if len(pods) == 0 {
+		autoscalingCtx.ClusterSnapshot.Revert()
+		return nil
+	}
+
+	schedulingResult, err := p.injector.TrySchedulePods(ctx, autoscalingCtx.ClusterSnapshot, pods, false, clustersnapshot.SchedulingOptions{})
+	if err != nil {
+		autoscalingCtx.ClusterSnapshot.Revert()
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		autoscalingCtx.ClusterSnapshot.Revert()
+		return fmt.Errorf("couldn't book capacity because scheduling was interrupted: %w", err)
+	}
+
+	// Retain claims only for Pods that scheduled; statuses may be reordered.
+	scheduledPods := make(map[types.UID]struct{}, len(schedulingResult.Statuses))
+	for _, schedulingStatus := range schedulingResult.Statuses {
+		if schedulingStatus.Pod != nil {
+			scheduledPods[schedulingStatus.Pod.UID] = struct{}{}
+		}
+	}
+	for _, booking := range validBookings {
+		if booking.workload == nil {
+			continue
+		}
+		for _, pod := range booking.pods {
+			if _, found := scheduledPods[pod.UID]; !found {
+				autoscalingCtx.ClusterSnapshot.DraSnapshot().RemovePodOwnedClaims(ctx, pod)
+			}
+		}
+	}
+
+	if err := autoscalingCtx.ClusterSnapshot.Commit(); err != nil {
+		autoscalingCtx.ClusterSnapshot.Revert()
+		return fmt.Errorf("couldn't commit booked capacity: %w", err)
+	}
 	return nil
+}
+
+func (p *provReqProcessor) markFailedToBookCapacity(ctx context.Context, provReq *provreqwrapper.ProvisioningRequest, message string) {
+	logger := klog.FromContext(ctx)
+	conditions.AddOrUpdateCondition(ctx, provReq, v1.Failed, metav1.ConditionTrue, conditions.FailedToBookCapacityReason, message, metav1.Now())
+	if _, err := p.client.UpdateProvisioningRequest(ctx, provReq.ProvisioningRequest); err != nil {
+		logger.Error(err, "failed to add Failed condition to ProvReq", "provReq", klog.KObj(provReq))
+	}
 }
 
 // DeleteOldProvReqs delete ProvReq that have terminal state (Provisioned/Failed == True) more than a week.
