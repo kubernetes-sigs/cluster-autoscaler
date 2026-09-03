@@ -1143,6 +1143,7 @@ func (a *StaticAutoscaler) deleteCreatedNodesWithErrors(ctx context.Context) {
 		} else if len(nodesToDelete) > 0 {
 			deletedAny = true
 			a.clusterStateRegistry.InvalidateNodeInstancesCacheEntry(ctx, nodeGroup)
+			metrics.RegisterNodesWithCreateErrorsDeleted(len(nodesToDelete))
 		}
 	}
 

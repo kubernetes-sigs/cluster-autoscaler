@@ -198,6 +198,12 @@ func RegisterOldUnregisteredNodesRemoved(nodesCount int) {
 	DefaultMetrics.RegisterOldUnregisteredNodesRemoved(nodesCount)
 }
 
+// RegisterNodesWithCreateErrorsDeleted records number of nodes with
+// create errors that have been deleted by the cluster autoscaler
+func RegisterNodesWithCreateErrorsDeleted(nodesCount int) {
+	DefaultMetrics.RegisterNodesWithCreateErrorsDeleted(nodesCount)
+}
+
 // UpdateOverflowingControllers sets the number of controllers that could not
 // have their pods cached.
 func UpdateOverflowingControllers(count int) {
