@@ -174,6 +174,9 @@ func NewScaleTestAutoscalingContext(
 	processorCallbacks processor_callbacks.ProcessorCallbacks, debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter,
 	templateNodeInfoRegistry ca_context.TemplateNodeInfoRegistry,
 ) (ca_context.AutoscalingContext, error) {
+	if options.MaxSchedulablePodGroupsProcessingTime == 0 {
+		options.MaxSchedulablePodGroupsProcessingTime = 2 * time.Minute
+	}
 	// Not enough buffer space causes the test to hang without printing any logs.
 	// This is not useful.
 	fakeRecorder := kube_record.NewFakeRecorder(100)

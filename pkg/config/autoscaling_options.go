@@ -287,6 +287,8 @@ type AutoscalingOptions struct {
 	MaxBinpackingTime time.Duration
 	// FastpathBinpackingEnabled tells if to use fastpath binpacking algorithm to optimize scale-ups.
 	FastpathBinpackingEnabled bool
+	// MaxSchedulablePodGroupsProcessingTime is the maximum time CA spends on processing SchedulablePodGroups for node groups.
+	MaxSchedulablePodGroupsProcessingTime time.Duration
 	// NodeDeletionBatcherInterval is a time for how long CA ScaleDown gather nodes to delete them in batch.
 	NodeDeletionBatcherInterval time.Duration
 	// SkipNodesWithSystemPods tells if nodes with pods from kube-system should be deleted (except for DaemonSet or mirror pods)
