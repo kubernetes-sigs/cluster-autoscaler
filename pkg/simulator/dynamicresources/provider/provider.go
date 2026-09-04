@@ -55,7 +55,10 @@ func (p *Provider) Snapshot() (*drasnapshot.Snapshot, error) {
 	}
 	claimMap := make(map[drasnapshot.ResourceClaimId]*resourceapi.ResourceClaim)
 	for _, claim := range claims {
-		claimMap[drasnapshot.GetClaimId(claim)] = claim
+		// The lister returns objects shared with the informer cache, which are meant to be
+		// read-only. The snapshot's base layer can be mutated in place before the first Fork(),
+		// so it needs to own its own copies rather than the informer's.
+		claimMap[drasnapshot.GetClaimId(claim)] = claim.DeepCopy()
 	}
 
 	slices, err := p.resourceSlices.ListAll()
