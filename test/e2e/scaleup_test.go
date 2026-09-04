@@ -56,7 +56,7 @@ func TestClusterAutoscaling(t *testing.T) {
 				},
 			},
 			NodeSelector: map[string]string{
-				"kwok-nodegroup": "kind-worker",
+				nodeGroupLabelKey: defaultNodeGroup,
 			},
 			Tolerations: []corev1.Toleration{
 				{
@@ -116,7 +116,7 @@ func TestClusterAutoscaling(t *testing.T) {
 					return false, err
 				}
 				for _, node := range nodeList.Items {
-					if node.Labels["kwok-nodegroup"] == "kind-worker" {
+					if node.Labels[nodeGroupLabelKey] == defaultNodeGroup {
 						return true, nil
 					}
 				}
@@ -135,6 +135,8 @@ func TestClusterAutoscaling(t *testing.T) {
 			}
 			// Delete the pod
 			_ = client.Resources().Delete(ctx, pod)
+			// Delete the node so that each test keeps the cluster clean
+			_ = CleanUpNodeGroup(ctx, client, defaultNodeGroup)
 			return ctx
 		}).
 		Feature()
