@@ -722,3 +722,30 @@ func TestSnapshotForkCommitRevert(t *testing.T) {
 		compareSnapshots(t, expectedState, snapshot, "After Fork, Modify, Revert, Fork, Modify")
 	})
 }
+
+func TestReservePodClaimsAliasRevert(t *testing.T) {
+	sharedClaim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{Name: "shared", UID: "shared", Namespace: "default"}}
+	pod := test.BuildTestPod("aliaspod", 1, 1,
+		test.WithResourceClaim("aliasA", "shared", ""),
+		test.WithResourceClaim("aliasB", "shared", ""),
+	)
+	pod.Namespace = "default"
+
+	snapshot := NewSnapshot(map[ResourceClaimId]*resourceapi.ResourceClaim{GetClaimId(sharedClaim): sharedClaim.DeepCopy()}, nil, nil, nil)
+
+	snapshot.Fork()
+	if err := snapshot.ReservePodClaims(pod); err != nil {
+		t.Fatalf("ReservePodClaims failed: %v", err)
+	}
+	snapshot.Revert()
+
+	allClaims, err := snapshot.ResourceClaims().List()
+	if err != nil {
+		t.Fatalf("ResourceClaims().List(): unexpected error: %v", err)
+	}
+	for _, claim := range allClaims {
+		if claim.Name == sharedClaim.Name && len(claim.Status.ReservedFor) != 0 {
+			t.Errorf("a claim referenced by a Pod through two aliases leaked %d reservation(s) into the base layer after Revert", len(claim.Status.ReservedFor))
+		}
+	}
+}
