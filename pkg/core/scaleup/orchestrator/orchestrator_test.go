@@ -50,6 +50,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
 	"sigs.k8s.io/cluster-autoscaler/pkg/observers/nodegroupchange"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors"
+	"sigs.k8s.io/cluster-autoscaler/pkg/processors/customresources"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupconfig"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroups/asyncnodegroups"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupset"
@@ -57,6 +58,8 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/status"
 	processorstest "sigs.k8s.io/cluster-autoscaler/pkg/processors/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
+	csisnapshot "sigs.k8s.io/cluster-autoscaler/pkg/simulator/csi/snapshot"
+	drasnapshot "sigs.k8s.io/cluster-autoscaler/pkg/simulator/dynamicresources/snapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
@@ -2662,4 +2665,163 @@ func (m *mockMetrics) RegisterFailedNodeCreations(reason metrics.FailedScaleUpRe
 
 func (m *mockMetrics) RegisterScaleUp(nodesCount int, gpuResourceName string, gpuType string, draDriverNames string) {
 	m.Called(nodesCount, gpuResourceName, gpuType, draDriverNames)
+}
+
+// failingCustomResourcesProcessor makes the quota tracker's node resource lookup fail for one node
+// group, which is the only way CheckQuota can return an error. The tracker caches the lookup per
+// node group, so only a group with no nodes yet reaches it during a scale-up.
+type failingCustomResourcesProcessor struct {
+	failFor string
+	err     errors.AutoscalerError
+}
+
+func (p *failingCustomResourcesProcessor) FilterOutNodesWithUnreadyResources(_ gocontext.Context, _ *ca_context.AutoscalingContext, allNodes, readyNodes []*apiv1.Node, _ *drasnapshot.Snapshot, _ *csisnapshot.Snapshot) ([]*apiv1.Node, []*apiv1.Node) {
+	return allNodes, readyNodes
+}
+
+func (p *failingCustomResourcesProcessor) GetNodeResourceTargets(_ gocontext.Context, _ *ca_context.AutoscalingContext, _ *apiv1.Node, nodeGroup cloudprovider.NodeGroup) ([]customresources.CustomResourceTarget, errors.AutoscalerError) {
+	if nodeGroup != nil && nodeGroup.Id() == p.failFor {
+		return nil, p.err
+	}
+	return nil, nil
+}
+
+func (p *failingCustomResourcesProcessor) CleanUp() {}
+
+// quotaCapTestEnv is the smallest environment capScaleUpsByQuota needs: node groups with and
+// without nodes, and a tracker built over whichever quotas the case wants.
+type quotaCapTestEnv struct {
+	orchestrator *ScaleUpOrchestrator
+	tracker      *resourcequotas.Tracker
+	nodeInfos    map[string]*framework.NodeInfo
+	groups       map[string]cloudprovider.NodeGroup
+}
+
+func newQuotaCapTestEnv(t *testing.T, quotas []resourcequotas.Quota, crp customresources.CustomResourcesProcessor) *quotaCapTestEnv {
+	t.Helper()
+	ctx := t.Context()
+
+	n1 := BuildTestNode("n1", 1000, 1000)
+	n2 := BuildTestNode("n2", 1000, 1000)
+	now := time.Now()
+	SetNodeReadyState(n1, true, now.Add(-2*time.Minute))
+	SetNodeReadyState(n2, true, now.Add(-2*time.Minute))
+	nodes := []*apiv1.Node{n1, n2}
+
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	provider.AddNodeGroup("ng1", 1, 10, 1)
+	provider.AddNodeGroup("ng2", 1, 10, 1)
+	provider.AddNode("ng1", n1)
+	provider.AddNode("ng2", n2)
+	// ng3 has no nodes, so the tracker has nothing cached for it, the way a node group created
+	// during this scale-up would not.
+	provider.AddNodeGroup("ng3", 0, 10, 0)
+
+	listers := kube_util.NewListerRegistry(nil, nil, kube_util.NewTestPodLister(nil), nil, nil, nil, nil, nil, nil)
+	options := config.AutoscalingOptions{
+		EstimatorName:                  estimator.BinpackingEstimatorName,
+		MaxCoresTotal:                  config.DefaultMaxClusterCores,
+		MaxMemoryTotal:                 config.DefaultMaxClusterMemory,
+		MaxNodeGroupBinpackingDuration: time.Second,
+	}
+	processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(options)
+	if crp != nil {
+		processors.CustomResourcesProcessor = crp
+	}
+	autoscalingCtx, err := NewScaleTestAutoscalingContext(options, &fake.Clientset{}, listers, provider, nil, nil, templateNodeInfoRegistry)
+	assert.NoError(t, err)
+	assert.NoError(t, autoscalingCtx.ClusterSnapshot.SetClusterState(ctx, nodes, nil, nil, nil))
+	assert.NoError(t, autoscalingCtx.TemplateNodeInfoRegistry.Recompute(ctx, &autoscalingCtx, nodes, []*appsv1.DaemonSet{}, taints.TaintConfig{}, now))
+
+	trackerFactory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{
+		QuotaProvider:            resourcequotas.NewFakeProvider(quotas),
+		CustomResourcesProcessor: processors.CustomResourcesProcessor,
+	})
+	tracker, err := trackerFactory.NewMaxQuotasTracker(ctx, &autoscalingCtx, nodes)
+	if err != nil {
+		t.Fatalf("could not build quota tracker: %v", err)
+	}
+
+	orchestrator := New()
+	clusterState := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(options.NodeGroupDefaults), autoscalingCtx.TemplateNodeInfoRegistry)
+	orchestrator.Initialize(&autoscalingCtx, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, trackerFactory)
+
+	nodeInfos := autoscalingCtx.TemplateNodeInfoRegistry.GetNodeInfos()
+	// A node group with no nodes has no template of its own, so it borrows one, which is what
+	// processCreateNodeGroupResult does for a node group created during the scale-up.
+	nodeInfos["ng3"] = nodeInfos["ng2"]
+
+	return &quotaCapTestEnv{
+		orchestrator: orchestrator,
+		tracker:      tracker,
+		nodeInfos:    nodeInfos,
+		groups: map[string]cloudprovider.NodeGroup{
+			"ng1": provider.GetNodeGroup("ng1"),
+			"ng2": provider.GetNodeGroup("ng2"),
+			"ng3": provider.GetNodeGroup("ng3"),
+		},
+	}
+}
+
+func TestCapScaleUpsByQuotaFailsClosed(t *testing.T) {
+	quotaErr := errors.NewAutoscalerError(errors.CloudProviderError, "custom resources unavailable")
+
+	testCases := []struct {
+		name           string
+		crp            customresources.CustomResourcesProcessor
+		dropNodeInfoOf string
+	}{
+		{
+			name: "quota cannot be evaluated",
+			crp:  &failingCustomResourcesProcessor{failFor: "ng3", err: quotaErr},
+		},
+		{
+			name:           "node group has no node info",
+			dropNodeInfoOf: "ng3",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newQuotaCapTestEnv(t, nil, tc.crp)
+			if tc.dropNodeInfoOf != "" {
+				delete(env.nodeInfos, tc.dropNodeInfoOf)
+			}
+			scaleUpInfos := []nodegroupset.ScaleUpInfo{
+				{Group: env.groups["ng1"], CurrentSize: 1, NewSize: 3, MaxSize: 10},
+				{Group: env.groups["ng3"], CurrentSize: 0, NewSize: 2, MaxSize: 10},
+			}
+
+			capped, aErr := env.orchestrator.capScaleUpsByQuota(t.Context(), scaleUpInfos, env.nodeInfos, env.tracker)
+
+			assert.Error(t, aErr)
+			assert.Nil(t, capped)
+		})
+	}
+}
+
+func TestCapScaleUpsByQuotaSharedQuota(t *testing.T) {
+	// One quota over both groups: what the first group reserves has to be gone from the second's
+	// headroom, and a group left with nothing has to drop out of the plan.
+	quotas := []resourcequotas.Quota{
+		&resourcequotas.FakeQuota{
+			Name:        "shared",
+			AppliesToFn: resourcequotas.MatchEveryNode,
+			LimitsVal:   map[string]int64{string(apiv1.ResourceCPU): 5},
+		},
+	}
+	env := newQuotaCapTestEnv(t, quotas, nil)
+	scaleUpInfos := []nodegroupset.ScaleUpInfo{
+		{Group: env.groups["ng1"], CurrentSize: 1, NewSize: 4, MaxSize: 10},
+		{Group: env.groups["ng2"], CurrentSize: 1, NewSize: 4, MaxSize: 10},
+	}
+
+	capped, aErr := env.orchestrator.capScaleUpsByQuota(t.Context(), scaleUpInfos, env.nodeInfos, env.tracker)
+
+	assert.NoError(t, aErr)
+	sizes := map[string]int{}
+	for _, sui := range capped {
+		sizes[sui.Group.Id()] = sui.NewSize
+	}
+	assert.Equal(t, map[string]int{"ng1": 4}, sizes)
 }
