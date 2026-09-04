@@ -18,9 +18,9 @@ package resourcequotas
 
 import (
 	gocontext "context"
-	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/cluster-autoscaler/pkg/context"
 )
 
@@ -78,7 +78,7 @@ func (u *usageCalculator) calculateUsages(ctx gocontext.Context, autoscalingCtx 
 
 		ng, err := autoscalingCtx.CloudProvider.NodeGroupForNode(ctx, node)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get node group for node %q: %w", node.Name, err)
+			klog.Warningf("calculateUsages: failed to get node group for node %q, falling back to node capacity: %v", node.Name, err)
 		}
 		delta, err := u.nodeCache.totalNodeResources(ctx, autoscalingCtx, node, ng)
 		if err != nil {
