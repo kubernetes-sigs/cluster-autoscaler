@@ -93,7 +93,7 @@ func TestUpdateScaleDownNodeRemovalLatency(t *testing.T) {
 	m.RegisterAll(false)
 
 	m.UpdateScaleDownNodeRemovalLatency(true, "none", 10*time.Second)
-	m.UpdateScaleDownNodeRemovalLatency(false, "BlockedByPod", 20*time.Second)
+	m.UpdateScaleDownNodeRemovalLatency(false, "node_has_unevictable_pods", 20*time.Second)
 
 	var metric1 dto.Metric
 	err := m.scaleDownNodeRemovalLatency.HistogramVec.WithLabelValues("true", "none").(prometheus.Histogram).Write(&metric1)
@@ -102,7 +102,7 @@ func TestUpdateScaleDownNodeRemovalLatency(t *testing.T) {
 	assert.Equal(t, 10.0, metric1.Histogram.GetSampleSum())
 
 	var metric2 dto.Metric
-	err = m.scaleDownNodeRemovalLatency.HistogramVec.WithLabelValues("false", "BlockedByPod").(prometheus.Histogram).Write(&metric2)
+	err = m.scaleDownNodeRemovalLatency.HistogramVec.WithLabelValues("false", "node_has_unevictable_pods").(prometheus.Histogram).Write(&metric2)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(1), metric2.Histogram.GetSampleCount())
 	assert.Equal(t, 20.0, metric2.Histogram.GetSampleSum())
