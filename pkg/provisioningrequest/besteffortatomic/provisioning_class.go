@@ -29,6 +29,7 @@ import (
 	"k8s.io/klog/v2"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
+	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 
@@ -40,8 +41,10 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaleup"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaleup/orchestrator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
+	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupset"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/status"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/conditions"
+	provreqpods "sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/pods"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqclient"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqwrapper"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/scheduling"
@@ -95,7 +98,8 @@ func (o *bestEffortAtomicProvClass) Initialize(
 // When batch processing is disabled, exactly one ProvisioningRequest is handled per iteration.
 // When it is enabled, all ProvisioningRequests whose pods the injector added to
 // unschedulablePods are flattened into one all-or-nothing scale-up calculation. This allows
-// compatible requests to be coalesced into a single infrastructure resize.
+// compatible requests to be coalesced into a single infrastructure resize. If only some
+// resizes succeed, whole requests are admitted oldest-first against the successful capacity.
 func (o *bestEffortAtomicProvClass) Provision(
 	ctx context.Context,
 	unschedulablePods []*apiv1.Pod,
@@ -127,7 +131,7 @@ func (o *bestEffortAtomicProvClass) Provision(
 }
 
 // provisionBatch flattens all pods from the selected ProvisioningRequests into one atomic
-// capacity decision. The whole batch succeeds or fails together.
+// capacity plan, preserving per-request admission when execution only partially succeeds.
 func (o *bestEffortAtomicProvClass) provisionBatch(
 	ctx context.Context,
 	prs []*provreqwrapper.ProvisioningRequest,
@@ -143,7 +147,7 @@ func (o *bestEffortAtomicProvClass) provisionBatch(
 }
 
 // provisionRequests runs one all-or-nothing scale-up for all supplied ProvisioningRequests and
-// updates each request with the common outcome.
+// admits requests supported by the resulting capacity.
 func (o *bestEffortAtomicProvClass) provisionRequests(
 	ctx context.Context,
 	prs []*provreqwrapper.ProvisioningRequest,
@@ -154,14 +158,18 @@ func (o *bestEffortAtomicProvClass) provisionRequests(
 ) (*status.ScaleUpStatus, errors.AutoscalerError) {
 
 	// For provisioning requests, unschedulablePods are actually all injected pods. Some may even be schedulable!
+	snapshot := o.autoscalingCtx.ClusterSnapshot
+	snapshot.Fork()
 	actuallyUnschedulablePods, err := o.filterOutSchedulable(ctx, unschedulablePods)
 	if err != nil {
+		snapshot.Revert()
 		_ = o.updateConditions(ctx, prs, v1.Provisioned, metav1.ConditionFalse, conditions.FailedToCheckCapacityReason, conditions.FailedToCheckCapacityMsg)
 		st, aErr := status.UpdateScaleUpError(&status.ScaleUpStatus{}, errors.NewAutoscalerErrorf(errors.InternalError, "error during ScaleUp: %s", err.Error()))
 		return st, aErr
 	}
 
 	if len(actuallyUnschedulablePods) == 0 {
+		snapshot.Revert()
 		// Nothing to do here - everything fits without scale-up.
 		if updateErr := o.updateConditions(ctx, prs, v1.Provisioned, metav1.ConditionTrue, conditions.CapacityIsFoundReason, conditions.CapacityIsFoundMsg); updateErr != nil {
 			st, aErr := status.UpdateScaleUpError(&status.ScaleUpStatus{}, errors.NewAutoscalerErrorf(errors.InternalError, "capacity available, but failed to admit ProvisioningRequest batch: %s", updateErr.Error()))
@@ -170,8 +178,9 @@ func (o *bestEffortAtomicProvClass) provisionRequests(
 		return &status.ScaleUpStatus{Result: status.ScaleUpNotNeeded}, nil
 	}
 
-	st, err := o.scaleUpOrchestrator.ScaleUp(ctx, actuallyUnschedulablePods, nodes, daemonSets, nodeInfos, true)
-	if err == nil && st.Result == status.ScaleUpSuccessful {
+	st, scaleUpErr := o.scaleUpOrchestrator.ScaleUp(ctx, actuallyUnschedulablePods, nodes, daemonSets, nodeInfos, true)
+	snapshot.Revert()
+	if scaleUpErr == nil && st.Result == status.ScaleUpSuccessful {
 		// The capacity has already been requested from the cloud provider, so every request in
 		// this all-or-nothing batch is admitted together.
 		if updateErr := o.updateConditions(ctx, prs, v1.Provisioned, metav1.ConditionTrue, conditions.CapacityIsProvisionedReason, conditions.CapacityIsProvisionedMsg); updateErr != nil {
@@ -180,13 +189,81 @@ func (o *bestEffortAtomicProvClass) provisionRequests(
 		return st, nil
 	}
 
-	// The combined request failed. Give every ProvisioningRequest the same retryable outcome.
+	if o.batchProcessing && st != nil && len(st.ScaleUpInfos) > 0 {
+		if admissionErr := o.admitPartialBatch(ctx, prs, st.ScaleUpInfos, nodeInfos); admissionErr != nil {
+			return st, errors.NewAutoscalerErrorf(errors.InternalError, "partial scale up, but failed to admit ProvisioningRequests: %v; scale-up error: %v", admissionErr, scaleUpErr)
+		}
+		return st, scaleUpErr
+	}
+
+	// No requested capacity was confirmed. Give every ProvisioningRequest a retryable outcome.
 	_ = o.updateConditions(ctx, prs, v1.Provisioned, metav1.ConditionFalse, conditions.CapacityIsNotFoundReason, "Capacity is not found for the ProvisioningRequest batch, CA will try to find it later.")
-	if err != nil {
-		errStatus, aErr := status.UpdateScaleUpError(&status.ScaleUpStatus{}, errors.NewAutoscalerErrorf(errors.InternalError, "error during ScaleUp: %s", err.Error()))
+	if scaleUpErr != nil {
+		errStatus, aErr := status.UpdateScaleUpError(st, errors.NewAutoscalerErrorf(errors.InternalError, "error during ScaleUp: %s", scaleUpErr.Error()))
 		return errStatus, aErr
 	}
 	return st, nil
+}
+
+func (o *bestEffortAtomicProvClass) admitPartialBatch(
+	ctx context.Context,
+	prs []*provreqwrapper.ProvisioningRequest,
+	successfulScaleUps []nodegroupset.ScaleUpInfo,
+	nodeInfos map[string]*framework.NodeInfo,
+) error {
+	snapshot := o.autoscalingCtx.ClusterSnapshot
+	snapshot.Fork()
+	defer snapshot.Revert()
+
+	for groupIndex, scaleUpInfo := range successfulScaleUps {
+		template, found := nodeInfos[scaleUpInfo.Group.Id()]
+		if !found {
+			return fmt.Errorf("no node template for successful scale-up of %s", scaleUpInfo.Group.Id())
+		}
+		for nodeIndex := 0; nodeIndex < scaleUpInfo.NewSize-scaleUpInfo.CurrentSize; nodeIndex++ {
+			nodeInfo, err := simulator.SanitizedNodeInfo(ctx, template, fmt.Sprintf("provreq-%d-%d", groupIndex, nodeIndex))
+			if err != nil {
+				return err
+			}
+			if err := snapshot.AddNodeInfo(nodeInfo); err != nil {
+				return err
+			}
+		}
+	}
+
+	var admitted, unfulfilled []*provreqwrapper.ProvisioningRequest
+	var failures []string
+	for _, request := range prs {
+		requestPods, err := provreqpods.PodsForProvisioningRequest(request)
+		if err != nil {
+			unfulfilled = append(unfulfilled, request)
+			failures = append(failures, err.Error())
+			continue
+		}
+		snapshot.Fork()
+		result, err := o.injector.TrySchedulePods(ctx, snapshot, requestPods, true, clustersnapshot.SchedulingOptions{})
+		if err == nil && len(result.Statuses) == len(requestPods) {
+			if err = snapshot.Commit(); err == nil {
+				admitted = append(admitted, request)
+				continue
+			}
+		}
+		snapshot.Revert()
+		unfulfilled = append(unfulfilled, request)
+		if err != nil {
+			failures = append(failures, err.Error())
+		}
+	}
+	if err := o.updateConditions(ctx, admitted, v1.Provisioned, metav1.ConditionTrue, conditions.CapacityIsProvisionedReason, conditions.CapacityIsProvisionedMsg); err != nil {
+		failures = append(failures, err.Error())
+	}
+	if err := o.updateConditions(ctx, unfulfilled, v1.Provisioned, metav1.ConditionFalse, conditions.CapacityIsNotFoundReason, "Capacity is not found for the ProvisioningRequest, CA will try to find it later."); err != nil {
+		failures = append(failures, err.Error())
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("failed to admit partial ProvisioningRequest batch: %s", strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 func (o *bestEffortAtomicProvClass) updateCondition(
