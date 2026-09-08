@@ -20,21 +20,6 @@ KIND      ?= go tool -modfile=tools/go.mod kind
 ENVTEST   ?= go tool -modfile=tools/go.mod setup-envtest
 GINKGO    ?= go tool -modfile=tools/go.mod ginkgo
 
-.PHONY: setup-envtest
-setup-envtest: ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
-setup-envtest:
-	@mkdir -p $(GOBIN)
-	@echo "Setting up envtest binaries for Kubernetes version $(ENVTEST_K8S_VERSION)..."
-	@$(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(GOBIN) -p path || { \
-		echo "Warning: Failed to set up envtest binaries for version $(ENVTEST_K8S_VERSION)."; \
-		echo "Attempting fallback to latest available envtest binaries version."; \
-		$(ENVTEST) use latest --bin-dir $(GOBIN) -p path || { \
-			echo "Error: Failed to set up envtest binaries."; \
-			exit 1; \
-		}; \
-	}
-	@chmod -R +w $(GOBIN)/k8s
-
 .PHONY: build-kwok
 build-kwok:
 	@CGO_ENABLED=0 GOOS=linux go build -o cluster-autoscaler-kwok ./kwok
@@ -60,6 +45,21 @@ clean:
 format:
 	test -z "$$(find . -path ./vendor -prune -type f -o -name '*.go' -exec gofmt -s -d {} + | tee /dev/stderr)" || \
 	test -z "$$(find . -path ./vendor -prune -type f -o -name '*.go' -exec gofmt -s -w {} + | tee /dev/stderr)"
+
+.PHONY: setup-envtest
+setup-envtest: ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
+setup-envtest:
+	@mkdir -p $(GOBIN)
+	@echo "Setting up envtest binaries for Kubernetes version $(ENVTEST_K8S_VERSION)..."
+	@$(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(GOBIN) -p path || { \
+		echo "Warning: Failed to set up envtest binaries for version $(ENVTEST_K8S_VERSION)."; \
+		echo "Attempting fallback to latest available envtest binaries version."; \
+		$(ENVTEST) use latest --bin-dir $(GOBIN) -p path || { \
+			echo "Error: Failed to set up envtest binaries."; \
+			exit 1; \
+		}; \
+	}
+	@chmod -R +w $(GOBIN)/k8s
 
 .PHONY: run-e2e
 run-e2e: e2e-kwok-cluster e2e-install-ca
