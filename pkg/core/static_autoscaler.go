@@ -322,6 +322,7 @@ type loopState struct {
 	scaleUpStatus            *status.ScaleUpStatus
 	scaleDownStatus          *scaledownstatus.ScaleDownStatus
 	scaleUpTriggered         bool
+	currentTime              time.Time
 }
 
 // RunOnce iterates over node groups and scales them up/down if necessary
@@ -337,12 +338,13 @@ func (a *StaticAutoscaler) RunOnce(ctx context.Context, currentTime time.Time) c
 	state := &loopState{
 		scaleUpStatus:   &status.ScaleUpStatus{Result: status.ScaleUpNotTried},
 		scaleDownStatus: &scaledownstatus.ScaleDownStatus{Result: scaledownstatus.ScaleDownNotTried},
+		currentTime:     currentTime,
 	}
 
 	var err caerrors.AutoscalerError
 	var abort bool
 
-	state, abort, err = a.initializeLoopState(ctx, currentTime, state)
+	state, abort, err = a.initializeLoopState(ctx, state)
 	if err != nil {
 		return err
 	}
@@ -351,10 +353,10 @@ func (a *StaticAutoscaler) RunOnce(ctx context.Context, currentTime time.Time) c
 	}
 
 	defer func() {
-		a.statusUpdate(ctx, currentTime, state)
+		a.statusUpdate(ctx, state)
 	}()
 
-	state, abort, err = a.processLoopState(ctx, currentTime, state)
+	state, abort, err = a.processLoopState(ctx, state)
 	if err != nil {
 		return err
 	}
@@ -362,23 +364,23 @@ func (a *StaticAutoscaler) RunOnce(ctx context.Context, currentTime time.Time) c
 		return nil
 	}
 
-	state, _ = a.scaleUp(ctx, currentTime, state)
+	state, _ = a.scaleUp(ctx, state)
 	// Error is ignored here as it is already logged internally by instrumentedScaleUp.
 	// We do not abort the loop to maintain legacy behavior and allow subsequent steps (like scaleDown) to be attempted.
 
-	state, err = a.scaleDown(ctx, currentTime, state)
+	state, err = a.scaleDown(ctx, state)
 	if err != nil {
 		return err
 	}
 
-	state, _ = a.scaleUpMinNodes(ctx, currentTime, state)
+	state, _ = a.scaleUpMinNodes(ctx, state)
 	// Error is ignored here as it is already logged internally by instrumentedScaleUp.
 	// We do not abort the loop to maintain legacy behavior.
 
 	return nil
 }
 
-func (a *StaticAutoscaler) initializeLoopState(ctx context.Context, currentTime time.Time, state *loopState) (*loopState, bool, caerrors.AutoscalerError) {
+func (a *StaticAutoscaler) initializeLoopState(ctx context.Context, state *loopState) (*loopState, bool, caerrors.AutoscalerError) {
 	logger := klog.FromContext(ctx)
 	podLister := a.AllPodLister()
 	autoscalingCtx := a.AutoscalingContext
@@ -411,7 +413,7 @@ func (a *StaticAutoscaler) initializeLoopState(ctx context.Context, currentTime 
 		return state, false, typedErr
 	}
 
-	if abortLoop, err := a.processors.ActionableClusterProcessor.ShouldAbort(ctx, a.AutoscalingContext, allNodes, readyNodes, currentTime); abortLoop {
+	if abortLoop, err := a.processors.ActionableClusterProcessor.ShouldAbort(ctx, a.AutoscalingContext, allNodes, readyNodes, state.currentTime); abortLoop {
 		return state, true, err
 	}
 
@@ -420,7 +422,7 @@ func (a *StaticAutoscaler) initializeLoopState(ctx context.Context, currentTime 
 		return state, false, caerrors.ToAutoscalerError(caerrors.ApiCallError, err)
 	}
 
-	coresTotal, memoryTotal := calculateCoresMemoryTotal(allNodes, currentTime)
+	coresTotal, memoryTotal := calculateCoresMemoryTotal(allNodes, state.currentTime)
 	metrics.UpdateClusterCPUCurrentCores(coresTotal)
 	metrics.UpdateClusterMemoryCurrentBytes(memoryTotal)
 
@@ -472,14 +474,14 @@ func (a *StaticAutoscaler) initializeLoopState(ctx context.Context, currentTime 
 		return state, false, typedErr.AddPrefix("failed to initialize RemainingPdbTracker: ")
 	}
 
-	if autoscalerError := a.AutoscalingContext.TemplateNodeInfoRegistry.Recompute(ctx, a.AutoscalingContext, allNodes, daemonsets, a.taintConfig, currentTime); autoscalerError != nil {
+	if autoscalerError := a.AutoscalingContext.TemplateNodeInfoRegistry.Recompute(ctx, a.AutoscalingContext, allNodes, daemonsets, a.taintConfig, state.currentTime); autoscalerError != nil {
 		logger.Error(autoscalerError, "Failed to recompute template node infos")
 		return state, false, autoscalerError.AddPrefix("failed to recompute template node infos: ")
 	}
 
 	a.DebuggingSnapshotter.SetTemplateNodes(ctx, autoscalingCtx.TemplateNodeInfoRegistry.GetNodeInfos())
 
-	if typedErr := a.updateClusterState(ctx, allNodes, currentTime); typedErr != nil {
+	if typedErr := a.updateClusterState(ctx, allNodes, state.currentTime); typedErr != nil {
 		logger.Error(typedErr, "Failed to update cluster state")
 		return state, false, typedErr
 	}
@@ -494,7 +496,7 @@ func (a *StaticAutoscaler) initializeLoopState(ctx context.Context, currentTime 
 	return state, false, nil
 }
 
-func (a *StaticAutoscaler) processLoopState(ctx context.Context, currentTime time.Time, state *loopState) (*loopState, bool, caerrors.AutoscalerError) {
+func (a *StaticAutoscaler) processLoopState(ctx context.Context, state *loopState) (*loopState, bool, caerrors.AutoscalerError) {
 	logger := klog.FromContext(ctx)
 	autoscalingCtx := a.AutoscalingContext
 
@@ -504,7 +506,7 @@ func (a *StaticAutoscaler) processLoopState(ctx context.Context, currentTime tim
 	if len(unregisteredNodes) > 0 {
 		logger.V(1).Info("unregistered nodes present", "unregisteredNodesCount", len(unregisteredNodes))
 		removedAny, err := a.removeOldUnregisteredNodes(ctx, unregisteredNodes,
-			a.clusterStateRegistry, currentTime, autoscalingCtx.LogRecorder)
+			a.clusterStateRegistry, state.currentTime, autoscalingCtx.LogRecorder)
 		// There was a problem with removing unregistered nodes. Retry in the next loop.
 		if err != nil {
 			logger.Info("Failed to remove unregistered nodes", "err", err)
@@ -526,7 +528,7 @@ func (a *StaticAutoscaler) processLoopState(ctx context.Context, currentTime tim
 	// Check if there has been a constant difference between the number of nodes in k8s and
 	// the number of nodes on the cloud provider side.
 	// TODO: andrewskim - add protection for ready AWS nodes.
-	fixedSomething, err := fixNodeGroupSize(ctx, autoscalingCtx, a.clusterStateRegistry, currentTime)
+	fixedSomething, err := fixNodeGroupSize(ctx, autoscalingCtx, a.clusterStateRegistry, state.currentTime)
 	if err != nil {
 		logger.Error(err, "Failed to fix node group sizes")
 		return state, false, caerrors.ToAutoscalerError(caerrors.CloudProviderError, err)
@@ -588,7 +590,7 @@ func (a *StaticAutoscaler) processLoopState(ctx context.Context, currentTime tim
 	}
 
 	// finally, filter out pods that are too "young" to safely be considered for a scale-up (delay is configurable)
-	unschedulablePodsToHelp = a.filterOutYoungPods(ctx, unschedulablePodsToHelp, currentTime)
+	unschedulablePodsToHelp = a.filterOutYoungPods(ctx, unschedulablePodsToHelp, state.currentTime)
 
 	state.allNodeInfos = allNodeInfos
 	state.unschedulablePodsToHelp = unschedulablePodsToHelp
@@ -596,9 +598,9 @@ func (a *StaticAutoscaler) processLoopState(ctx context.Context, currentTime tim
 	return state, false, nil
 }
 
-func (a *StaticAutoscaler) scaleUp(ctx context.Context, currentTime time.Time, state *loopState) (*loopState, caerrors.AutoscalerError) {
+func (a *StaticAutoscaler) scaleUp(ctx context.Context, state *loopState) (*loopState, caerrors.AutoscalerError) {
 	logger := klog.FromContext(ctx)
-	shouldScaleUp, scaleUpStatus := a.shouldScaleUp(ctx, state.unschedulablePodsToHelp, state.scaleUpStatus, state.readyNodes, currentTime)
+	shouldScaleUp, scaleUpStatus := a.shouldScaleUp(ctx, state.unschedulablePodsToHelp, state.scaleUpStatus, state.readyNodes, state.currentTime)
 	state.scaleUpStatus = scaleUpStatus
 
 	if err := ctx.Err(); err != nil {
@@ -616,14 +618,14 @@ func (a *StaticAutoscaler) scaleUp(ctx context.Context, currentTime time.Time, s
 		var typedErr caerrors.AutoscalerError
 		templateNodeInfos := a.AutoscalingContext.TemplateNodeInfoRegistry.GetNodeInfos()
 		if a.AutoscalingContext.AutoscalingOptions.SalvoScaleUp {
-			scaleUpStatus, typedErr = a.runScaleUpSalvo(ctx, currentTime,
+			scaleUpStatus, typedErr = a.runScaleUpSalvo(ctx, state.currentTime,
 				state.unschedulablePodsToHelp,
 				state.daemonsets,
 				nodes,
 				templateNodeInfos,
 			)
 		} else {
-			_, scaleUpStatus, typedErr = a.runSingleScaleUp(ctx, currentTime,
+			_, scaleUpStatus, typedErr = a.runSingleScaleUp(ctx, state.currentTime,
 				state.unschedulablePodsToHelp,
 				state.daemonsets,
 				nodes,
@@ -647,7 +649,7 @@ func (a *StaticAutoscaler) scaleUp(ctx context.Context, currentTime time.Time, s
 	return state, nil
 }
 
-func (a *StaticAutoscaler) scaleUpMinNodes(ctx context.Context, currentTime time.Time, state *loopState) (*loopState, caerrors.AutoscalerError) {
+func (a *StaticAutoscaler) scaleUpMinNodes(ctx context.Context, state *loopState) (*loopState, caerrors.AutoscalerError) {
 	if err := ctx.Err(); err != nil {
 		klog.FromContext(ctx).V(0).Info("Skipping scale-up min nodes, context cancelled", "err", err)
 		return state, nil
@@ -666,7 +668,7 @@ func (a *StaticAutoscaler) scaleUpMinNodes(ctx context.Context, currentTime time
 		}
 		var typedErr caerrors.AutoscalerError
 		var scaleUpStatus *status.ScaleUpStatus
-		_, scaleUpStatus, typedErr = a.instrumentedScaleUp(ctx, currentTime, scaleUpFn)
+		_, scaleUpStatus, typedErr = a.instrumentedScaleUp(ctx, state.currentTime, scaleUpFn)
 		state.scaleUpStatus = scaleUpStatus
 		if typedErr != nil {
 			return state, typedErr
@@ -675,15 +677,15 @@ func (a *StaticAutoscaler) scaleUpMinNodes(ctx context.Context, currentTime time
 	return state, nil
 }
 
-func (a *StaticAutoscaler) statusUpdate(ctx context.Context, currentTime time.Time, state *loopState) {
+func (a *StaticAutoscaler) statusUpdate(ctx context.Context, state *loopState) {
 	logger := klog.FromContext(ctx)
 	autoscalingCtx := a.AutoscalingContext
 
 	// Update status information when the loop is done (regardless of reason)
 	if autoscalingCtx.WriteStatusConfigMap {
-		status := a.clusterStateRegistry.GetStatus(ctx, currentTime)
+		status := a.clusterStateRegistry.GetStatus(ctx, state.currentTime)
 		utils.WriteStatusConfigMap(ctx, autoscalingCtx.ClientSet, autoscalingCtx.ConfigNamespace,
-			*status, a.AutoscalingContext.LogRecorder, a.AutoscalingContext.StatusConfigMapName, currentTime)
+			*status, a.AutoscalingContext.LogRecorder, a.AutoscalingContext.StatusConfigMapName, state.currentTime)
 	}
 
 	// This deferred processor execution allows the processors to handle a situation when a scale-(up|down)
@@ -703,7 +705,7 @@ func (a *StaticAutoscaler) statusUpdate(ctx context.Context, currentTime time.Ti
 	}
 
 	if a.processors.AutoscalingStatusProcessor != nil {
-		err := a.processors.AutoscalingStatusProcessor.Process(ctx, a.AutoscalingContext, a.clusterStateRegistry, currentTime)
+		err := a.processors.AutoscalingStatusProcessor.Process(ctx, a.AutoscalingContext, a.clusterStateRegistry, state.currentTime)
 		if err != nil {
 			logger.Error(err, "AutoscalingStatusProcessor error")
 		}
@@ -885,7 +887,7 @@ func (a *StaticAutoscaler) updateSoftDeletionTaints(ctx context.Context, allNode
 	}
 }
 
-func (a *StaticAutoscaler) scaleDown(ctx context.Context, currentTime time.Time, state *loopState) (*loopState, caerrors.AutoscalerError) {
+func (a *StaticAutoscaler) scaleDown(ctx context.Context, state *loopState) (*loopState, caerrors.AutoscalerError) {
 	logger := klog.FromContext(ctx)
 	if err := ctx.Err(); err != nil {
 		logger.V(0).Info("Skipping scale-down, context cancelled", "err", err)
@@ -924,10 +926,10 @@ func (a *StaticAutoscaler) scaleDown(ctx context.Context, currentTime time.Time,
 		}
 	}
 
-	typedErr := a.scaleDownPlanner.UpdateClusterState(ctx, podDestinations, scaleDownCandidates, state.scaleDownActuationStatus, currentTime)
+	typedErr := a.scaleDownPlanner.UpdateClusterState(ctx, podDestinations, scaleDownCandidates, state.scaleDownActuationStatus, state.currentTime)
 	// Update clusterStateRegistry and metrics regardless of whether ScaleDown was successful or not.
 	unneededNodes := a.scaleDownPlanner.UnneededNodes()
-	a.processors.ScaleDownCandidatesNotifier.Update(ctx, unneededNodes, currentTime)
+	a.processors.ScaleDownCandidatesNotifier.Update(ctx, unneededNodes, state.currentTime)
 	metrics.UpdateUnneededNodesCount(len(unneededNodes))
 	if typedErr != nil {
 		state.scaleDownStatus.Result = scaledownstatus.ScaleDownError
@@ -937,7 +939,7 @@ func (a *StaticAutoscaler) scaleDown(ctx context.Context, currentTime time.Time,
 
 	metrics.UpdateDurationFromStart(ctx, metrics.FindUnneeded, unneededStart)
 
-	scaleDownInCooldown := a.isScaleDownInCooldown(currentTime)
+	scaleDownInCooldown := a.isScaleDownInCooldown(state.currentTime)
 	logger.V(4).Info("Recording scale down status", "lastScaleUpTime", a.lastScaleUpTime, "lastScaleDownDeleteTime", a.lastScaleDownDeleteTime, "lastScaleDownFailTime", a.lastScaleDownFailTime, "scaleDownForbidden", a.processorCallbacks.disableScaleDownForLoop, "scaleDownInCooldown", scaleDownInCooldown)
 	metrics.UpdateScaleDownInCooldown(scaleDownInCooldown)
 	// We want to delete unneeded Node Groups only if here is no current delete
@@ -966,7 +968,7 @@ func (a *StaticAutoscaler) scaleDown(ctx context.Context, currentTime time.Time,
 
 		scaleDownStart := time.Now()
 		metrics.UpdateLastTime(metrics.ScaleDown, scaleDownStart)
-		empty, needDrain := a.scaleDownPlanner.NodesToDelete(ctx, currentTime)
+		empty, needDrain := a.scaleDownPlanner.NodesToDelete(ctx, state.currentTime)
 		scaleDownResult, scaledDownNodes, typedErr := a.scaleDownActuator.StartDeletion(ctx, empty, needDrain)
 		state.scaleDownStatus.Result = scaleDownResult
 		state.scaleDownStatus.ScaledDownNodes = scaledDownNodes
@@ -976,13 +978,13 @@ func (a *StaticAutoscaler) scaleDown(ctx context.Context, currentTime time.Time,
 		state.scaleDownStatus.RemovedNodeGroups = removedNodeGroups
 
 		if state.scaleDownStatus.Result == scaledownstatus.ScaleDownNodeDeleteStarted {
-			a.lastScaleDownDeleteTime = currentTime
+			a.lastScaleDownDeleteTime = state.currentTime
 			a.clusterStateRegistry.Recalculate(ctx)
 		}
 		a.updateSoftDeletionTaints(ctx, state.allNodes)
 		if typedErr != nil {
 			logger.Error(typedErr, "Failed to scale down")
-			a.lastScaleDownFailTime = currentTime
+			a.lastScaleDownFailTime = state.currentTime
 			return state, typedErr
 		}
 	}
