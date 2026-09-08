@@ -19,10 +19,13 @@ package provreq
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
+	apiv1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
@@ -322,6 +325,317 @@ func TestBestEffortAtomicBatchRetryBackoff(t *testing.T) {
 		if got, want := val.(time.Duration), 2*initialRetryTime; got != want {
 			t.Errorf("backoff for ProvisioningRequest %s is %v, want %v", pr.Name, got, want)
 		}
+	}
+}
+
+func TestBestEffortAtomicBatchSchedulingRequirements(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*apiv1.PodTemplateSpec)
+	}{
+		{
+			name: "CPU requests",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				template.Spec.Containers[0].Resources.Requests[apiv1.ResourceCPU] = resource.MustParse("5")
+			},
+		},
+		{
+			name: "memory requests",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				template.Spec.Containers[0].Resources.Requests[apiv1.ResourceMemory] = resource.MustParse("50")
+			},
+		},
+		{
+			name: "GPU requests",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				template.Spec.Containers[0].Resources.Requests["nvidia.com/gpu"] = resource.MustParse("1")
+				template.Spec.Containers[0].Resources.Limits["nvidia.com/gpu"] = resource.MustParse("1")
+			},
+		},
+		{
+			name: "init container resources",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				template.Spec.InitContainers = []apiv1.Container{{
+					Name: "init", Image: "init",
+					Resources: apiv1.ResourceRequirements{Requests: apiv1.ResourceList{apiv1.ResourceCPU: resource.MustParse("20")}},
+				}}
+			},
+		},
+		{
+			name: "node selectors",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				template.Spec.NodeSelector = map[string]string{"hardware": "gpu"}
+			},
+		},
+		{
+			name: "node affinity",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				template.Spec.Affinity.NodeAffinity = &apiv1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &apiv1.NodeSelector{NodeSelectorTerms: []apiv1.NodeSelectorTerm{{
+						MatchExpressions: []apiv1.NodeSelectorRequirement{{Key: "hardware", Operator: apiv1.NodeSelectorOpIn, Values: []string{"gpu"}}},
+					}}},
+				}
+			},
+		},
+		{
+			name: "pod anti-affinity",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				template.Spec.Affinity.PodAntiAffinity = &apiv1.PodAntiAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: []apiv1.PodAffinityTerm{{
+						TopologyKey: "kubernetes.io/hostname", LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "test-app"}},
+					}},
+				}
+			},
+		},
+		{
+			name: "tolerations",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				template.Spec.Tolerations = []apiv1.Toleration{{Key: "nvidia.com/gpu", Operator: apiv1.TolerationOpExists, Effect: apiv1.TaintEffectNoSchedule}}
+			},
+		},
+		{
+			name: "topology spread constraints",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				template.Spec.TopologySpreadConstraints = []apiv1.TopologySpreadConstraint{{
+					MaxSkew: 1, TopologyKey: "topology.kubernetes.io/zone", WhenUnsatisfiable: apiv1.DoNotSchedule,
+					LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "test-app"}},
+				}}
+			},
+		},
+		{
+			name: "persistent volumes",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				template.Spec.Volumes = []apiv1.Volume{{Name: "data", VolumeSource: apiv1.VolumeSource{
+					PersistentVolumeClaim: &apiv1.PersistentVolumeClaimVolumeSource{ClaimName: "data"},
+				}}}
+			},
+		},
+		{
+			name: "resource claims",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				claimName := "gpu-claim"
+				template.Spec.ResourceClaims = []apiv1.PodResourceClaim{{Name: "gpu", ResourceClaimName: &claimName}}
+			},
+		},
+		{
+			name: "host ports",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				template.Spec.Containers[0].Ports = []apiv1.ContainerPort{{ContainerPort: 8080, HostPort: 8080, Protocol: apiv1.ProtocolTCP}}
+			},
+		},
+		{
+			name: "scheduler name",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				template.Spec.SchedulerName = "custom-scheduler"
+			},
+		},
+		{
+			name: "pod labels",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				template.Labels["app"] = "other-app"
+			},
+		},
+		{
+			name: "pod annotations",
+			mutate: func(template *apiv1.PodTemplateSpec) {
+				template.Annotations = map[string]string{"example.com/scheduling-policy": "gpu"}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Now()
+			initialRetryTime := time.Minute
+			notProvisioned := metav1.Condition{
+				Type:               v1.Provisioned,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.NewTime(now.Add(-90 * time.Second)),
+			}
+			oldest := testProvisioningRequestWithCondition("oldest", 1, v1.ProvisioningClassBestEffortAtomicScaleUp, notProvisioned)
+			incompatible := testProvisioningRequestWithCondition("incompatible", 2, v1.ProvisioningClassBestEffortAtomicScaleUp, notProvisioned)
+			compatible := testProvisioningRequestWithCondition("compatible", 3, v1.ProvisioningClassBestEffortAtomicScaleUp, notProvisioned)
+			requests := []*provreqwrapper.ProvisioningRequest{oldest, incompatible, compatible}
+			for index, request := range requests {
+				request.UID = types.UID(request.Name)
+				request.CreationTimestamp = metav1.NewTime(now.Add(time.Duration(index-3) * time.Hour))
+			}
+			test.mutate(&incompatible.PodTemplates[0].Template)
+
+			client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, compatible, incompatible, oldest)
+			injector := NewProvisioningRequestPodsInjector(client, initialRetryTime, 10*time.Minute, 100, false, "", true, 2, 1)
+			injector.clock = clock.NewFakePassiveClock(now)
+
+			pods, err := injector.Process(context.Background(), nil, nil)
+			if err != nil {
+				t.Fatalf("injector.Process returned error: %v", err)
+			}
+			wantNames := []string{oldest.Name, compatible.Name, compatible.Name, compatible.Name}
+			var gotNames []string
+			for _, pod := range pods {
+				gotNames = append(gotNames, pod.Annotations[v1.ProvisioningRequestPodAnnotationKey])
+			}
+			if !reflect.DeepEqual(gotNames, wantNames) {
+				t.Fatalf("injected requests %v, want %v", gotNames, wantNames)
+			}
+			for _, request := range requests {
+				updated, err := client.ProvisioningRequestNoCache(request.Namespace, request.Name)
+				if err != nil {
+					t.Fatalf("failed to get ProvisioningRequest %s: %v", request.Name, err)
+				}
+				wantAccepted := request != incompatible
+				if accepted := apimeta.IsStatusConditionTrue(updated.Status.Conditions, v1.Accepted); accepted != wantAccepted {
+					t.Errorf("Accepted for %s = %t, want %t", request.Name, accepted, wantAccepted)
+				}
+				if !wantAccepted && !reflect.DeepEqual(updated.Status.Conditions, request.Status.Conditions) {
+					t.Errorf("conditions changed for deferred request %s", request.Name)
+				}
+				wantRetryTime := initialRetryTime
+				if wantAccepted {
+					wantRetryTime *= 2
+				}
+				if retryTime := injector.retryTime(request); retryTime != wantRetryTime {
+					t.Errorf("retry backoff for %s = %v, want %v", request.Name, retryTime, wantRetryTime)
+				}
+			}
+			if !injector.IsAvailableForProvisioning(incompatible) {
+				t.Error("incompatible request is no longer eligible for provisioning")
+			}
+
+			nextPods, err := injector.Process(context.Background(), nil, nil)
+			if err != nil {
+				t.Fatalf("next injector.Process returned error: %v", err)
+			}
+			if len(nextPods) != incompatible.PodCount() {
+				t.Fatalf("next iteration injected %d pods, want %d", len(nextPods), incompatible.PodCount())
+			}
+			for _, pod := range nextPods {
+				if pod.Annotations[v1.ProvisioningRequestPodAnnotationKey] != incompatible.Name {
+					t.Errorf("next iteration injected incompatible pod %s", pod.Name)
+				}
+			}
+		})
+	}
+}
+
+func TestBestEffortAtomicBatchMultiplePodSets(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*provreqwrapper.ProvisioningRequest)
+		wantBatch int
+	}{
+		{
+			name: "equivalent pod sets with different counts",
+			mutate: func(request *provreqwrapper.ProvisioningRequest) {
+				request.Spec.PodSets[0].Count = 3
+				request.Spec.PodSets[1].Count = 4
+			},
+			wantBatch: 2,
+		},
+		{
+			name: "different second pod set",
+			mutate: func(request *provreqwrapper.ProvisioningRequest) {
+				request.PodTemplates[1].Template.Spec.NodeSelector = map[string]string{"hardware": "gpu"}
+			},
+			wantBatch: 1,
+		},
+		{
+			name: "different number of pod sets",
+			mutate: func(request *provreqwrapper.ProvisioningRequest) {
+				request.Spec.PodSets = request.Spec.PodSets[:1]
+				request.PodTemplates = request.PodTemplates[:1]
+			},
+			wantBatch: 1,
+		},
+		{
+			name: "different namespaces",
+			mutate: func(request *provreqwrapper.ProvisioningRequest) {
+				request.Namespace = "other-namespace"
+				for _, template := range request.PodTemplates {
+					template.Namespace = request.Namespace
+				}
+			},
+			wantBatch: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			oldest := testProvisioningRequestWithCondition("oldest", 1, v1.ProvisioningClassBestEffortAtomicScaleUp)
+			next := testProvisioningRequestWithCondition("next", 1, v1.ProvisioningClassBestEffortAtomicScaleUp)
+			for _, request := range []*provreqwrapper.ProvisioningRequest{oldest, next} {
+				extra := testProvisioningRequestWithCondition(request.Name+"-extra", 2, v1.ProvisioningClassBestEffortAtomicScaleUp)
+				extra.PodTemplates[0].Template.Spec.Containers[0].Resources.Requests[apiv1.ResourceCPU] = resource.MustParse("5")
+				request.Spec.PodSets = append(request.Spec.PodSets, extra.Spec.PodSets...)
+				request.PodTemplates = append(request.PodTemplates, extra.PodTemplates...)
+			}
+			test.mutate(next)
+			client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, next, oldest)
+			injector := NewProvisioningRequestPodsInjector(client, time.Minute, 10*time.Minute, 100, false, "", true, 10, 1)
+			batch, err := injector.GetBestEffortAtomicBatch(context.Background(), 10)
+			if err != nil {
+				t.Fatalf("GetBestEffortAtomicBatch returned error: %v", err)
+			}
+			if len(batch) != test.wantBatch {
+				t.Fatalf("batch contains %d requests, want %d", len(batch), test.wantBatch)
+			}
+			if batch[0].PrWrapper.Name != oldest.Name {
+				t.Errorf("batch starts with %s, want %s", batch[0].PrWrapper.Name, oldest.Name)
+			}
+			for _, request := range batch {
+				if len(request.Pods) != request.PrWrapper.PodCount() {
+					t.Errorf("request %s was split: got %d pods, want %d", request.PrWrapper.Name, len(request.Pods), request.PrWrapper.PodCount())
+				}
+				updated, err := client.ProvisioningRequestNoCache(request.PrWrapper.Namespace, request.PrWrapper.Name)
+				if err != nil {
+					t.Fatalf("failed to get ProvisioningRequest: %v", err)
+				}
+				if apimeta.FindStatusCondition(updated.Status.Conditions, v1.Accepted) != nil {
+					t.Errorf("GetBestEffortAtomicBatch accepted request %s", request.PrWrapper.Name)
+				}
+			}
+		})
+	}
+}
+
+func TestSameSchedulingRequirementsPreservesTemplates(t *testing.T) {
+	first := testProvisioningRequestWithCondition("first", 1, v1.ProvisioningClassBestEffortAtomicScaleUp)
+	second := testProvisioningRequestWithCondition("second", 3, v1.ProvisioningClassBestEffortAtomicScaleUp)
+	for _, request := range []*provreqwrapper.ProvisioningRequest{first, second} {
+		spec := &request.PodTemplates[0].Template.Spec
+		spec.Hostname = request.Name
+		spec.Volumes = []apiv1.Volume{{Name: request.Name, VolumeSource: apiv1.VolumeSource{
+			Projected: &apiv1.ProjectedVolumeSource{},
+		}}}
+		spec.Containers[0].Env = []apiv1.EnvVar{{Name: "REQUEST", Value: request.Name}}
+		spec.Containers[0].VolumeMounts = []apiv1.VolumeMount{{Name: request.Name, MountPath: "/token"}}
+		spec.InitContainers = []apiv1.Container{{
+			Name: "init", Image: "init",
+			Env:          []apiv1.EnvVar{{Name: "REQUEST", Value: request.Name}},
+			VolumeMounts: []apiv1.VolumeMount{{Name: request.Name, MountPath: "/token"}},
+		}}
+	}
+	second.PodTemplates[0].Template.Spec.Containers[0].Resources.Requests[apiv1.ResourceCPU] = resource.MustParse("10000m")
+	firstBefore := first.PodTemplates[0].DeepCopy()
+	secondBefore := second.PodTemplates[0].DeepCopy()
+	if !sameSchedulingRequirements(first, second) {
+		t.Error("equivalent scheduling requirements were considered incompatible")
+	}
+	if !reflect.DeepEqual(firstBefore, first.PodTemplates[0]) || !reflect.DeepEqual(secondBefore, second.PodTemplates[0]) {
+		t.Error("comparing scheduling requirements mutated the pod templates")
+	}
+}
+
+func TestCheckCapacityBatchDifferentSchedulingRequirements(t *testing.T) {
+	first := testProvisioningRequestWithCondition("first", 1, v1.ProvisioningClassCheckCapacity)
+	second := testProvisioningRequestWithCondition("second", 2, v1.ProvisioningClassCheckCapacity)
+	second.PodTemplates[0].Template.Spec.NodeSelector = map[string]string{"hardware": "gpu"}
+	client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, first, second)
+	injector := NewProvisioningRequestPodsInjector(client, time.Minute, 10*time.Minute, 100, true, "", true, 10, 1)
+	batch, err := injector.GetCheckCapacityBatch(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("GetCheckCapacityBatch returned error: %v", err)
+	}
+	if len(batch) != 2 {
+		t.Errorf("check-capacity batch contains %d requests, want 2", len(batch))
 	}
 }
 
