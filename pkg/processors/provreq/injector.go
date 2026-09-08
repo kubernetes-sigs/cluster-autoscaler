@@ -22,6 +22,7 @@ import (
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
@@ -34,6 +35,7 @@ import (
 	provreqpods "sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/pods"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqclient"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqwrapper"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils"
 )
 
 // ProvisioningRequestPodsInjector creates in-memory pods from ProvisioningRequest and inject them to unscheduled pods list.
@@ -192,8 +194,9 @@ func (p *ProvisioningRequestPodsInjector) GetCheckCapacityBatch(ctx context.Cont
 }
 
 // GetBestEffortAtomicBatch returns up to the requested number of best-effort-atomic
-// ProvisioningRequestWithPods. The PRs are not marked as accepted here; callers that
-// inject the pods are expected to call MarkBatchAsAccepted.
+// ProvisioningRequestWithPods sharing the oldest eligible request's scheduling requirements.
+// The PRs are not marked as accepted here; callers that inject the pods are expected to call
+// MarkBatchAsAccepted.
 func (p *ProvisioningRequestPodsInjector) GetBestEffortAtomicBatch(ctx context.Context, maxPrs int) ([]ProvisioningRequestWithPods, error) {
 	return p.getBatch(ctx, maxPrs, p.isSupportedBestEffortAtomicClass)
 }
@@ -226,7 +229,6 @@ func (p *ProvisioningRequestPodsInjector) collectBatch(ctx context.Context, prov
 		if !p.IsAvailableForProvisioning(pr) {
 			continue
 		}
-		p.recordProvisioningAttempt(pr)
 
 		pods, err := provreqpods.PodsForProvisioningRequest(pr)
 		if err != nil {
@@ -234,9 +236,28 @@ func (p *ProvisioningRequestPodsInjector) collectBatch(ctx context.Context, prov
 			p.MarkAsFailed(ctx, pr, provreqconditions.FailedToCreatePodsReason, err.Error())
 			continue
 		}
+		if len(prsWithPods) > 0 && p.isSupportedBestEffortAtomicClass(pr) && !sameSchedulingRequirements(prsWithPods[0].PrWrapper, pr) {
+			continue
+		}
+		p.recordProvisioningAttempt(pr)
 		prsWithPods = append(prsWithPods, ProvisioningRequestWithPods{pr, pods})
 	}
 	return prsWithPods
+}
+
+func sameSchedulingRequirements(first, second *provreqwrapper.ProvisioningRequest) bool {
+	if first.Namespace != second.Namespace || len(first.PodTemplates) != len(second.PodTemplates) {
+		return false
+	}
+	for index, firstTemplate := range first.PodTemplates {
+		secondTemplate := second.PodTemplates[index]
+		if !apiequality.Semantic.DeepEqual(firstTemplate.Template.Labels, secondTemplate.Template.Labels) ||
+			!apiequality.Semantic.DeepEqual(firstTemplate.Template.Annotations, secondTemplate.Template.Annotations) ||
+			!utils.PodSpecSemanticallyEqual(*firstTemplate.Template.Spec.DeepCopy(), *secondTemplate.Template.Spec.DeepCopy()) {
+			return false
+		}
+	}
+	return true
 }
 
 // MarkBatchAsAccepted marks every ProvisioningRequest in the batch as accepted, in parallel,
