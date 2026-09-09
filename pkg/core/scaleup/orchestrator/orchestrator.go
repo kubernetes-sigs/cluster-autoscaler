@@ -18,6 +18,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"time"
@@ -40,7 +41,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
-	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
+	autoscaling_err "sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/klogx"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 )
@@ -93,10 +94,10 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 	daemonSets []*appsv1.DaemonSet,
 	nodeInfos map[string]*framework.NodeInfo,
 	allOrNothing bool, // Either request enough capacity for all unschedulablePods, or don't request it at all.
-) (*status.ScaleUpStatus, errors.AutoscalerError) {
+) (*status.ScaleUpStatus, autoscaling_err.AutoscalerError) {
 	logger := klog.FromContext(ctx)
 	if !o.initialized {
-		return status.UpdateScaleUpError(&status.ScaleUpStatus{}, errors.NewAutoscalerError(errors.InternalError, "ScaleUpOrchestrator is not initialized"))
+		return status.UpdateScaleUpError(&status.ScaleUpStatus{}, autoscaling_err.NewAutoscalerError(autoscaling_err.InternalError, "ScaleUpOrchestrator is not initialized"))
 	}
 
 	loggingQuota := klogx.PodsLoggingQuota()
@@ -130,7 +131,7 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 				&status.ScaleUpStatus{
 					PodsRemainUnschedulable: o.GetRemainingPods(ctx, markedEquivalenceGroups, nodeGroups, map[string]status.Reasons{}, nodeInfos),
 				},
-				errors.ToAutoscalerError(errors.InternalError, err),
+				autoscaling_err.ToAutoscalerError(autoscaling_err.InternalError, err),
 			)
 		}
 	}
@@ -145,7 +146,7 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 			&status.ScaleUpStatus{
 				PodsRemainUnschedulable: o.GetRemainingPods(ctx, markedEquivalenceGroups, nodeGroups, map[string]status.Reasons{}, nodeInfos),
 			},
-			errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("could not create quotas tracker: "),
+			autoscaling_err.ToAutoscalerError(autoscaling_err.InternalError, err).AddPrefix("could not create quotas tracker: "),
 		)
 	}
 
@@ -204,17 +205,17 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 	}, nil
 }
 
-func (o *ScaleUpOrchestrator) applyLimits(ctx context.Context, newNodes int, tracker *resourcequotas.Tracker, nodeGroup cloudprovider.NodeGroup, nodeInfos map[string]*framework.NodeInfo) (int, errors.AutoscalerError) {
+func (o *ScaleUpOrchestrator) applyLimits(ctx context.Context, newNodes int, tracker *resourcequotas.Tracker, nodeGroup cloudprovider.NodeGroup, nodeInfos map[string]*framework.NodeInfo) (int, autoscaling_err.AutoscalerError) {
 	logger := klog.FromContext(ctx)
 	nodeInfo, found := nodeInfos[nodeGroup.Id()]
 	if !found {
 		// This should never happen, as we already should have retrieved nodeInfo for any considered nodegroup.
 		logger.Error(nil, "No node info for best expansion option", "nodeGroupId", nodeGroup.Id())
-		return 0, errors.NewAutoscalerError(errors.CloudProviderError, "No node info for best expansion option!")
+		return 0, autoscaling_err.NewAutoscalerError(autoscaling_err.CloudProviderError, "No node info for best expansion option!")
 	}
 	checkResult, err := tracker.CheckQuota(ctx, o.autoscalingCtx, nodeGroup, nodeInfo.Node(), newNodes)
 	if err != nil {
-		return 0, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to check resource quotas: ")
+		return 0, autoscaling_err.ToAutoscalerError(autoscaling_err.InternalError, err).AddPrefix("failed to check resource quotas: ")
 	}
 	return checkResult.AllowedDelta, nil
 }
@@ -227,10 +228,10 @@ func (o *ScaleUpOrchestrator) ScaleUpToNodeGroupMinSize(
 	ctx context.Context,
 	nodes []*apiv1.Node,
 	nodeInfos map[string]*framework.NodeInfo,
-) (*status.ScaleUpStatus, errors.AutoscalerError) {
+) (*status.ScaleUpStatus, autoscaling_err.AutoscalerError) {
 	logger := klog.FromContext(ctx)
 	if !o.initialized {
-		return status.UpdateScaleUpError(&status.ScaleUpStatus{}, errors.NewAutoscalerError(errors.InternalError, "ScaleUpOrchestrator is not initialized"))
+		return status.UpdateScaleUpError(&status.ScaleUpStatus{}, autoscaling_err.NewAutoscalerError(autoscaling_err.InternalError, "ScaleUpOrchestrator is not initialized"))
 	}
 
 	now := time.Now()
@@ -239,7 +240,7 @@ func (o *ScaleUpOrchestrator) ScaleUpToNodeGroupMinSize(
 
 	tracker, err := o.quotasTrackerFactory.NewQuotasTracker(ctx, o.autoscalingCtx, nodes)
 	if err != nil {
-		return status.UpdateScaleUpError(&status.ScaleUpStatus{}, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("could not create quotas tracker: "))
+		return status.UpdateScaleUpError(&status.ScaleUpStatus{}, autoscaling_err.ToAutoscalerError(autoscaling_err.InternalError, err).AddPrefix("could not create quotas tracker: "))
 	}
 
 	for _, ng := range nodeGroups {
@@ -452,7 +453,7 @@ func (o *ScaleUpOrchestrator) CreateNodeGroup(
 	schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
 	podEquivalenceGroups []*equivalence.PodGroup,
 	daemonSets []*appsv1.DaemonSet,
-) ([]nodegroups.CreateNodeGroupResult, *status.ScaleUpStatus, errors.AutoscalerError) {
+) ([]nodegroups.CreateNodeGroupResult, *status.ScaleUpStatus, autoscaling_err.AutoscalerError) {
 	oldId := initialOption.NodeGroup.Id()
 	res, aErr := o.processors.NodeGroupManager.CreateNodeGroup(o.autoscalingCtx, initialOption.NodeGroup)
 	return o.processCreateNodeGroupResult(ctx, initialOption, oldId, nodeInfos, schedulablePodGroups, podEquivalenceGroups, daemonSets, res, aErr)
@@ -467,7 +468,7 @@ func (o *ScaleUpOrchestrator) CreateNodeGroupAsync(
 	podEquivalenceGroups []*equivalence.PodGroup,
 	daemonSets []*appsv1.DaemonSet,
 	initializer nodegroups.AsyncNodeGroupInitializer,
-) ([]nodegroups.CreateNodeGroupResult, *status.ScaleUpStatus, errors.AutoscalerError) {
+) ([]nodegroups.CreateNodeGroupResult, *status.ScaleUpStatus, autoscaling_err.AutoscalerError) {
 	oldId := initialOption.NodeGroup.Id()
 	res, aErr := o.processors.NodeGroupManager.CreateNodeGroupAsync(o.autoscalingCtx, initialOption.NodeGroup, initializer)
 	return o.processCreateNodeGroupResult(ctx, initialOption, oldId, nodeInfos, schedulablePodGroups, podEquivalenceGroups, daemonSets, res, aErr)
@@ -482,8 +483,8 @@ func (o *ScaleUpOrchestrator) processCreateNodeGroupResult(
 	podEquivalenceGroups []*equivalence.PodGroup,
 	daemonSets []*appsv1.DaemonSet,
 	result nodegroups.CreateNodeGroupResult,
-	aErr errors.AutoscalerError,
-) ([]nodegroups.CreateNodeGroupResult, *status.ScaleUpStatus, errors.AutoscalerError) {
+	aErr autoscaling_err.AutoscalerError,
+) ([]nodegroups.CreateNodeGroupResult, *status.ScaleUpStatus, autoscaling_err.AutoscalerError) {
 	logger := klog.FromContext(ctx)
 	if aErr != nil {
 		status, err := status.UpdateScaleUpError(
@@ -542,6 +543,35 @@ func (o *ScaleUpOrchestrator) processCreateNodeGroupResult(
 	return []nodegroups.CreateNodeGroupResult{result}, nil, nil
 }
 
+// SchedulablePodGroupsForNodeGroups returns a map of node group IDs to the pod equivalence groups
+// that can be scheduled on them. It evaluates each pod equivalence group against every node group.
+// The evaluation is time-bounded by MaxSchedulablePodGroupsProcessingTime. If the timeout is reached,
+// the function stops processing and returns the partial results accumulated up to that point.
+func (o *ScaleUpOrchestrator) SchedulablePodGroupsForNodeGroups(ctx context.Context, podEquivalenceGroups []*equivalence.PodGroup, nodeGroups []cloudprovider.NodeGroup, nodeInfos map[string]*framework.NodeInfo) map[string][]estimator.PodEquivalenceGroup {
+	schedulablePodGroups := make(map[string][]estimator.PodEquivalenceGroup)
+	logger := klog.FromContext(ctx)
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, o.autoscalingCtx.MaxSchedulablePodGroupsProcessingTime)
+	defer cancel()
+
+	for id, eg := range podEquivalenceGroups {
+		for _, nodeGroup := range nodeGroups {
+
+			if err := ctxWithTimeout.Err(); err != nil {
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					logger.V(4).Info("Processing schedulable pod groups for node groups stopped early due to exceeding MaxSchedulablePodGroupsProcessingTime. Latest attempted PEG may not have processed with all node groups", "CompletelyFinishedPEGCount", id, "TotalPEGCount", len(podEquivalenceGroups))
+				} else {
+					logger.Error(err, "Error while processing schedulable pod groups. Latest attempted PEG may not have processed with all node groups", "CompletelyFinishedPEGCount", id, "TotalPEGCount", len(podEquivalenceGroups))
+				}
+				return schedulablePodGroups
+			}
+
+			schedulablePodGroups[nodeGroup.Id()] = append(schedulablePodGroups[nodeGroup.Id()], o.SchedulablePodGroups(ctxWithTimeout, []*equivalence.PodGroup{eg}, nodeGroup, nodeInfos[nodeGroup.Id()])...)
+		}
+	}
+
+	return schedulablePodGroups
+}
+
 // SchedulablePodGroups returns a list of pods that could be scheduled
 // in a given node group after a scale up.
 func (o *ScaleUpOrchestrator) SchedulablePodGroups(
@@ -584,13 +614,13 @@ func (o *ScaleUpOrchestrator) SchedulablePodGroups(
 }
 
 // UpcomingNodes returns a list of nodes that are not ready but should be.
-func (o *ScaleUpOrchestrator) UpcomingNodes(ctx context.Context, nodeInfos map[string]*framework.NodeInfo) ([]*framework.NodeInfo, errors.AutoscalerError) {
+func (o *ScaleUpOrchestrator) UpcomingNodes(ctx context.Context, nodeInfos map[string]*framework.NodeInfo) ([]*framework.NodeInfo, autoscaling_err.AutoscalerError) {
 	upcomingCounts, _ := o.clusterStateRegistry.GetUpcomingNodes(ctx)
 	upcomingNodes := make([]*framework.NodeInfo, 0)
 	for nodeGroup, numberOfNodes := range upcomingCounts {
 		nodeTemplate, found := nodeInfos[nodeGroup]
 		if !found {
-			return nil, errors.NewAutoscalerErrorf(errors.InternalError, "failed to find template node for node group %s", nodeGroup)
+			return nil, autoscaling_err.NewAutoscalerErrorf(autoscaling_err.InternalError, "failed to find template node for node group %s", nodeGroup)
 		}
 		for i := 0; i < numberOfNodes; i++ {
 			upcomingNodes = append(upcomingNodes, nodeTemplate)
@@ -652,14 +682,14 @@ func (o *ScaleUpOrchestrator) IsNodeGroupResourceExceeded(ctx context.Context, t
 }
 
 // GetCappedNewNodeCount caps resize according to cluster wide node count limit.
-func (o *ScaleUpOrchestrator) GetCappedNewNodeCount(ctx context.Context, newNodeCount, currentNodeCount int) (int, errors.AutoscalerError) {
+func (o *ScaleUpOrchestrator) GetCappedNewNodeCount(ctx context.Context, newNodeCount, currentNodeCount int) (int, autoscaling_err.AutoscalerError) {
 	logger := klog.FromContext(ctx)
 	if o.autoscalingCtx.MaxNodesTotal > 0 && newNodeCount+currentNodeCount > o.autoscalingCtx.MaxNodesTotal {
 		logger.V(1).Info("Capping size to max cluster total size", "maxNodesTotal", o.autoscalingCtx.MaxNodesTotal)
 		newNodeCount = o.autoscalingCtx.MaxNodesTotal - currentNodeCount
 		o.autoscalingCtx.LogRecorder.Eventf(apiv1.EventTypeWarning, "MaxNodesTotalReached", "Max total nodes in cluster reached: %v", o.autoscalingCtx.MaxNodesTotal)
 		if newNodeCount < 1 {
-			return newNodeCount, errors.NewAutoscalerError(errors.TransientError, "max node total count already reached")
+			return newNodeCount, autoscaling_err.NewAutoscalerError(autoscaling_err.TransientError, "max node total count already reached")
 		}
 	}
 	return newNodeCount, nil
@@ -673,7 +703,7 @@ func (o *ScaleUpOrchestrator) balanceScaleUps(
 	nodeInfos map[string]*framework.NodeInfo,
 	schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
 	tracker *resourcequotas.Tracker,
-) ([]nodegroupset.ScaleUpInfo, errors.AutoscalerError) {
+) ([]nodegroupset.ScaleUpInfo, autoscaling_err.AutoscalerError) {
 	// Recompute similar node groups in case they need to be updated
 	logger := klog.FromContext(ctx)
 	similarNodeGroups := o.ComputeSimilarNodeGroups(ctx, nodeGroup, nodeInfos, schedulablePodGroups, now)
@@ -1069,16 +1099,13 @@ type scaleUpPlan struct {
 	nodeGroups             []cloudprovider.NodeGroup
 }
 
-func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCtx) (scaleUpPlan, *status.ScaleUpStatus, errors.AutoscalerError) {
+func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCtx) (scaleUpPlan, *status.ScaleUpStatus, autoscaling_err.AutoscalerError) {
 	// Calculate expansion options
 	logger := klog.FromContext(ctx)
-	schedulablePodGroups := map[string][]estimator.PodEquivalenceGroup{}
 	var options []expander.Option
 
 	// This code here runs a simulation to see which pods can be scheduled on which node groups.
-	for _, nodeGroup := range args.validNodeGroups {
-		schedulablePodGroups[nodeGroup.Id()] = o.SchedulablePodGroups(ctx, args.podEquivalenceGroups, nodeGroup, args.nodeInfos[nodeGroup.Id()])
-	}
+	schedulablePodGroups := o.SchedulablePodGroupsForNodeGroups(ctx, args.podEquivalenceGroups, args.validNodeGroups, args.nodeInfos)
 
 	for _, nodeGroup := range args.validNodeGroups {
 		option := o.ComputeExpansionOption(ctx, nodeGroup, schedulablePodGroups, args.nodeInfos, len(args.nodes), args.now, args.allOrNothing)

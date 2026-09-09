@@ -276,7 +276,8 @@ func defaultCAOptions() config.AutoscalingOptions {
 		// This introduces lock contention on CycleState and massive variance (±20%)
 		// depending on Go scheduler non-determinism. We set it to 1 to ensure
 		// deterministic, sequential evaluation and stable profiling results.
-		PredicateParallelism: 1,
+		PredicateParallelism:                  1,
+		MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 	}
 }
 
