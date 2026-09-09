@@ -144,6 +144,33 @@ func TestProviderSnapshot(t *testing.T) {
 	}
 }
 
+// TestProviderSnapshotDoesNotMutateListerObjects verifies that mutating a Snapshot returned by Provider.Snapshot()
+// (before any Fork()) doesn't mutate the ResourceClaim objects returned by the lister, which are shared with the
+// informer cache and are meant to be read-only.
+func TestProviderSnapshotDoesNotMutateListerObjects(t *testing.T) {
+	claim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim-1", Namespace: "default", UID: "claim-1"}}
+	origClaim := claim.DeepCopy()
+	pod := test.BuildTestPod("pod1", 1, 1, test.WithResourceClaim("a", "claim-1", ""))
+
+	claimLister := &fakeLister[*resourceapi.ResourceClaim]{objects: []*resourceapi.ResourceClaim{claim}}
+	sliceLister := &fakeLister[*resourceapi.ResourceSlice]{}
+	classLister := &fakeLister[*resourceapi.DeviceClass]{}
+	provider := NewProvider(claimLister, sliceLister, classLister)
+
+	snapshot, err := provider.Snapshot()
+	if err != nil {
+		t.Fatalf("Provider.Snapshot(): unexpected error: %v", err)
+	}
+
+	if err := snapshot.ReservePodClaims(pod); err != nil {
+		t.Fatalf("Snapshot.ReservePodClaims(): unexpected error: %v", err)
+	}
+
+	if diff := cmp.Diff(origClaim, claim); diff != "" {
+		t.Errorf("lister-returned claim was mutated by Snapshot.ReservePodClaims() on an unforked snapshot (-want +got): %s", diff)
+	}
+}
+
 // TestNewProviderFromInformers verifies that the interface translation listers created in NewProviderFromInformers correctly return
 // all objects in the cluster.
 func TestNewProviderFromInformers(t *testing.T) {
