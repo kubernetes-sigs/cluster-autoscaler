@@ -355,7 +355,13 @@ func (s *Snapshot) findPodClaims(pod *apiv1.Pod, ignoreNotTracked bool) ([]*reso
 func (s *Snapshot) ensureClaimWritable(claim *resourceapi.ResourceClaim) *resourceapi.ResourceClaim {
 	claimId := GetClaimId(claim)
 	if s.resourceClaims.InCurrentPatch(claimId) {
-		return claim
+		// A Pod can reference the same claim through more than one alias, in which case
+		// the caller's claim may still be the base layer's pointer even though this claim
+		// id already has a copy in the current patch from an earlier alias. Fetch that
+		// copy instead of trusting the caller, or an in-place mutation would land on the
+		// base object and survive a Revert.
+		current, _ := s.resourceClaims.FindValue(claimId)
+		return current
 	}
 
 	return claim.DeepCopy()
