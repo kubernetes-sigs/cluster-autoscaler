@@ -300,10 +300,10 @@ func (r *RemovalSimulator) replaceWithTaintedGhostNode(ctx context.Context, node
 		Value:  fmt.Sprint(timestamp.Unix()),
 		Effect: apiv1.TaintEffectNoSchedule,
 	})
-	ghostNodeInfo := framework.NewNodeInfo(taintedNode, nodeInfo.LocalResourceSlices)
-	if nodeInfo.CSINode != nil {
-		ghostNodeInfo.SetCSINode(nodeInfo.CSINode)
-	}
+	ghostNodeInfo := framework.NewNodeInfo(taintedNode, framework.NodeInfoConfig{
+		Slices:  nodeInfo.LocalResourceSlices,
+		CSINode: nodeInfo.CSINode,
+	})
 	if err = r.clusterSnapshot.AddNodeInfo(ghostNodeInfo); err != nil {
 		return fmt.Errorf("couldn't add tainted ghost node for %s: %v", nodeName, err)
 	}
