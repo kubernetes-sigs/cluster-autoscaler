@@ -471,6 +471,85 @@ func TestTooManyUnready(t *testing.T) {
 	assert.True(t, clusterstate.IsNodeGroupHealthy(context.Background(), "ng1"))
 }
 
+func TestIsClusterHealthyUnreadyNodesScope(t *testing.T) {
+	now := time.Now()
+
+	testCases := []struct {
+		name               string
+		unreadyNodesScope  string
+		ngNodesReady       bool
+		externalNodes      int
+		externalNodesReady bool
+		wantHealthy        bool
+	}{
+		{
+			name:          "unset scope counts unready nodes outside node groups",
+			ngNodesReady:  true,
+			externalNodes: 3,
+			wantHealthy:   false,
+		},
+		{
+			name:              "cluster scope counts unready nodes outside node groups",
+			unreadyNodesScope: config.UnreadyNodesScopeCluster,
+			ngNodesReady:      true,
+			externalNodes:     3,
+			wantHealthy:       false,
+		},
+		{
+			name:              "autoscaled scope ignores unready nodes outside node groups",
+			unreadyNodesScope: config.UnreadyNodesScopeAutoscaled,
+			ngNodesReady:      true,
+			externalNodes:     3,
+			wantHealthy:       true,
+		},
+		{
+			name:               "cluster scope dilutes unready autoscaled nodes with ready nodes outside node groups",
+			unreadyNodesScope:  config.UnreadyNodesScopeCluster,
+			externalNodes:      30,
+			externalNodesReady: true,
+			wantHealthy:        true,
+		},
+		{
+			name:               "autoscaled scope counts unready autoscaled nodes against autoscaled nodes only",
+			unreadyNodesScope:  config.UnreadyNodesScopeAutoscaled,
+			externalNodes:      30,
+			externalNodesReady: true,
+			wantHealthy:        false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := testprovider.NewTestCloudProviderBuilder().Build()
+			provider.AddNodeGroup("ng1", 1, 10, 2)
+			var nodes []*apiv1.Node
+			for i := 0; i < 2; i++ {
+				node := BuildTestNode(fmt.Sprintf("ng1-%d", i), 1000, 1000)
+				SetNodeReadyState(node, tc.ngNodesReady, now.Add(-time.Minute))
+				provider.AddNode("ng1", node)
+				nodes = append(nodes, node)
+			}
+			for i := 0; i < tc.externalNodes; i++ {
+				node := BuildTestNode(fmt.Sprintf("external-%d", i), 1000, 1000)
+				SetNodeReadyState(node, tc.externalNodesReady, now.Add(-time.Minute))
+				// "no-ng" is not a registered node group, so the node belongs to none.
+				provider.AddNode("no-ng", node)
+				nodes = append(nodes, node)
+			}
+
+			fakeClient := &fake.Clientset{}
+			fakeLogRecorder, _ := utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
+			clusterstate := NewClusterStateRegistry(provider, fakeLogRecorder, newBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute}), &emptyTemplateNodeInfoRegistry{}, WithConfig(ClusterStateRegistryConfig{
+				MaxTotalUnreadyPercentage: 10,
+				OkTotalUnreadyCount:       1,
+				UnreadyNodesScope:         tc.unreadyNodesScope,
+			}))
+			assert.NoError(t, clusterstate.UpdateNodes(context.Background(), nodes, now))
+			assert.Equal(t, tc.wantHealthy, clusterstate.IsClusterHealthy())
+		})
+	}
+}
+
 func TestUnreadyLongAfterCreation(t *testing.T) {
 	now := time.Now()
 
