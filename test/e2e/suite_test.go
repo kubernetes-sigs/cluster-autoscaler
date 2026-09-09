@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/e2e-framework/pkg/env"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/envfuncs"
+	"sigs.k8s.io/e2e-framework/pkg/features"
 )
 
 var (
@@ -56,6 +57,17 @@ func TestMain(m *testing.M) {
 	testEnv.Setup(
 		envfuncs.CreateNamespace(namespace),
 	)
+
+	testEnv.BeforeEachFeature(func(ctx context.Context, cfg *envconf.Config, t *testing.T, f features.Feature) (context.Context, error) {
+		client, err := cfg.NewClient()
+		if err != nil {
+			return ctx, err
+		}
+		if err := CleanUpNodeGroup(ctx, client, defaultNodeGroup); err != nil {
+			return ctx, err
+		}
+		return ctx, nil
+	})
 
 	testEnv.Finish(
 		func(ctx context.Context, config *envconf.Config) (context.Context, error) {

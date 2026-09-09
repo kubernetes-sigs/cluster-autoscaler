@@ -1,0 +1,299 @@
+//go:build e2e
+
+/*
+Copyright The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package e2e
+
+import (
+	"context"
+	"time"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	schedulingv1 "k8s.io/api/scheduling/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/e2e-framework/klient"
+)
+
+const (
+	kwokTaintKey      = "kwok-provider"
+	nodeGroupLabelKey = "kwok-nodegroup"
+	defaultNodeGroup  = "kind-worker"
+)
+
+// NewTestPod creates a test pod configuration targeted at kind-worker.
+func NewTestPod(name, namespace string) *corev1.Pod {
+	return NewTestPodWithResources(name, namespace, "500m", "500Mi")
+}
+
+// NewTestPodWithResources creates a test pod configuration with custom CPU and memory requests.
+func NewTestPodWithResources(name, namespace, cpu, memory string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app": name,
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "fake-container",
+					Image: "fake-image",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse(cpu),
+							corev1.ResourceMemory: resource.MustParse(memory),
+						},
+					},
+				},
+			},
+			NodeSelector: map[string]string{
+				nodeGroupLabelKey: defaultNodeGroup,
+			},
+			Tolerations: []corev1.Toleration{
+				{
+					Key:      kwokTaintKey,
+					Operator: corev1.TolerationOpExists,
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
+		},
+	}
+}
+
+// CleanUpNodeGroup deletes all fake nodes for the given nodeGroup and waits until count is 0.
+func CleanUpNodeGroup(ctx context.Context, client klient.Client, nodeGroup string) error {
+	nodeList := &corev1.NodeList{}
+	err := client.Resources().List(ctx, nodeList)
+	if err != nil {
+		return err
+	}
+	for _, node := range nodeList.Items {
+		if node.Labels[nodeGroupLabelKey] == nodeGroup {
+			n := node
+			_ = client.Resources().Delete(ctx, &n)
+		}
+	}
+	return WaitForNodeCount(ctx, client, nodeGroup, 0, 30*time.Second)
+}
+
+// TeardownPodAndNodeGroup deletes the test pods, waits for them to be deleted,
+// waits for Cluster Autoscaler to scale down the node naturally (to keep CA state synchronized),
+// and performs forced node cleanup if CA didn't scale down in time.
+func TeardownPodAndNodeGroup(ctx context.Context, client klient.Client, pods []*corev1.Pod, nodeGroup string) {
+	for _, pod := range pods {
+		if pod != nil {
+			_ = client.Resources().Delete(ctx, pod)
+			_ = WaitForPodDeleted(ctx, client, pod, podDeletionTimeout)
+		}
+	}
+	// Allow CA to scale down the empty node naturally
+	_ = WaitForNodeCount(ctx, client, nodeGroup, 0, 35*time.Second)
+	_ = CleanUpNodeGroup(ctx, client, nodeGroup)
+}
+
+// CountNodeGroupNodes returns the number of nodes currently matching the nodeGroup.
+func CountNodeGroupNodes(ctx context.Context, client klient.Client, nodeGroup string) (int, error) {
+	nodeList := &corev1.NodeList{}
+	err := client.Resources().List(ctx, nodeList)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, node := range nodeList.Items {
+		if node.Labels[nodeGroupLabelKey] == nodeGroup {
+			count++
+		}
+	}
+	return count, nil
+}
+
+const (
+	expendablePriorityClassName      = "expendable-priority"
+	highPriorityClassName            = "high-priority"
+	expendablePriorityValue          = int32(-15)
+	highPriorityValue                = int32(1000)
+	nonExistingBypassedSchedulerName = "non-existing-bypassed-scheduler"
+)
+
+// EnsurePriorityClasses creates the expendable and high priority classes for testing.
+func EnsurePriorityClasses(ctx context.Context, client klient.Client) error {
+	for name, val := range map[string]int32{
+		expendablePriorityClassName: expendablePriorityValue,
+		highPriorityClassName:       highPriorityValue,
+	} {
+		pc := &schedulingv1.PriorityClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name,
+			},
+			Value: val,
+		}
+		_ = client.Resources().Create(ctx, pc)
+	}
+	return nil
+}
+
+// DeletePriorityClasses cleans up priority classes created for testing.
+func DeletePriorityClasses(ctx context.Context, client klient.Client) {
+	for _, name := range []string{expendablePriorityClassName, highPriorityClassName} {
+		pc := &schedulingv1.PriorityClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name,
+			},
+		}
+		_ = client.Resources().Delete(ctx, pc)
+	}
+}
+
+// NewTestPodWithPriority creates a test pod configuration with a specific PriorityClassName.
+func NewTestPodWithPriority(name, namespace, cpu, memory, priorityClassName string) *corev1.Pod {
+	pod := NewTestPodWithResources(name, namespace, cpu, memory)
+	pod.Spec.PriorityClassName = priorityClassName
+	return pod
+}
+
+// NewTestPodWithHostPort creates a test pod configuration with a specific HostPort.
+func NewTestPodWithHostPort(name, namespace, cpu, memory string, hostPort int32) *corev1.Pod {
+	pod := NewTestPodWithResources(name, namespace, cpu, memory)
+	pod.Spec.Containers[0].Ports = []corev1.ContainerPort{
+		{
+			ContainerPort: hostPort,
+			HostPort:      hostPort,
+		},
+	}
+	return pod
+}
+
+// NewTestPodWithAntiAffinity creates a test pod configuration with pod anti-affinity.
+func NewTestPodWithAntiAffinity(name, namespace, cpu, memory, labelKey, labelVal string) *corev1.Pod {
+	pod := NewTestPodWithResources(name, namespace, cpu, memory)
+	pod.Labels[labelKey] = labelVal
+	pod.Spec.Affinity = &corev1.Affinity{
+		PodAntiAffinity: &corev1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+				{
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							labelKey: labelVal,
+						},
+					},
+					TopologyKey: "kubernetes.io/hostname",
+				},
+			},
+		},
+	}
+	return pod
+}
+
+// NewTestPodWithEmptyDirAndAntiAffinity creates a test pod with EmptyDir volume and anti-affinity.
+func NewTestPodWithEmptyDirAndAntiAffinity(name, namespace, cpu, memory, labelKey, labelVal string) *corev1.Pod {
+	pod := NewTestPodWithAntiAffinity(name, namespace, cpu, memory, labelKey, labelVal)
+	pod.Spec.Volumes = []corev1.Volume{
+		{
+			Name: "empty-volume",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+	}
+	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
+		{
+			Name:      "empty-volume",
+			MountPath: "/scratch",
+		},
+	}
+	return pod
+}
+
+// NewTestPodWithScheduler creates a test pod configuration with a custom SchedulerName.
+func NewTestPodWithScheduler(name, namespace, cpu, memory, schedulerName string) *corev1.Pod {
+	pod := NewTestPodWithResources(name, namespace, cpu, memory)
+	pod.Spec.SchedulerName = schedulerName
+	return pod
+}
+
+// NewTestReplicaSetWithPriority creates a test ReplicaSet targeting kind-worker with priority.
+func NewTestReplicaSetWithPriority(name, namespace string, replicas int32, cpu, memory, labelKey, labelVal, priorityClassName string) *appsv1.ReplicaSet {
+	labels := map[string]string{
+		labelKey: labelVal,
+	}
+	return &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels:    labels,
+		},
+		Spec: appsv1.ReplicaSetSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: labels,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+					Annotations: map[string]string{
+						"cluster-autoscaler.kubernetes.io/safe-to-evict": "true",
+					},
+				},
+				Spec: corev1.PodSpec{
+					PriorityClassName: priorityClassName,
+					Containers: []corev1.Container{
+						{
+							Name:  "fake-container",
+							Image: "fake-image",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse(cpu),
+									corev1.ResourceMemory: resource.MustParse(memory),
+								},
+							},
+						},
+					},
+					NodeSelector: map[string]string{
+						nodeGroupLabelKey: defaultNodeGroup,
+					},
+					Tolerations: []corev1.Toleration{
+						{
+							Key:      kwokTaintKey,
+							Operator: corev1.TolerationOpExists,
+							Effect:   corev1.TaintEffectNoSchedule,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// DeletePodsWithLabel deletes all pods in namespace matching the given label key and value.
+func DeletePodsWithLabel(ctx context.Context, client klient.Client, namespace, labelKey, labelVal string) error {
+	podList := &corev1.PodList{}
+	err := client.Resources(namespace).List(ctx, podList)
+	if err != nil {
+		return err
+	}
+	for _, pod := range podList.Items {
+		if pod.Labels[labelKey] == labelVal {
+			p := pod
+			_ = client.Resources().Delete(ctx, &p)
+		}
+	}
+	return nil
+}
