@@ -200,6 +200,10 @@ func BenchmarkScaledownEfficiency(b *testing.B) {
 		MetricsTracker: metrics.NewTracker(
 			metrics.NewResourceUtilizationMetric(apiv1.ResourceCPU),
 			metrics.NewResourceUtilizationMetric(apiv1.ResourceMemory),
+			metrics.NewResourceFragmentationMetric(apiv1.ResourceCPU),
+			metrics.NewResourceFragmentationMetric(apiv1.ResourceMemory),
+			metrics.NewClusterCostMetric(),
+			metrics.NewNodeCountMetric(),
 		),
 		AutoscalingOptsSetup: func(opts *config.AutoscalingOptions) {
 			opts.NodeGroupDefaults.ScaleDownUtilizationThreshold = 0.75

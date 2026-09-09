@@ -104,9 +104,9 @@ func (m *resourceUtilizationMetric) Summarize(metricValues []float64) map[string
 	last := metricValues[len(metricValues)-1]
 	diff := last - first
 	r := map[string]float64{
-		fmt.Sprintf("%s_%%_init", m.Name()):     first * 100,
-		fmt.Sprintf("%s_%%_final", m.Name()):    last * 100,
-		fmt.Sprintf("%s_%%_improved", m.Name()): diff * 100,
+		fmt.Sprintf("%s_%%_init", m.Name()):  first * 100,
+		fmt.Sprintf("%s_%%_final", m.Name()): last * 100,
+		fmt.Sprintf("%s_%%_diff", m.Name()):  diff * 100,
 	}
 	return r
 }
