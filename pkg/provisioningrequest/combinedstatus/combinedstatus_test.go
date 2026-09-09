@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package checkcapacity
+package combinedstatus
 
 import (
 	"fmt"
@@ -87,7 +87,7 @@ func TestCombinedStatusSet(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			combinedStatus := NewCombinedStatusSet()
+			combinedStatus := New()
 
 			for _, s := range tc.statuses {
 				combinedStatus.Add(s)

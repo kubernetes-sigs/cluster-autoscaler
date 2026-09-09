@@ -19,8 +19,6 @@ package checkcapacity
 import (
 	"context"
 	"fmt"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +32,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/provreq"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/status"
+	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/combinedstatus"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/conditions"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqclient"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqwrapper"
@@ -99,7 +98,7 @@ func (o *checkCapacityProvClass) Provision(
 	daemonSets []*appsv1.DaemonSet,
 	nodeInfos map[string]*framework.NodeInfo,
 ) (*status.ScaleUpStatus, errors.AutoscalerError) {
-	combinedStatus := NewCombinedStatusSet()
+	combinedStatus := combinedstatus.New()
 	startTime := time.Now()
 
 	o.autoscalingCtx.ClusterSnapshot.Fork()
@@ -157,7 +156,7 @@ func (o *checkCapacityProvClass) isBatchEnabled() bool {
 	return o.provreqInjector != nil && o.checkCapacityProvisioningRequestMaxBatchSize > 1
 }
 
-func (o *checkCapacityProvClass) checkCapacityBatch(ctx context.Context, reqs []provreq.ProvisioningRequestWithPods, combinedStatus *combinedStatusSet, startTime time.Time) []*provreqwrapper.ProvisioningRequest {
+func (o *checkCapacityProvClass) checkCapacityBatch(ctx context.Context, reqs []provreq.ProvisioningRequestWithPods, combinedStatus *combinedstatus.Set, startTime time.Time) []*provreqwrapper.ProvisioningRequest {
 	logger := klog.FromContext(ctx)
 	updates := make([]*provreqwrapper.ProvisioningRequest, 0, len(reqs))
 	for _, req := range reqs {
@@ -178,7 +177,7 @@ func (o *checkCapacityProvClass) checkCapacityBatch(ctx context.Context, reqs []
 }
 
 // checkCapacity checks if there is capacity, updates combinedStatus and Conditions. If capacity is found, it commits to the clusterSnapshot.
-func (o *checkCapacityProvClass) checkCapacity(ctx context.Context, unschedulablePods []*apiv1.Pod, provReq *provreqwrapper.ProvisioningRequest, combinedStatus *combinedStatusSet) error {
+func (o *checkCapacityProvClass) checkCapacity(ctx context.Context, unschedulablePods []*apiv1.Pod, provReq *provreqwrapper.ProvisioningRequest, combinedStatus *combinedstatus.Set) error {
 	logger := klog.FromContext(ctx)
 	o.autoscalingCtx.ClusterSnapshot.Fork()
 
@@ -211,7 +210,7 @@ func (o *checkCapacityProvClass) checkCapacity(ctx context.Context, unschedulabl
 }
 
 // updateRequests calls the client to update ProvisioningRequests, in parallel.
-func updateRequests(ctx context.Context, client *provreqclient.ProvisioningRequestClient, prWrappers []*provreqwrapper.ProvisioningRequest, combinedStatus *combinedStatusSet) {
+func updateRequests(ctx context.Context, client *provreqclient.ProvisioningRequestClient, prWrappers []*provreqwrapper.ProvisioningRequest, combinedStatus *combinedstatus.Set) {
 	wg := sync.WaitGroup{}
 	wg.Add(len(prWrappers))
 	lock := sync.Mutex{}
@@ -230,114 +229,4 @@ func updateRequests(ctx context.Context, client *provreqclient.ProvisioningReque
 		}()
 	}
 	wg.Wait()
-}
-
-// combinedStatusSet is a helper struct to combine multiple ScaleUpStatuses into one. It keeps track of the best result and all errors that occurred during the ScaleUp process.
-type combinedStatusSet struct {
-	Result        status.ScaleUpResult
-	ScaleupErrors map[*errors.AutoscalerError]bool
-}
-
-// Add adds a ScaleUpStatus to the combinedStatusSet.
-func (c *combinedStatusSet) Add(newStatus *status.ScaleUpStatus) {
-	// This represents the priority of the ScaleUpResult. The final result is the one with the highest priority in the set.
-	resultPriority := map[status.ScaleUpResult]int{
-		status.ScaleUpNotTried:           0,
-		status.ScaleUpNoOptionsAvailable: 1,
-		status.ScaleUpError:              2,
-		status.ScaleUpSuccessful:         3,
-	}
-
-	// If even one scaleUpSuccessful is present, the final result is ScaleUpSuccessful.
-	// If no ScaleUpSuccessful is present, and even one ScaleUpError is present, the final result is ScaleUpError.
-	// If no ScaleUpSuccessful or ScaleUpError is present, and even one ScaleUpNoOptionsAvailable is present, the final result is ScaleUpNoOptionsAvailable.
-	// If no ScaleUpSuccessful, ScaleUpError or ScaleUpNoOptionsAvailable is present, the final result is ScaleUpNotTried.
-	if resultPriority[c.Result] < resultPriority[newStatus.Result] {
-		c.Result = newStatus.Result
-	}
-	if newStatus.ScaleUpError != nil {
-		if _, found := c.ScaleupErrors[newStatus.ScaleUpError]; !found {
-			c.ScaleupErrors[newStatus.ScaleUpError] = true
-		}
-	}
-}
-
-// formatMessageFromBatchErrors formats a message from a list of errors.
-func (c *combinedStatusSet) formatMessageFromBatchErrors(errs []errors.AutoscalerError) string {
-	firstErr := errs[0]
-	var builder strings.Builder
-	builder.WriteString(firstErr.Error())
-	builder.WriteString(" ...and other concurrent errors: [")
-	formattedErrs := map[errors.AutoscalerError]bool{
-		firstErr: true,
-	}
-	for _, err := range errs {
-		if _, has := formattedErrs[err]; has {
-			continue
-		}
-		formattedErrs[err] = true
-		message := err.Error()
-		if len(formattedErrs) > 2 {
-			builder.WriteString(", ")
-		}
-		builder.WriteString(fmt.Sprintf("%q", message))
-	}
-	builder.WriteString("]")
-	return builder.String()
-}
-
-// combineBatchScaleUpErrors combines multiple errors into one. If there is only one error, it returns that error. If there are multiple errors, it combines them into one error with a message that contains all the errors.
-func (c *combinedStatusSet) combineBatchScaleUpErrors() *errors.AutoscalerError {
-	if len(c.ScaleupErrors) == 0 {
-		return nil
-	}
-	if len(c.ScaleupErrors) == 1 {
-		for err := range c.ScaleupErrors {
-			return err
-		}
-	}
-	uniqueMessages := make(map[string]bool)
-	for err := range c.ScaleupErrors {
-		uniqueMessages[(*err).Error()] = true
-	}
-	if len(uniqueMessages) == 1 {
-		for err := range c.ScaleupErrors {
-			return err
-		}
-	}
-	// sort to stabilize the results and easier log aggregation
-	errs := make([]errors.AutoscalerError, 0, len(c.ScaleupErrors))
-	for err := range c.ScaleupErrors {
-		errs = append(errs, *err)
-	}
-	sort.Slice(errs, func(i, j int) bool {
-		return errs[i].Error() < errs[j].Error()
-	})
-	message := c.formatMessageFromBatchErrors(errs)
-	combinedErr := errors.NewAutoscalerError(errors.InternalError, message)
-	return &combinedErr
-}
-
-// Export converts the combinedStatusSet into a ScaleUpStatus.
-func (c *combinedStatusSet) Export() (*status.ScaleUpStatus, errors.AutoscalerError) {
-	result := &status.ScaleUpStatus{Result: c.Result}
-	if len(c.ScaleupErrors) > 0 {
-		result.ScaleUpError = c.combineBatchScaleUpErrors()
-	}
-
-	var resErr errors.AutoscalerError
-
-	if result.Result == status.ScaleUpError {
-		resErr = *result.ScaleUpError
-	}
-
-	return result, resErr
-}
-
-// NewCombinedStatusSet creates a new combinedStatusSet.
-func NewCombinedStatusSet() combinedStatusSet {
-	return combinedStatusSet{
-		Result:        status.ScaleUpNotTried,
-		ScaleupErrors: make(map[*errors.AutoscalerError]bool),
-	}
 }

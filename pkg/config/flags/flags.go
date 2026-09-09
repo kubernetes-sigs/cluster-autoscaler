@@ -196,6 +196,8 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&p.o.CheckCapacityBatchProcessing, "check-capacity-batch-processing", false, "Whether to enable batch processing for check capacity requests.")
 	fs.IntVar(&p.o.CheckCapacityProvisioningRequestMaxBatchSize, "check-capacity-provisioning-request-max-batch-size", 10, "Maximum number of provisioning requests to process in a single batch.")
 	fs.DurationVar(&p.o.CheckCapacityProvisioningRequestBatchTimebox, "check-capacity-provisioning-request-batch-timebox", 10*time.Second, "Maximum time to process a batch of provisioning requests.")
+	fs.BoolVar(&p.o.BestEffortAtomicBatchProcessing, "best-effort-atomic-batch-processing", false, "Whether to flatten a batch of best-effort-atomic ProvisioningRequests into one all-or-nothing scale-up calculation.")
+	fs.IntVar(&p.o.BestEffortAtomicProvisioningRequestMaxBatchSize, "best-effort-atomic-provisioning-request-max-batch-size", 10, "Maximum number of best-effort-atomic provisioning requests to process in a single batch.")
 	fs.BoolVar(&p.o.ForceDeleteLongUnregisteredNodes, "force-delete-unregistered-nodes", false, "Whether to enable force deletion of long unregistered nodes, regardless of the min size of the node group the belong to.")
 	fs.BoolVar(&p.o.ForceDeleteFailedNodes, "force-delete-failed-nodes", false, "Whether to enable force deletion of failed nodes, regardless of the min size of the node group the belong to.")
 	fs.BoolVar(&p.o.CSINodeAwareSchedulingEnabled, "enable-csi-node-aware-scheduling", true, "Whether logic for handling CSINode objects is enabled.")
@@ -288,6 +290,12 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 
 	if p.o.PredicateParallelism < 1 {
 		return config.AutoscalingOptions{}, fmt.Errorf("Invalid value for --predicate-parallelism flag: %d", p.o.PredicateParallelism)
+	}
+	if p.o.BestEffortAtomicProvisioningRequestMaxBatchSize < 1 {
+		return config.AutoscalingOptions{}, fmt.Errorf("--best-effort-atomic-provisioning-request-max-batch-size must be at least 1")
+	}
+	if p.o.BestEffortAtomicBatchProcessing && p.o.BestEffortAtomicProvisioningRequestMaxBatchSize < 2 {
+		return config.AutoscalingOptions{}, fmt.Errorf("--best-effort-atomic-provisioning-request-max-batch-size must be at least 2 when --best-effort-atomic-batch-processing is enabled")
 	}
 
 	if p.o.DynamicResourceAllocationEnabled == false {
