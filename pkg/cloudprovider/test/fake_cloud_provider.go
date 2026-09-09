@@ -241,6 +241,13 @@ func WithNodeReadinessDelay(delay time.Duration) NodeGroupOption {
 	}
 }
 
+// WithOptions sets the NodeGroupAutoscalingOptions for the node group.
+func WithOptions(opts *config.NodeGroupAutoscalingOptions) NodeGroupOption {
+	return func(n *NodeGroup) {
+		n.opts = opts
+	}
+}
+
 // AddNodeGroup is a helper for tests to add a group with its template.
 func (c *CloudProvider) AddNodeGroup(id string, opts ...NodeGroupOption) *NodeGroup {
 	c.Lock()
@@ -320,6 +327,7 @@ type NodeGroup struct {
 	// nodeReadinessDelay can be used to simulate Node objects taking some time to transition to Ready after they appear in the K8s API. If unset,
 	// the Nodes will appear as Ready immediately after registration.
 	nodeReadinessDelay time.Duration
+	opts               *config.NodeGroupAutoscalingOptions
 }
 
 // MaxSize returns the maximum size of the node group.
@@ -442,7 +450,23 @@ func (n *NodeGroup) Autoprovisioned(ctx context.Context) bool {
 
 // GetOptions returns autoscaling options specific to this node group.
 func (n *NodeGroup) GetOptions(ctx context.Context, defaults config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error) {
-	return nil, nil
+	n.RLock()
+	defer n.RUnlock()
+	return n.opts, nil
+}
+
+// SetOptions sets autoscaling options for this node group.
+func (n *NodeGroup) SetOptions(opts *config.NodeGroupAutoscalingOptions) {
+	n.Lock()
+	defer n.Unlock()
+	n.opts = opts
+}
+
+// SetTargetSize sets target size for group.
+func (n *NodeGroup) SetTargetSize(size int) {
+	n.Lock()
+	defer n.Unlock()
+	n.targetSize = size
 }
 
 // TargetSize returns the current target size of the node group.
