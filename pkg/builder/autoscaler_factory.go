@@ -70,6 +70,7 @@ func NewAutoscaler(ctx context.Context, opts coreoptions.AutoscalerOptions, info
 		opts.MinQuotasTrackerOptions,
 		opts.CSIProvider,
 		opts.CapacityBufferPodsRegistry,
+		opts.ScaleDownStrategy,
 	), nil
 }
 

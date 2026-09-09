@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/core"
 	coreoptions "sigs.k8s.io/cluster-autoscaler/pkg/core/options"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/podlistprocessor"
+	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/strategy"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaleup/orchestrator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/utils"
 	"sigs.k8s.io/cluster-autoscaler/pkg/debuggingsnapshot"
@@ -160,6 +161,11 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 	deleteOptions := options.NewNodeDeleteOptions(autoscalingOptions)
 	drainabilityRules := rules.Default(deleteOptions)
 
+	parsedStrategy, err := strategy.NewStrategy(autoscalingOptions.ScaleDownStrategy)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	var snapshotStore clustersnapshot.ClusterSnapshotStore = store.NewDeltaSnapshotStore()
 	opts := coreoptions.AutoscalerOptions{
 		AutoscalingOptions:     autoscalingOptions,
@@ -174,6 +180,7 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 		ScaleUpOrchestrator:    orchestrator.New(),
 		KubeClientNew:          b.manager.GetClient(),
 		KubeCache:              b.manager.GetCache(),
+		ScaleDownStrategy:      parsedStrategy,
 	}
 
 	opts.Processors = ca_processors.DefaultProcessors(autoscalingOptions)
