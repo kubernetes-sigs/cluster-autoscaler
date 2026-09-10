@@ -45,6 +45,7 @@ type ProvisioningRequestPodsInjector struct {
 	lastProvisioningRequestProcessTime time.Time
 	checkCapacityBatchProcessing       bool
 	checkCapacityProcessorInstance     string
+	simulationWorkloadBuilder          *provreqpods.SimulationWorkloadBuilder
 }
 
 // IsAvailableForProvisioning checks if the provisioning request is the correct state for processing and provisioning has not been attempted recently.
@@ -145,16 +146,16 @@ func (p *ProvisioningRequestPodsInjector) GetPodsFromNextRequest(ctx context.Con
 	return nil, nil
 }
 
-// ProvisioningRequestWithPods contains a ProvisioningRequest Wrapper
-// and its associated pods.
+// ProvisioningRequestWithPods contains a ProvisioningRequest wrapper and its
+// complete in-memory scheduling workload.
 type ProvisioningRequestWithPods struct {
 	PrWrapper *provreqwrapper.ProvisioningRequest
-	Pods      []*apiv1.Pod
+	Workload  *provreqpods.SimulationWorkload
 }
 
 // GetCheckCapacityBatch returns up to the requested number of ProvisioningRequestWithPods.
 // We do not mark the PRs as accepted here.
-// If we fail to get the pods for a PR, we mark the PR as failed and issue an update.
+// If we fail to build the simulation workload for a PR, we mark the PR as failed and issue an update.
 func (p *ProvisioningRequestPodsInjector) GetCheckCapacityBatch(ctx context.Context, maxPrs int) ([]ProvisioningRequestWithPods, error) {
 	logger := klog.FromContext(ctx)
 	provReqs, err := p.client.ProvisioningRequests(ctx)
@@ -173,13 +174,13 @@ func (p *ProvisioningRequestPodsInjector) GetCheckCapacityBatch(ctx context.Cont
 			continue
 		}
 
-		pods, err := provreqpods.PodsForProvisioningRequest(pr)
+		workload, err := p.simulationWorkloadBuilder.ForProvisioningRequest(pr)
 		if err != nil {
-			logger.Error(err, "Failed to get pods for ProvisioningRequest", "provReq", klog.KObj(pr))
+			logger.Error(err, "Failed to create simulation workload for ProvisioningRequest", "provReq", klog.KObj(pr))
 			p.MarkAsFailed(ctx, pr, provreqconditions.FailedToCreatePodsReason, err.Error())
 			continue
 		}
-		prsWithPods = append(prsWithPods, ProvisioningRequestWithPods{pr, pods})
+		prsWithPods = append(prsWithPods, ProvisioningRequestWithPods{PrWrapper: pr, Workload: workload})
 	}
 	return prsWithPods, nil
 }
@@ -202,7 +203,7 @@ func (p *ProvisioningRequestPodsInjector) Process(
 func (p *ProvisioningRequestPodsInjector) CleanUp() {}
 
 // NewProvisioningRequestPodsInjector creates a ProvisioningRequest filter processor.
-func NewProvisioningRequestPodsInjector(client *provreqclient.ProvisioningRequestClient, initialBackoffTime, maxBackoffTime time.Duration, maxCacheSize int, checkCapacityBatchProcessing bool, checkCapacityProcessorInstance string) *ProvisioningRequestPodsInjector {
+func NewProvisioningRequestPodsInjector(client *provreqclient.ProvisioningRequestClient, initialBackoffTime, maxBackoffTime time.Duration, maxCacheSize int, checkCapacityBatchProcessing bool, checkCapacityProcessorInstance string, simulationWorkloadBuilder *provreqpods.SimulationWorkloadBuilder) *ProvisioningRequestPodsInjector {
 	return &ProvisioningRequestPodsInjector{
 		initialRetryTime:                   initialBackoffTime,
 		maxBackoffTime:                     maxBackoffTime,
@@ -212,6 +213,7 @@ func NewProvisioningRequestPodsInjector(client *provreqclient.ProvisioningReques
 		lastProvisioningRequestProcessTime: time.Now(),
 		checkCapacityBatchProcessing:       checkCapacityBatchProcessing,
 		checkCapacityProcessorInstance:     checkCapacityProcessorInstance,
+		simulationWorkloadBuilder:          simulationWorkloadBuilder,
 	}
 }
 
