@@ -133,14 +133,9 @@ func StartPodObserver(ctx context.Context, kubeClient kube_client.Interface) *Un
 	}
 }
 
-// logTriggerReason logs a message if the next iteration was not triggered by unschedulable pods appearing, else it logs a message that the next iteration was triggered by unschedulable pods appearing
+// logTriggerReason logs the given message describing why the next iteration was triggered.
 func (t *LoopTrigger) logTriggerReason(message string) {
-	select {
-	case <-t.podObserver.unschedulablePodChan:
-		klog.Info("Autoscaler loop triggered by unschedulable pod appearing")
-	default:
-		klog.Info(message)
-	}
+	klog.Info(message)
 }
 
 func (t *LoopTrigger) provisioningRequestWasProcessed(lastRun time.Time) bool {
