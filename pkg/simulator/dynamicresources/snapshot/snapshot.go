@@ -347,14 +347,13 @@ func (s *Snapshot) findPodClaims(pod *apiv1.Pod, ignoreNotTracked bool) ([]*reso
 	return result, nil
 }
 
-// ensureClaimWritable returns a resource claim suitable for inplace modifications,
-// in case if requested claim is stored in the current patch - the same object
-// is returned, otherwise a deep-copy is created. This is required for resource claim
-// state changing operations to implement copy-on-write policy for inplace modifications
-// when there's no claim tracked on the current layer of the patchset.
+// ensureClaimWritable implements copy-on-write for the state changing operations: it
+// returns the claim itself when a forked current patch already tracks it, otherwise a
+// deep copy to modify in place and store back with SetCurrent. The base layer holds the
+// objects the snapshot was built from, so those are never handed out for modification.
 func (s *Snapshot) ensureClaimWritable(claim *resourceapi.ResourceClaim) *resourceapi.ResourceClaim {
 	claimId := GetClaimId(claim)
-	if s.resourceClaims.InCurrentPatch(claimId) {
+	if s.resourceClaims.IsForked() && s.resourceClaims.InCurrentPatch(claimId) {
 		return claim
 	}
 

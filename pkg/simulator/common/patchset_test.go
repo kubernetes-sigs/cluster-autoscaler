@@ -298,6 +298,39 @@ func TestPatchSetForkRevert(t *testing.T) {
 	}
 }
 
+func TestPatchSetIsForked(t *testing.T) {
+	// 1. A fresh patchset has only the base layer
+	ps := NewPatchSet(NewPatch[string, int]())
+	if ps.IsForked() {
+		t.Fatalf("IsForked() on a fresh patchset got true, want false")
+	}
+
+	// 2. Revert without a Fork keeps the base layer
+	ps.Revert()
+	if ps.IsForked() {
+		t.Fatalf("IsForked() after Revert() on a fresh patchset got true, want false")
+	}
+
+	// 3. Fork adds a layer above the base one
+	ps.Fork()
+	if !ps.IsForked() {
+		t.Fatalf("IsForked() after Fork() got false, want true")
+	}
+
+	// 4. Revert drops it again
+	ps.Revert()
+	if ps.IsForked() {
+		t.Errorf("IsForked() after Fork() and Revert() got true, want false")
+	}
+
+	// 5. So does Commit
+	ps.Fork()
+	ps.Commit()
+	if ps.IsForked() {
+		t.Errorf("IsForked() after Fork() and Commit() got true, want false")
+	}
+}
+
 func TestPatchSetForkCommit(t *testing.T) {
 	// 1. Initialize empty patchset
 	ps := NewPatchSet(NewPatch[string, int]())

@@ -211,6 +211,12 @@ func (p *PatchSet[K, V]) DeleteCurrent(key K) {
 	p.cache[key] = nil
 }
 
+// IsForked reports whether a layer was forked above the base one.
+// Until then the base layer is the current patch.
+func (p *PatchSet[K, V]) IsForked() bool {
+	return len(p.patches) > 1
+}
+
 // InCurrentPatch checks if the key is available in the topmost patch layer.
 func (p *PatchSet[K, V]) InCurrentPatch(key K) bool {
 	if len(p.patches) == 0 {

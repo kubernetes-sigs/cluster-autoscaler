@@ -722,3 +722,41 @@ func TestSnapshotForkCommitRevert(t *testing.T) {
 		compareSnapshots(t, expectedState, snapshot, "After Fork, Modify, Revert, Fork, Modify")
 	})
 }
+
+func TestReservePodClaimsUnforked(t *testing.T) {
+	// The snapshot is built from the object itself, as the provider builds it, and never forked.
+	for _, tc := range []struct {
+		testName string
+		refs     []string
+	}{
+		{testName: "OneReference", refs: []string{"ref"}},
+		{testName: "TwoAliases", refs: []string{"aliasA", "aliasB"}},
+	} {
+		t.Run(tc.testName, func(t *testing.T) {
+			claim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{Name: "c", UID: "c", Namespace: "default"}}
+			var opts []func(*apiv1.Pod)
+			for _, ref := range tc.refs {
+				opts = append(opts, test.WithResourceClaim(ref, "c", ""))
+			}
+			pod := test.BuildTestPod("p", 1, 1, opts...)
+			pod.Namespace = "default"
+			snapshot := NewSnapshot(map[ResourceClaimId]*resourceapi.ResourceClaim{GetClaimId(claim): claim}, nil, nil, nil)
+
+			if err := snapshot.ReservePodClaims(pod); err != nil {
+				t.Fatalf("ReservePodClaims failed: %v", err)
+			}
+
+			if n := len(claim.Status.ReservedFor); n != 0 {
+				t.Errorf("the object the snapshot was built from gained %d reservation(s)", n)
+			}
+			got, err := snapshot.ResourceClaims().Get("default", "c")
+			if err != nil {
+				t.Fatalf("ResourceClaims().Get(): %v", err)
+			}
+			want := []resourceapi.ResourceClaimConsumerReference{drautils.PodClaimConsumerReference(pod)}
+			if diff := cmp.Diff(want, got.Status.ReservedFor); diff != "" {
+				t.Errorf("reservations in the snapshot (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

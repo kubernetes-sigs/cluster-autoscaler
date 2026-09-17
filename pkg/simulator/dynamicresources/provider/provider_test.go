@@ -144,6 +144,38 @@ func TestProviderSnapshot(t *testing.T) {
 	}
 }
 
+func TestSnapshotWriteStaysOutOfTheNextSnapshot(t *testing.T) {
+	// The lister returns the same objects on every call, as an informer does.
+	claim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{Name: "c", UID: "c", Namespace: "default"}}
+	pod := test.BuildTestPod("p", 1, 1, test.WithResourceClaim("ref", "c", ""))
+	pod.Namespace = "default"
+	provider := NewProvider(
+		&fakeLister[*resourceapi.ResourceClaim]{objects: []*resourceapi.ResourceClaim{claim}},
+		&fakeLister[*resourceapi.ResourceSlice]{},
+		&fakeLister[*resourceapi.DeviceClass]{},
+	)
+
+	first, err := provider.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot(): %v", err)
+	}
+	if err := first.ReservePodClaims(pod); err != nil {
+		t.Fatalf("ReservePodClaims(): %v", err)
+	}
+
+	second, err := provider.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot(): %v", err)
+	}
+	got, err := second.ResourceClaims().Get("default", "c")
+	if err != nil {
+		t.Fatalf("ResourceClaims().Get(): %v", err)
+	}
+	if n := len(got.Status.ReservedFor); n != 0 {
+		t.Errorf("the next snapshot started with %d reservation(s) made on the previous one", n)
+	}
+}
+
 // TestNewProviderFromInformers verifies that the interface translation listers created in NewProviderFromInformers correctly return
 // all objects in the cluster.
 func TestNewProviderFromInformers(t *testing.T) {
