@@ -260,7 +260,22 @@ func TestStaticAutoscalerCSI(t *testing.T) {
 
 			for nodeGroup, nodes := range tc.expectedScaleDowns {
 				for _, node := range nodes {
-					mocks.onScaleDown.On("ScaleDown", nodeGroup, node).Return(nil).Once()
+					mocks.onScaleDown.On("ScaleDown", nodeGroup, node).Return(nil).Run(func(args mock.Arguments) {
+						nodeName := args.String(1)
+						removeNode := func(nodes []*apiv1.Node, name string) []*apiv1.Node {
+							var res []*apiv1.Node
+							for _, n := range nodes {
+								if n.Name != name {
+									res = append(res, n)
+								}
+							}
+							return res
+						}
+						currentAll, _ := mocks.allNodeLister.List()
+						mocks.allNodeLister.SetNodes(removeNode(currentAll, nodeName))
+						currentReady, _ := mocks.readyNodeLister.List()
+						mocks.readyNodeLister.SetNodes(removeNode(currentReady, nodeName))
+					}).Once()
 					allExpectedScaleDowns++
 				}
 			}
