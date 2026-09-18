@@ -990,6 +990,14 @@ func fixNodeGroupSize(ctx context.Context, autoscalingCtx *ca_context.Autoscalin
 			return false, fmt.Errorf("failed to retrieve maxNodeProvisionTime for nodeGroup %s", nodeGroup.Id())
 		}
 		if incorrectSize.FirstObserved.Add(maxNodeProvisionTime).Before(currentTime) {
+			opts, err := nodeGroup.GetOptions(ctx, autoscalingCtx.NodeGroupDefaults)
+			if err != nil && err != cloudprovider.ErrNotImplemented {
+				return false, fmt.Errorf("failed to get options for nodeGroup %s: %v", nodeGroup.Id(), err)
+			}
+			if opts != nil && opts.ZeroOrMaxNodeScaling {
+				logger.V(0).Info("Skipping fixing node group size for ZeroOrMaxNodeScaling node group", "nodeGroupId", nodeGroup.Id())
+				continue
+			}
 			delta := incorrectSize.CurrentSize - incorrectSize.ExpectedSize
 			if delta < 0 {
 				logger.V(0).Info("Decreasing size", "nodeGroupId", nodeGroup.Id(), "targetSize", incorrectSize.ExpectedSize, "size", incorrectSize.CurrentSize, "delta", delta)
