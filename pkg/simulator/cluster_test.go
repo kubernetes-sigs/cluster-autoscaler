@@ -237,6 +237,114 @@ func TestSimulateNodeRemoval(t *testing.T) {
 	}
 }
 
+func TestSimulateNodesGroupRemoval(t *testing.T) {
+	node1 := BuildTestNode("n1", 1000, 2000000)
+	node2 := BuildTestNode("n2", 1000, 2000000)
+	destNode := BuildTestNode("dest", 2000, 4000000)
+
+	SetNodeReadyState(node1, true, time.Time{})
+	SetNodeReadyState(node2, true, time.Time{})
+	SetNodeReadyState(destNode, true, time.Time{})
+
+	replicas := int32(5)
+	replicaSets := []*appsv1.ReplicaSet{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "rs",
+				Namespace: "default",
+			},
+			Spec: appsv1.ReplicaSetSpec{
+				Replicas: &replicas,
+			},
+		},
+	}
+	rsLister, err := kube_util.NewTestReplicaSetLister(replicaSets)
+	assert.NoError(t, err)
+	registry := kube_util.NewListerRegistry(nil, nil, nil, nil, nil, nil, nil, rsLister, nil)
+	ownerRefs := GenerateOwnerReferences("rs", "ReplicaSet", "extensions/v1beta1", "")
+
+	pod1 := BuildTestPod("pod1", 100, 100000)
+	pod1.OwnerReferences = ownerRefs
+	pod1.Spec.NodeName = node1.Name
+
+	pod2 := BuildTestPod("pod2", 100, 100000)
+	pod2.OwnerReferences = ownerRefs
+	pod2.Spec.NodeName = node2.Name
+
+	podUnmovable := BuildTestPod("pod-unmovable", 100, 100000)
+	podUnmovable.Spec.NodeName = node2.Name
+
+	testCases := []struct {
+		name                 string
+		groupNodes           []string
+		pods                 []*apiv1.Pod
+		initialDestinations  map[string]bool
+		expectUnremovable    bool
+		expectedFailedIndex  int
+		expectedRemovableLen int
+		expectedDestinations map[string]bool
+	}{
+		{
+			name:                 "all nodes in group removable",
+			groupNodes:           []string{"n1", "n2"},
+			pods:                 []*apiv1.Pod{pod1, pod2},
+			initialDestinations:  map[string]bool{"dest": true, "n1": true, "n2": true},
+			expectUnremovable:    false,
+			expectedFailedIndex:  -1,
+			expectedRemovableLen: 2,
+			expectedDestinations: map[string]bool{"dest": true, "n1": false, "n2": false},
+		},
+		{
+			name:                 "node in group unremovable aborts early and rolls back destinations",
+			groupNodes:           []string{"n1", "n2"},
+			pods:                 []*apiv1.Pod{pod1, podUnmovable},
+			initialDestinations:  map[string]bool{"dest": true, "n1": true, "n2": true},
+			expectUnremovable:    true,
+			expectedFailedIndex:  1,
+			expectedRemovableLen: 0,
+			// destinations should be rolled back to their original state
+			expectedDestinations: map[string]bool{"dest": true, "n1": true, "n2": true},
+		},
+		{
+			name:                 "empty group succeeds with empty result",
+			groupNodes:           []string{},
+			pods:                 []*apiv1.Pod{pod1, pod2},
+			initialDestinations:  map[string]bool{"dest": true, "n1": true, "n2": true},
+			expectUnremovable:    false,
+			expectedFailedIndex:  -1,
+			expectedRemovableLen: 0,
+			expectedDestinations: map[string]bool{"dest": true, "n1": true, "n2": true},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := testsnapshot.NewTestSnapshotOrDie(t)
+			clustersnapshot.InitializeClusterSnapshotOrDie(t, snapshot, []*apiv1.Node{node1, node2, destNode}, tc.pods)
+
+			destinations := make(map[string]bool, len(tc.initialDestinations))
+			for k, v := range tc.initialDestinations {
+				destinations[k] = v
+			}
+
+			r := NewRemovalSimulator(registry, snapshot, testDeleteOptions(), nil, false)
+			removable, unremovable, failedIdx := r.SimulateNodesGroupRemoval(context.Background(), tc.groupNodes, destinations, time.Now(), nil)
+
+			if tc.expectUnremovable {
+				assert.NotNil(t, unremovable)
+				assert.Nil(t, removable)
+			} else {
+				assert.Nil(t, unremovable)
+				assert.Len(t, removable, tc.expectedRemovableLen)
+			}
+			assert.Equal(t, tc.expectedFailedIndex, failedIdx)
+			for k, expectedVal := range tc.expectedDestinations {
+				assert.Equalf(t, expectedVal, destinations[k], "destinationMap mismatch for node %s", k)
+			}
+		})
+	}
+}
+
 func testDeleteOptions() options.NodeDeleteOptions {
 	return options.NodeDeleteOptions{
 		SkipNodesWithSystemPods:           true,
