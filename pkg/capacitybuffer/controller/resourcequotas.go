@@ -22,6 +22,7 @@ import (
 
 	"gopkg.in/inf.v0"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
@@ -135,9 +136,7 @@ func calculatePodRequests(pod *corev1.Pod) corev1.ResourceList {
 
 	result := corev1.ResourceList{}
 
-	// to be considered in the future - it's arguable whether it makes sense
-	// to scale up a buffer if no pod can be created in the namespace.
-	// requests[corev1.ResourcePods] = *resource.NewQuantity(1, resource.DecimalSI)
+	requests[corev1.ResourcePods] = *resource.NewQuantity(1, resource.DecimalSI)
 
 	for resource, request := range requests {
 		result[resource] = request
