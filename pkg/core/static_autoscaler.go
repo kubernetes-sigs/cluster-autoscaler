@@ -147,6 +147,15 @@ func (callbacks *staticAutoscalerProcessorCallbacks) reset() {
 	callbacks.extraValues = make(map[string]interface{})
 }
 
+// clusterStateRegistryConfig maps the autoscaling options onto the cluster state registry config.
+func clusterStateRegistryConfig(opts config.AutoscalingOptions) clusterstate.ClusterStateRegistryConfig {
+	return clusterstate.ClusterStateRegistryConfig{
+		MaxTotalUnreadyPercentage: opts.MaxTotalUnreadyPercentage,
+		OkTotalUnreadyCount:       opts.OkTotalUnreadyCount,
+		UnreadyNodesScope:         opts.UnreadyNodesScope,
+	}
+}
+
 // NewStaticAutoscaler creates an instance of Autoscaler filled with provided parameters
 func NewStaticAutoscaler(
 	opts config.AutoscalingOptions,
@@ -175,10 +184,7 @@ func NewStaticAutoscaler(
 
 	templateNodeInfoRegistry := nodeinfosprovider.NewTemplateNodeInfoRegistry(processors.TemplateNodeInfoProvider)
 
-	clusterStateConfig := clusterstate.ClusterStateRegistryConfig{
-		MaxTotalUnreadyPercentage: opts.MaxTotalUnreadyPercentage,
-		OkTotalUnreadyCount:       opts.OkTotalUnreadyCount,
-	}
+	clusterStateConfig := clusterStateRegistryConfig(opts)
 	// Register the scale up failures registry before CSR so that it is updated before the node group is sent to the backoff.
 	processors.ScaleStateNotifier.Register(scaleUpFailuresRegistry)
 	clusterStateRegistry := clusterstate.NewNotifiedClusterStateRegistry(cloudProvider, autoscalingKubeClients.LogRecorder, backoff, processors.NodeGroupConfigProcessor, templateNodeInfoRegistry, clusterstate.WithScaleUpFailuresRegistry(scaleUpFailuresRegistry), clusterstate.WithConfig(clusterStateConfig), clusterstate.WithAsyncNodeGroupStateChecker(processors.AsyncNodeGroupStateChecker), clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier))
