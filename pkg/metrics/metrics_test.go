@@ -107,3 +107,33 @@ func TestUpdateScaleDownNodeRemovalLatency(t *testing.T) {
 	assert.Equal(t, uint64(1), metric2.Histogram.GetSampleCount())
 	assert.Equal(t, 20.0, metric2.Histogram.GetSampleSum())
 }
+
+func TestRegisterNodesWithCreateErrorsDeleted(t *testing.T) {
+	tests := map[string]struct {
+		nodesCounts []int
+		wantTotal   float64
+	}{
+		"SingleIncrement": {
+			nodesCounts: []int{5},
+			wantTotal:   5,
+		},
+		"MultipleIncrements": {
+			nodesCounts: []int{2, 3, 4},
+			wantTotal:   9,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			reg := metrics.NewKubeRegistry()
+			m := newCaMetricsWithRegistry(reg)
+			m.RegisterAll(false)
+
+			for _, count := range tc.nodesCounts {
+				m.RegisterNodesWithCreateErrorsDeleted(count)
+			}
+
+			assert.Equal(t, tc.wantTotal, testutil.ToFloat64(m.nodesWithCreateErrorsDeletedCount))
+		})
+	}
+}
