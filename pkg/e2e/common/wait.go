@@ -1,5 +1,3 @@
-//go:build e2e
-
 /*
 Copyright The Kubernetes Authors.
 
@@ -16,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package e2e
+package common
 
 import (
 	"context"
@@ -26,13 +24,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/e2e-framework/klient"
 	"sigs.k8s.io/e2e-framework/klient/wait"
-)
-
-const (
-	podSchedulingTimeout = 2 * time.Minute
-	podDeletionTimeout   = 2 * time.Minute
-	nodeReadyTimeout     = 2 * time.Minute
-	scaleDownTimeout     = 4 * time.Minute
 )
 
 // WaitForPodsScheduled waits until all specified pods are assigned to nodes.
@@ -109,6 +100,7 @@ func WaitForNodesAtLeast(ctx context.Context, client klient.Client, nodeGroup st
 
 // WaitForNodesReady waits until at least expectedCount nodes in a nodeGroup have Ready condition True.
 func WaitForNodesReady(ctx context.Context, client klient.Client, nodeGroup string, expectedCount int, timeout time.Duration) error {
+	cfg := GetTestConfig()
 	return wait.For(func(ctx context.Context) (done bool, err error) {
 		nodeList := &corev1.NodeList{}
 		err = client.Resources().List(ctx, nodeList)
@@ -116,16 +108,40 @@ func WaitForNodesReady(ctx context.Context, client klient.Client, nodeGroup stri
 			return false, err
 		}
 		readyCount := 0
-		for _, node := range nodeList.Items {
-			if node.Labels[nodeGroupLabelKey] == nodeGroup {
-				for _, condition := range node.Status.Conditions {
-					if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
-						readyCount++
-						break
-					}
-				}
+		for i := range nodeList.Items {
+			node := &nodeList.Items[i]
+			matches := false
+			if nodeGroup != "" && cfg.NodeGroupLabelKey != "" {
+				matches = node.Labels[cfg.NodeGroupLabelKey] == nodeGroup
+			} else {
+				matches = MatchNodeForConfig(node, cfg)
+			}
+			if matches && IsNodeReady(node) {
+				readyCount++
 			}
 		}
 		return readyCount >= expectedCount, nil
+	}, wait.WithTimeout(timeout), wait.WithContext(ctx))
+}
+
+// WaitForNodesReadyForConfig waits until at least expectedCount nodes matching cfg are Ready.
+func WaitForNodesReadyForConfig(ctx context.Context, client klient.Client, cfg *TestConfig, expectedCount int, timeout time.Duration) error {
+	return wait.For(func(ctx context.Context) (done bool, err error) {
+		readyCount, err := CountReadyNodesForConfig(ctx, client, cfg)
+		if err != nil {
+			return false, err
+		}
+		return readyCount >= expectedCount, nil
+	}, wait.WithTimeout(timeout), wait.WithContext(ctx))
+}
+
+// WaitForNodesAtMostForConfig waits until the number of Ready nodes matching cfg drops to or below maxCount.
+func WaitForNodesAtMostForConfig(ctx context.Context, client klient.Client, cfg *TestConfig, maxCount int, timeout time.Duration) error {
+	return wait.For(func(ctx context.Context) (done bool, err error) {
+		readyCount, err := CountReadyNodesForConfig(ctx, client, cfg)
+		if err != nil {
+			return false, err
+		}
+		return readyCount <= maxCount, nil
 	}, wait.WithTimeout(timeout), wait.WithContext(ctx))
 }

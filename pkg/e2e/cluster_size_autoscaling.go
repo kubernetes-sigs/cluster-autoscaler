@@ -49,6 +49,8 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"sigs.k8s.io/cluster-autoscaler/pkg/e2e/common"
+	"sigs.k8s.io/e2e-framework/klient"
 )
 
 const (
@@ -284,23 +286,19 @@ var _ = SIGDescribe("Cluster size autoscaling", framework.WithSlow(), framework.
 		})
 
 		f.It("should correctly scale down after a node is not needed", feature.ClusterSizeAutoscalingScaleDown, func(ctx context.Context) {
-			ginkgo.By("Increase cluster size")
-			cleanupFunc := increaseClusterSize(ctx, f, c, nodeCount+2)
+			client, err := klient.New(f.ClientConfig())
+			framework.ExpectNoError(err)
 
-			ginkgo.By("Remove the RC to make nodes not needed any more")
-			framework.ExpectNoError(cleanupFunc())
-
-			ginkgo.By("Some uneeded nodes should be removed")
-			framework.ExpectNoError(WaitForClusterSizeFuncWithUnready(ctx, f.ClientSet,
-				func(size int) bool { return size < nodeCount+2 }, scaleDownTimeout, 0))
+			cfg := common.NewGCEConfig("", 0, scaleUpTimeout, scaleDownTimeout)
+			framework.ExpectNoError(common.RunScaleDownUnneededNode(ctx, client, f.Namespace.Name, cfg))
 		})
 
 		f.It("should be able to scale down when rescheduling a pod is required and pdb allows for it", feature.ClusterSizeAutoscalingScaleDown, func(ctx context.Context) {
-			runDrainTest(ctx, f, c, nodeCount, f.Namespace.Name, 1, 1, func(increasedSize int) {
-				ginkgo.By("Some node should be removed")
-				framework.ExpectNoError(WaitForClusterSizeFunc(ctx, f.ClientSet,
-					func(size int) bool { return size < increasedSize }, scaleDownTimeout))
-			})
+			client, err := klient.New(f.ClientConfig())
+			framework.ExpectNoError(err)
+
+			cfg := common.NewGCEConfig("", 0, scaleUpTimeout, scaleDownTimeout)
+			framework.ExpectNoError(common.RunScaleDownReschedulingPodAllowedByPDB(ctx, client, f.Namespace.Name, cfg))
 		})
 
 		f.It("shouldn't be able to scale down when rescheduling a pod is required, but pdb doesn't allow drain", feature.ClusterSizeAutoscalingScaleDown, func(ctx context.Context) {

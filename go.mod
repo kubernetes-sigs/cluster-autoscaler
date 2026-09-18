@@ -33,6 +33,7 @@ require (
 	k8s.io/kube-scheduler v0.37.0
 	k8s.io/kubernetes v1.37.0
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd
+	sigs.k8s.io/cluster-autoscaler/pkg/e2e v0.0.0
 	sigs.k8s.io/controller-runtime v0.24.1
 	sigs.k8s.io/e2e-framework v0.7.0
 	sigs.k8s.io/yaml v1.6.0
@@ -201,3 +202,5 @@ replace k8s.io/externaljwt => k8s.io/externaljwt v0.37.0
 replace k8s.io/cri-streaming => k8s.io/cri-streaming v0.37.0
 
 replace k8s.io/streaming => k8s.io/streaming v0.37.0
+
+replace sigs.k8s.io/cluster-autoscaler/pkg/e2e => ./pkg/e2e

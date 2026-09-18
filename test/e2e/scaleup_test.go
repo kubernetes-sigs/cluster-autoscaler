@@ -21,52 +21,14 @@ package e2e
 import (
 	"context"
 	"testing"
-	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/e2e-framework/klient/k8s"
-	"sigs.k8s.io/e2e-framework/klient/wait"
-	"sigs.k8s.io/e2e-framework/klient/wait/conditions"
+	"sigs.k8s.io/cluster-autoscaler/pkg/e2e/common"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/features"
 )
 
 func TestClusterAutoscaling(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "fake-pod",
-			Namespace: testEnv.EnvConf().Namespace(),
-			Labels: map[string]string{
-				"app": "fake-pod",
-			},
-		},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name:  "fake-container",
-					Image: "fake-image",
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU:    resource.MustParse("100m"),
-							corev1.ResourceMemory: resource.MustParse("100Mi"),
-						},
-					},
-				},
-			},
-			NodeSelector: map[string]string{
-				nodeGroupLabelKey: defaultNodeGroup,
-			},
-			Tolerations: []corev1.Toleration{
-				{
-					Key:      "kwok-provider",
-					Operator: corev1.TolerationOpExists,
-					Effect:   corev1.TaintEffectNoSchedule,
-				},
-			},
-		},
-	}
+	testCfg := common.GetTestConfig()
 
 	scaleUpFeature := features.New("Cluster Autoscaler Scale Up").
 		Assess("scale up when a pod is pending", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
@@ -75,68 +37,16 @@ func TestClusterAutoscaling(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// Create the pending pod
-			err = client.Resources().Create(ctx, pod)
-			if err != nil {
-				t.Fatalf("failed to create pod: %v", err)
+			if err := common.RunScaleUp(ctx, client, cfg.Namespace(), testCfg); err != nil {
+				t.Fatalf("scale up test failed: %v", err)
 			}
-
-			// Wait for TriggeredScaleUp event
-			err = wait.For(func(ctx context.Context) (done bool, err error) {
-				events := &corev1.EventList{}
-				err = client.Resources(pod.Namespace).List(ctx, events)
-				if err != nil {
-					return false, err
-				}
-				for _, event := range events.Items {
-					if event.InvolvedObject.Name == pod.Name && event.Reason == "TriggeredScaleUp" {
-						return true, nil
-					}
-				}
-				return false, nil
-			}, wait.WithTimeout(2*time.Minute), wait.WithContext(ctx))
-			if err != nil {
-				t.Fatalf("TriggeredScaleUp event not found: %v", err)
-			}
-
-			// Wait for the pod to be scheduled
-			err = wait.For(conditions.New(client.Resources()).ResourceMatch(pod, func(object k8s.Object) bool {
-				p := object.(*corev1.Pod)
-				return p.Spec.NodeName != ""
-			}), wait.WithTimeout(2*time.Minute), wait.WithContext(ctx))
-			if err != nil {
-				t.Fatalf("pod not scheduled: %v", err)
-			}
-
-			// Verify new node is created
-			nodeList := &corev1.NodeList{}
-			err = wait.For(func(ctx context.Context) (done bool, err error) {
-				err = client.Resources().List(ctx, nodeList)
-				if err != nil {
-					return false, err
-				}
-				for _, node := range nodeList.Items {
-					if node.Labels[nodeGroupLabelKey] == defaultNodeGroup {
-						return true, nil
-					}
-				}
-				return false, nil
-			}, wait.WithTimeout(2*time.Minute), wait.WithContext(ctx))
-			if err != nil {
-				t.Fatalf("kind-worker node not created: %v", err)
-			}
-
 			return ctx
 		}).
 		Teardown(func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			client, err := cfg.NewClient()
-			if err != nil {
-				t.Fatal(err)
+			if err == nil {
+				_ = common.CleanUpNodeGroup(ctx, client, testCfg.NodeGroup)
 			}
-			// Delete the pod
-			_ = client.Resources().Delete(ctx, pod)
-			// Delete the node so that each test keeps the cluster clean
-			_ = CleanUpNodeGroup(ctx, client, defaultNodeGroup)
 			return ctx
 		}).
 		Feature()
