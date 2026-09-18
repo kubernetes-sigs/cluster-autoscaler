@@ -57,6 +57,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/status"
 	processorstest "sigs.k8s.io/cluster-autoscaler/pkg/processors/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
+	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot/testsnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
@@ -70,12 +71,13 @@ import (
 const nodeGroupLabel = "ng"
 
 var defaultOptions = config.AutoscalingOptions{
-	EstimatorName:                  estimator.BinpackingEstimatorName,
-	MaxCoresTotal:                  config.DefaultMaxClusterCores,
-	MaxMemoryTotal:                 config.DefaultMaxClusterMemory * units.GiB,
-	MinCoresTotal:                  0,
-	MinMemoryTotal:                 0,
-	MaxNodeGroupBinpackingDuration: 1 * time.Second,
+	EstimatorName:                         estimator.BinpackingEstimatorName,
+	MaxCoresTotal:                         config.DefaultMaxClusterCores,
+	MaxMemoryTotal:                        config.DefaultMaxClusterMemory * units.GiB,
+	MinCoresTotal:                         0,
+	MinMemoryTotal:                        0,
+	MaxNodeGroupBinpackingDuration:        1 * time.Second,
+	MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 }
 
 // Scale up scenarios.
@@ -1185,6 +1187,9 @@ func runSimpleScaleUpTest(t *testing.T, testConfig *ScaleUpTestConfig) *ScaleUpT
 	if testConfig.Options != nil {
 		options = *testConfig.Options
 	}
+	if options.MaxSchedulablePodGroupsProcessingTime == 0 {
+		options.MaxSchedulablePodGroupsProcessingTime = 2 * time.Minute
+	}
 	resourceLimiter := cloudprovider.NewResourceLimiter(
 		map[string]int64{cloudprovider.ResourceNameCores: options.MinCoresTotal, cloudprovider.ResourceNameMemory: options.MinMemoryTotal},
 		map[string]int64{cloudprovider.ResourceNameCores: options.MaxCoresTotal, cloudprovider.ResourceNameMemory: options.MaxMemoryTotal})
@@ -1332,10 +1337,11 @@ func TestScaleUpUnhealthy(t *testing.T) {
 	provider.AddNode("ng2", n2)
 
 	options := config.AutoscalingOptions{
-		EstimatorName:                  estimator.BinpackingEstimatorName,
-		MaxCoresTotal:                  config.DefaultMaxClusterCores,
-		MaxMemoryTotal:                 config.DefaultMaxClusterMemory,
-		MaxNodeGroupBinpackingDuration: 1 * time.Second,
+		EstimatorName:                         estimator.BinpackingEstimatorName,
+		MaxCoresTotal:                         config.DefaultMaxClusterCores,
+		MaxMemoryTotal:                        config.DefaultMaxClusterMemory,
+		MaxNodeGroupBinpackingDuration:        1 * time.Second,
+		MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 	}
 	processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(options)
 	autoscalingCtx, err := NewScaleTestAutoscalingContext(options, &fake.Clientset{}, listers, provider, nil, nil, templateNodeInfoRegistry)
@@ -1446,10 +1452,11 @@ func TestScaleUpNoHelp(t *testing.T) {
 	assert.NotNil(t, provider)
 
 	options := config.AutoscalingOptions{
-		EstimatorName:                  estimator.BinpackingEstimatorName,
-		MaxCoresTotal:                  config.DefaultMaxClusterCores,
-		MaxMemoryTotal:                 config.DefaultMaxClusterMemory,
-		MaxNodeGroupBinpackingDuration: 1 * time.Second,
+		EstimatorName:                         estimator.BinpackingEstimatorName,
+		MaxCoresTotal:                         config.DefaultMaxClusterCores,
+		MaxMemoryTotal:                        config.DefaultMaxClusterMemory,
+		MaxNodeGroupBinpackingDuration:        1 * time.Second,
+		MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 	}
 	processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(options)
 	autoscalingCtx, err := NewScaleTestAutoscalingContext(options, &fake.Clientset{}, listers, provider, nil, nil, templateNodeInfoRegistry)
@@ -1613,7 +1620,7 @@ func TestComputeSimilarNodeGroups(t *testing.T) {
 
 			listers := kube_util.NewListerRegistry(nil, nil, kube_util.NewTestPodLister(nil), nil, nil, nil, nil, nil, nil)
 			templateNodeInfoRegistry := nodeinfosprovider.NewTemplateNodeInfoRegistry(nodeinfosprovider.NewDefaultTemplateNodeInfoProvider(nil, false))
-			autoscalingCtx, err := NewScaleTestAutoscalingContext(config.AutoscalingOptions{BalanceSimilarNodeGroups: tc.balancingEnabled, MaxNodeGroupBinpackingDuration: 1 * time.Second}, &fake.Clientset{}, listers, provider, nil, nil, templateNodeInfoRegistry)
+			autoscalingCtx, err := NewScaleTestAutoscalingContext(config.AutoscalingOptions{BalanceSimilarNodeGroups: tc.balancingEnabled, MaxNodeGroupBinpackingDuration: 1 * time.Second, MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute}, &fake.Clientset{}, listers, provider, nil, nil, templateNodeInfoRegistry)
 			assert.NoError(t, err)
 			err = autoscalingCtx.ClusterSnapshot.SetClusterState(gocontext.Background(), nodes, nil, nil, nil)
 			assert.NoError(t, err)
@@ -1693,11 +1700,12 @@ func TestScaleUpBalanceGroups(t *testing.T) {
 			listers := kube_util.NewListerRegistry(nil, nil, podLister, nil, nil, nil, nil, nil, nil)
 
 			options := config.AutoscalingOptions{
-				EstimatorName:                  estimator.BinpackingEstimatorName,
-				BalanceSimilarNodeGroups:       true,
-				MaxCoresTotal:                  config.DefaultMaxClusterCores,
-				MaxMemoryTotal:                 config.DefaultMaxClusterMemory,
-				MaxNodeGroupBinpackingDuration: 1 * time.Second,
+				EstimatorName:                         estimator.BinpackingEstimatorName,
+				BalanceSimilarNodeGroups:              true,
+				MaxCoresTotal:                         config.DefaultMaxClusterCores,
+				MaxMemoryTotal:                        config.DefaultMaxClusterMemory,
+				MaxNodeGroupBinpackingDuration:        1 * time.Second,
+				MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 			}
 			processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(options)
 			autoscalingCtx, err := NewScaleTestAutoscalingContext(options, &fake.Clientset{}, listers, provider, nil, nil, templateNodeInfoRegistry)
@@ -1854,11 +1862,12 @@ func TestScaleUpBalanceGroupsRespectsQuota(t *testing.T) {
 			listers := kube_util.NewListerRegistry(nil, nil, podLister, nil, nil, nil, nil, nil, nil)
 
 			options := config.AutoscalingOptions{
-				EstimatorName:                  estimator.BinpackingEstimatorName,
-				BalanceSimilarNodeGroups:       true,
-				MaxCoresTotal:                  config.DefaultMaxClusterCores,
-				MaxMemoryTotal:                 config.DefaultMaxClusterMemory,
-				MaxNodeGroupBinpackingDuration: 1 * time.Second,
+				EstimatorName:                         estimator.BinpackingEstimatorName,
+				BalanceSimilarNodeGroups:              true,
+				MaxCoresTotal:                         config.DefaultMaxClusterCores,
+				MaxMemoryTotal:                        config.DefaultMaxClusterMemory,
+				MaxNodeGroupBinpackingDuration:        1 * time.Second,
+				MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 			}
 			processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(options)
 			// Override NodeGroupSetProcessor to ignore nodeGroupLabel so ng1/ng2/ng3 are recognized as similar.
@@ -1923,10 +1932,11 @@ func TestScaleUpAutoprovisionedNodeGroup(t *testing.T) {
 	}).WithMachineTypes([]string{"T1"}).WithMachineTemplates(map[string]*framework.NodeInfo{"T1": ti1}).Build()
 
 	options := config.AutoscalingOptions{
-		EstimatorName:                  estimator.BinpackingEstimatorName,
-		MaxCoresTotal:                  5000 * 64,
-		MaxMemoryTotal:                 5000 * 64 * 20,
-		MaxNodeGroupBinpackingDuration: 1 * time.Second,
+		EstimatorName:                         estimator.BinpackingEstimatorName,
+		MaxCoresTotal:                         5000 * 64,
+		MaxMemoryTotal:                        5000 * 64 * 20,
+		MaxNodeGroupBinpackingDuration:        1 * time.Second,
+		MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 	}
 	podLister := kube_util.NewTestPodLister([]*apiv1.Pod{})
 	listers := kube_util.NewListerRegistry(nil, nil, podLister, nil, nil, nil, nil, nil, nil)
@@ -1992,11 +2002,12 @@ func TestScaleUpBalanceAutoprovisionedNodeGroups(t *testing.T) {
 	}).WithMachineTypes([]string{"T1"}).WithMachineTemplates(map[string]*framework.NodeInfo{"T1": ti1}).Build()
 
 	options := config.AutoscalingOptions{
-		BalanceSimilarNodeGroups:       true,
-		EstimatorName:                  estimator.BinpackingEstimatorName,
-		MaxCoresTotal:                  5000 * 64,
-		MaxMemoryTotal:                 5000 * 64 * 20,
-		MaxNodeGroupBinpackingDuration: 1 * time.Second,
+		BalanceSimilarNodeGroups:              true,
+		EstimatorName:                         estimator.BinpackingEstimatorName,
+		MaxCoresTotal:                         5000 * 64,
+		MaxMemoryTotal:                        5000 * 64 * 20,
+		MaxNodeGroupBinpackingDuration:        1 * time.Second,
+		MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 	}
 	podLister := kube_util.NewTestPodLister([]*apiv1.Pod{})
 	listers := kube_util.NewListerRegistry(nil, nil, podLister, nil, nil, nil, nil, nil, nil)
@@ -2071,10 +2082,11 @@ func TestScaleUpToMeetNodeGroupMinSize(t *testing.T) {
 	provider.AddNode("ng2", n2)
 
 	options := config.AutoscalingOptions{
-		EstimatorName:                  estimator.BinpackingEstimatorName,
-		MaxCoresTotal:                  config.DefaultMaxClusterCores,
-		MaxMemoryTotal:                 config.DefaultMaxClusterMemory,
-		MaxNodeGroupBinpackingDuration: 1 * time.Second,
+		EstimatorName:                         estimator.BinpackingEstimatorName,
+		MaxCoresTotal:                         config.DefaultMaxClusterCores,
+		MaxMemoryTotal:                        config.DefaultMaxClusterMemory,
+		MaxNodeGroupBinpackingDuration:        1 * time.Second,
+		MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 	}
 	processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(options)
 	autoscalingCtx, err := NewScaleTestAutoscalingContext(options, &fake.Clientset{}, listers, provider, nil, nil, templateNodeInfoRegistry)
@@ -2168,8 +2180,9 @@ func TestScaleupAsyncNodeGroupsEnabled(t *testing.T) {
 		}
 
 		options := config.AutoscalingOptions{
-			AsyncNodeGroupsEnabled:         true,
-			MaxNodeGroupBinpackingDuration: 1 * time.Second,
+			AsyncNodeGroupsEnabled:                true,
+			MaxNodeGroupBinpackingDuration:        1 * time.Second,
+			MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 		}
 		podLister := kube_util.NewTestPodLister([]*apiv1.Pod{})
 		listers := kube_util.NewListerRegistry(nil, nil, podLister, nil, nil, nil, nil, nil, nil)
@@ -2373,7 +2386,8 @@ func TestScaleUpSimulationForSkippedNodeGroups(t *testing.T) {
 			options := config.AutoscalingOptions{
 				// enable this flag to test the simulation run for the skipped node groups
 				ScaleUpSimulationForSkippedNodeGroupsEnabled: tc.scaleUpSimulationForSkippedNodeGroupsEnabled,
-				EstimatorName: estimator.BinpackingEstimatorName,
+				EstimatorName:                         estimator.BinpackingEstimatorName,
+				MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 			}
 
 			podLister := kube_util.NewTestPodLister([]*apiv1.Pod{})
@@ -2662,4 +2676,135 @@ func (m *mockMetrics) RegisterFailedNodeCreations(reason metrics.FailedScaleUpRe
 
 func (m *mockMetrics) RegisterScaleUp(nodesCount int, gpuResourceName string, gpuType string, draDriverNames string) {
 	m.Called(nodesCount, gpuResourceName, gpuType, draDriverNames)
+}
+
+type interceptingNodeGroup struct {
+	cloudprovider.NodeGroup
+	onIdCall func()
+}
+
+func (ing *interceptingNodeGroup) Id() string {
+	if ing.onIdCall != nil {
+		ing.onIdCall()
+	}
+	return ing.NodeGroup.Id()
+}
+
+func TestSchedulablePodGroupsForNodeGroups(t *testing.T) {
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	provider.AddNodeGroup("ng1", 0, 10, 1)
+	provider.AddNodeGroup("ng2", 0, 10, 1)
+
+	node1 := BuildTestNode("n1", 100, 1000)
+	node2 := BuildTestNode("n2", 200, 2000)
+
+	nodeInfos := map[string]*framework.NodeInfo{
+		"ng1": framework.NewTestNodeInfo(node1),
+		"ng2": framework.NewTestNodeInfo(node2),
+	}
+
+	snapshot, _, err := testsnapshot.NewTestSnapshotAndHandle()
+	assert.NoError(t, err)
+
+	autoscalingCtx := ca_context.AutoscalingContext{
+		AutoscalingOptions: config.AutoscalingOptions{
+			MaxSchedulablePodGroupsProcessingTime: 10 * time.Minute,
+		},
+		ClusterSnapshot: snapshot,
+	}
+
+	orchestrator := &ScaleUpOrchestrator{
+		autoscalingCtx: &autoscalingCtx,
+	}
+
+	testCases := []struct {
+		name                string
+		cancelBeforeStart   bool
+		cancelOnNodeGroupId string
+		expectedResults     map[string][]string // nodeGroupId -> expected pod names
+	}{
+		{
+			name: "normal scheduling: pods scheduled on eligible node groups",
+			expectedResults: map[string][]string{
+				"ng1": {"p1"},
+				"ng2": {"p1", "p2"},
+			},
+		},
+		{
+			name:              "upfront cancellation: zero pods evaluated",
+			cancelBeforeStart: true,
+			expectedResults:   map[string][]string{},
+		},
+		{
+			name:                "mid-stop cancellation: stops after first pod equivalence group, returning partial results",
+			cancelOnNodeGroupId: "ng2",
+			expectedResults: map[string][]string{
+				"ng1": {"p1"},
+				"ng2": {"p1"},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+
+			p1 := BuildTestPod("p1", 80, 100)
+			p2 := BuildTestPod("p2", 150, 100)
+
+			eg1 := &equivalence.PodGroup{
+				Pods:             []*apiv1.Pod{p1},
+				SchedulingErrors: make(map[string]status.Reasons),
+			}
+			eg2 := &equivalence.PodGroup{
+				Pods:             []*apiv1.Pod{p2},
+				SchedulingErrors: make(map[string]status.Reasons),
+			}
+			podEquivalenceGroups := []*equivalence.PodGroup{eg1, eg2}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			if tc.cancelBeforeStart {
+				cancel()
+			}
+
+			// Wrap node groups and inject the cancellation callback if specified
+			var nodeGroups []cloudprovider.NodeGroup
+			for _, ngName := range []string{"ng1", "ng2"} {
+				ng := provider.GetNodeGroup(ngName)
+				if tc.cancelOnNodeGroupId == ngName {
+					nodeGroups = append(nodeGroups, &interceptingNodeGroup{
+						NodeGroup: ng,
+						onIdCall: func() {
+							cancel()
+						},
+					})
+				} else {
+					nodeGroups = append(nodeGroups, ng)
+				}
+			}
+
+			results := orchestrator.SchedulablePodGroupsForNodeGroups(ctx, podEquivalenceGroups, nodeGroups, nodeInfos)
+
+			for ngId, expectedPods := range tc.expectedResults {
+				actualGroup, exists := results[ngId]
+				if len(expectedPods) == 0 {
+					assert.Len(t, actualGroup, 0)
+					continue
+				}
+				assert.True(t, exists, "Expected node group %s to exist in results", ngId)
+				assert.Len(t, actualGroup, len(expectedPods))
+				for i, expectedPodName := range expectedPods {
+					assert.Equal(t, expectedPodName, actualGroup[i].Pods[0].Name)
+				}
+			}
+
+			// Ensure node groups not in expectedResults are empty/non-existent
+			for ngId, actualGroup := range results {
+				if _, ok := tc.expectedResults[ngId]; !ok {
+					assert.Len(t, actualGroup, 0)
+				}
+			}
+		})
+	}
 }

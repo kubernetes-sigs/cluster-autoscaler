@@ -163,6 +163,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&p.o.MaxNodesPerScaleUp, "max-nodes-per-scaleup", 1000, "Max nodes added in a single scale-up. This is intended strictly for optimizing CA algorithm latency and not a tool to rate-limit scale-up throughput.")
 	fs.DurationVar(&p.o.MaxNodeGroupBinpackingDuration, "max-nodegroup-binpacking-duration", 10*time.Second, "Maximum time that will be spent in binpacking simulation for each NodeGroup.")
 	fs.BoolVar(&p.o.FastpathBinpackingEnabled, "fastpath-binpacking-enabled", false, "Whether to use fastpath binpacking algorithm to optimize scale-ups.")
+	fs.DurationVar(&p.o.MaxSchedulablePodGroupsProcessingTime, "max-schedulable-pod-group-processing-duration", 2*time.Minute, "Maximum time that will be spent on processing SchedulablePodGroups for node groups.")
 	fs.BoolVar(&p.o.SkipNodesWithSystemPods, "skip-nodes-with-system-pods", true, "If true cluster autoscaler will wait for --blocking-system-pod-distruption-timeout before deleting nodes with pods from kube-system (except for DaemonSet or mirror pods)")
 	fs.BoolVar(&p.o.SkipNodesWithLocalStorage, "skip-nodes-with-local-storage", true, "If true cluster autoscaler will never delete nodes with pods with local storage, e.g. EmptyDir or HostPath")
 	fs.BoolVar(&p.o.SkipNodesWithCustomControllerPods, "skip-nodes-with-custom-controller-pods", true, "If true cluster autoscaler will never delete nodes with pods owned by custom controllers")

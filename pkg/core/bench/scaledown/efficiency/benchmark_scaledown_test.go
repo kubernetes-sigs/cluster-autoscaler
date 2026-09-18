@@ -69,6 +69,7 @@ func defaultAutoscalingOptions() config.AutoscalingOptions {
 			ScaleDownUtilizationThreshold: 1.0,
 			ScaleDownUnneededTime:         0,
 		},
+		MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 	}
 }
 
