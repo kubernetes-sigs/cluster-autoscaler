@@ -2616,7 +2616,7 @@ func TestScaleUpMetricsEmission(t *testing.T) {
 	provider := testprovider.NewTestCloudProviderBuilder().WithOnScaleUp(func(id string, delta int) error { return nil }).Build()
 	provider.AddNodeGroup("ng1", 0, 10, 0)
 	provider.SetMachineTemplates(map[string]*framework.NodeInfo{
-		"ng1": framework.NewNodeInfo(gpuNode, slices),
+		"ng1": framework.NewNodeInfo(gpuNode, framework.NodeInfoConfig{Slices: slices}),
 	})
 
 	options := defaultOptions

@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	apiv1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
@@ -75,11 +76,12 @@ func TestNodeInfo(t *testing.T) {
 		wantSchedNodeInfo       *schedulerimpl.NodeInfo
 		wantLocalResourceSlices []*resourceapi.ResourceSlice
 		wantPods                []*PodInfo
+		wantCSINode             *storagev1.CSINode
 	}{
 		{
 			testName: "wrapping via NewNodeInfo",
 			modFn: func() *NodeInfo {
-				return NewNodeInfo(node, nil, testPodInfos(pods, false)...)
+				return NewNodeInfo(node, NodeInfoConfig{Pods: testPodInfos(pods, false)})
 			},
 			wantSchedNodeInfo: schedulerNodeInfo,
 			wantPods:          testPodInfos(pods, false),
@@ -87,11 +89,20 @@ func TestNodeInfo(t *testing.T) {
 		{
 			testName: "wrapping via NewNodeInfo with DRA objects",
 			modFn: func() *NodeInfo {
-				return NewNodeInfo(node, slices, testPodInfos(pods, true)...)
+				return NewNodeInfo(node, NodeInfoConfig{Slices: slices, Pods: testPodInfos(pods, true)})
 			},
 			wantSchedNodeInfo:       schedulerNodeInfo,
 			wantLocalResourceSlices: slices,
 			wantPods:                testPodInfos(pods, true),
+		},
+		{
+			testName: "wrapping via NewNodeInfo with CSINode",
+			modFn: func() *NodeInfo {
+				return NewNodeInfo(node, NodeInfoConfig{CSINode: &storagev1.CSINode{ObjectMeta: v1.ObjectMeta{Name: nodeName}}, Pods: testPodInfos(pods, false)})
+			},
+			wantSchedNodeInfo: schedulerNodeInfo,
+			wantPods:          testPodInfos(pods, false),
+			wantCSINode:       &storagev1.CSINode{ObjectMeta: v1.ObjectMeta{Name: nodeName}},
 		},
 		{
 			testName: "wrapping via NewTestNodeInfo",
@@ -104,7 +115,7 @@ func TestNodeInfo(t *testing.T) {
 		{
 			testName: "wrapping via SetNode+AddPod",
 			modFn: func() *NodeInfo {
-				result := NewNodeInfo(nil, nil)
+				result := NewNodeInfo(nil, NodeInfoConfig{})
 				result.SetNode(node)
 				for _, pod := range pods {
 					result.AddPod(NewPodInfo(pod, nil))
@@ -117,7 +128,7 @@ func TestNodeInfo(t *testing.T) {
 		{
 			testName: "wrapping via SetNode+AddPod with DRA objects",
 			modFn: func() *NodeInfo {
-				result := NewNodeInfo(nil, nil)
+				result := NewNodeInfo(nil, NodeInfoConfig{})
 				result.LocalResourceSlices = slices
 				result.SetNode(node)
 				for _, podInfo := range testPodInfos(pods, true) {
@@ -132,7 +143,7 @@ func TestNodeInfo(t *testing.T) {
 		{
 			testName: "removing pods",
 			modFn: func() *NodeInfo {
-				result := NewNodeInfo(node, slices, testPodInfos(pods, true)...)
+				result := NewNodeInfo(node, NodeInfoConfig{Slices: slices, Pods: testPodInfos(pods, true)})
 				for _, pod := range []*apiv1.Pod{pods[0], pods[2], pods[4]} {
 					if err := result.RemovePod(klog.Background(), pod); err != nil {
 						t.Errorf("RemovePod unexpected error: %v", err)
@@ -163,6 +174,9 @@ func TestNodeInfo(t *testing.T) {
 			if diff := cmp.Diff(tc.wantPods, wrappedNodeInfo.Pods(), nodeInfoCmpOpts...); diff != "" {
 				t.Errorf("Pods() output differs from expected, diff (-want +got): %s", diff)
 			}
+			if diff := cmp.Diff(tc.wantCSINode, wrappedNodeInfo.CSINode); diff != "" {
+				t.Errorf("CSINode differs from expected, diff (-want +got): %s", diff)
+			}
 		})
 	}
 }
@@ -181,6 +195,7 @@ func TestDeepCopyNodeInfo(t *testing.T) {
 		{ObjectMeta: v1.ObjectMeta{Name: "slice1"}, Spec: resourceapi.ResourceSliceSpec{NodeName: &nodeName}},
 		{ObjectMeta: v1.ObjectMeta{Name: "slice2"}, Spec: resourceapi.ResourceSliceSpec{NodeName: &nodeName}},
 	}
+	csiNode := &storagev1.CSINode{ObjectMeta: v1.ObjectMeta{Name: nodeName}}
 
 	for _, tc := range []struct {
 		testName string
@@ -188,23 +203,27 @@ func TestDeepCopyNodeInfo(t *testing.T) {
 	}{
 		{
 			testName: "empty NodeInfo",
-			nodeInfo: NewNodeInfo(nil, nil),
+			nodeInfo: NewNodeInfo(nil, NodeInfoConfig{}),
 		},
 		{
 			testName: "NodeInfo with only Node set",
-			nodeInfo: NewNodeInfo(node, nil),
+			nodeInfo: NewNodeInfo(node, NodeInfoConfig{}),
 		},
 		{
 			testName: "NodeInfo with only Pods set",
-			nodeInfo: NewNodeInfo(nil, nil, pods...),
+			nodeInfo: NewNodeInfo(nil, NodeInfoConfig{Pods: pods}),
 		},
 		{
 			testName: "NodeInfo with both Node and Pods set",
-			nodeInfo: NewNodeInfo(node, nil, pods...),
+			nodeInfo: NewNodeInfo(node, NodeInfoConfig{Pods: pods}),
 		},
 		{
 			testName: "NodeInfo with Node, ResourceSlices, and Pods set",
-			nodeInfo: NewNodeInfo(node, slices, pods...),
+			nodeInfo: NewNodeInfo(node, NodeInfoConfig{Slices: slices, Pods: pods}),
+		},
+		{
+			testName: "NodeInfo with Node, ResourceSlices, CSINode, and Pods set",
+			nodeInfo: NewNodeInfo(node, NodeInfoConfig{Slices: slices, CSINode: csiNode, Pods: pods}),
 		},
 	} {
 		t.Run(tc.testName, func(t *testing.T) {
@@ -220,6 +239,9 @@ func TestDeepCopyNodeInfo(t *testing.T) {
 			}
 			if tc.nodeInfo.NodeInfo == nodeInfoCopy.NodeInfo {
 				t.Error("schedulerimpl.NodeInfo address identical after DeepCopyNodeInfo")
+			}
+			if tc.nodeInfo.CSINode != nil && tc.nodeInfo.CSINode == nodeInfoCopy.CSINode {
+				t.Error("CSINode address identical after DeepCopyNodeInfo")
 			}
 			for i := range len(tc.nodeInfo.LocalResourceSlices) {
 				if tc.nodeInfo.LocalResourceSlices[i] == nodeInfoCopy.LocalResourceSlices[i] {
@@ -260,17 +282,17 @@ func TestNodeInfoResourceClaims(t *testing.T) {
 	}{
 		{
 			testName:   "no pods",
-			nodeInfo:   NewNodeInfo(node, nil),
+			nodeInfo:   NewNodeInfo(node, NodeInfoConfig{}),
 			wantClaims: nil,
 		},
 		{
 			testName:   "pods but no claims",
-			nodeInfo:   NewNodeInfo(node, nil, testPodInfos(pods, false)...),
+			nodeInfo:   NewNodeInfo(node, NodeInfoConfig{Pods: testPodInfos(pods, false)}),
 			wantClaims: nil,
 		},
 		{
 			testName: "pods with claims, shared claims are not repeated",
-			nodeInfo: NewNodeInfo(node, nil, testPodInfos(pods, true)...),
+			nodeInfo: NewNodeInfo(node, NodeInfoConfig{Pods: testPodInfos(pods, true)}),
 			wantClaims: []*resourceapi.ResourceClaim{
 				testClaim("pod-0-claim-0"),
 				testClaim("pod-0-claim-1"),

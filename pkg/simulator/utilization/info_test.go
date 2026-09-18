@@ -277,18 +277,21 @@ func TestCalculateWithDynamicResources(t *testing.T) {
 		},
 	}
 	nodeInfoNoDra := framework.NewTestNodeInfo(node, pod1, pod2)
-	nodeInfoSlicesNoClaims := framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{resourceSlice1}, framework.NewPodInfo(pod1, nil), framework.NewPodInfo(pod2, nil))
-	nodeInfoSlicesAndClaimsPool1Higher := framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2},
+	nodeInfoSlicesNoClaims := framework.NewNodeInfo(node, framework.NodeInfoConfig{Slices: []*resourceapi.ResourceSlice{resourceSlice1}, Pods: []*framework.PodInfo{framework.NewPodInfo(pod1, nil), framework.NewPodInfo(pod2, nil)}})
+	nodeInfoSlicesAndClaimsPool1Higher := framework.NewNodeInfo(node, framework.NodeInfoConfig{Slices: []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2}, Pods: []*framework.PodInfo{
 		framework.NewPodInfo(pod1, []*resourceapi.ResourceClaim{pod1Claim1, pod1Claim2}),
-		framework.NewPodInfo(pod2, []*resourceapi.ResourceClaim{pod2Claim}))
-	nodeInfoSlicesAndClaimsPool2Higher := framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2},
-		framework.NewPodInfo(pod2, []*resourceapi.ResourceClaim{pod2Claim}))
-	nodeInfoIncompleteSlices := framework.NewNodeInfo(node, []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2, incompleteResourceSlice},
+		framework.NewPodInfo(pod2, []*resourceapi.ResourceClaim{pod2Claim})}})
+
+	nodeInfoSlicesAndClaimsPool2Higher := framework.NewNodeInfo(node, framework.NodeInfoConfig{Slices: []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2}, Pods: []*framework.PodInfo{
+		framework.NewPodInfo(pod2, []*resourceapi.ResourceClaim{pod2Claim})}})
+
+	nodeInfoIncompleteSlices := framework.NewNodeInfo(node, framework.NodeInfoConfig{Slices: []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2, incompleteResourceSlice}, Pods: []*framework.PodInfo{
 		framework.NewPodInfo(pod1, []*resourceapi.ResourceClaim{pod1Claim1, pod1Claim2}),
-		framework.NewPodInfo(pod2, []*resourceapi.ResourceClaim{pod2Claim}))
-	nodeInfoGpuAndDra := framework.NewNodeInfo(gpuNode, []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2},
+		framework.NewPodInfo(pod2, []*resourceapi.ResourceClaim{pod2Claim})}})
+
+	nodeInfoGpuAndDra := framework.NewNodeInfo(gpuNode, framework.NodeInfoConfig{Slices: []*resourceapi.ResourceSlice{resourceSlice1, resourceSlice2}, Pods: []*framework.PodInfo{
 		framework.NewPodInfo(pod1, []*resourceapi.ResourceClaim{pod1Claim1, pod1Claim2}),
-		framework.NewPodInfo(pod2, []*resourceapi.ResourceClaim{pod2Claim}))
+		framework.NewPodInfo(pod2, []*resourceapi.ResourceClaim{pod2Claim})}})
 
 	for _, tc := range []struct {
 		testName     string

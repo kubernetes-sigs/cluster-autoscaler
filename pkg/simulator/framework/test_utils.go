@@ -72,7 +72,7 @@ type testFailer interface {
 // NewTestNodeInfo returns a new NodeInfo without any DRA information - only to be used in test code.
 // Production code should always take DRA objects into account.
 func NewTestNodeInfo(node *apiv1.Node, pods ...*apiv1.Pod) *NodeInfo {
-	nodeInfo := NewNodeInfo(node, nil)
+	nodeInfo := NewNodeInfo(node, NodeInfoConfig{})
 	for _, pod := range pods {
 		nodeInfo.AddPod(NewPodInfo(pod, nil))
 	}
@@ -82,11 +82,10 @@ func NewTestNodeInfo(node *apiv1.Node, pods ...*apiv1.Pod) *NodeInfo {
 // NewTestNodeInfoWithCSI returns a new NodeInfo object with CSINode information, but no DRA related
 // information. It is meant to be used only from tests.
 func NewTestNodeInfoWithCSI(node *apiv1.Node, csiNode *storagev1.CSINode, pods ...*apiv1.Pod) *NodeInfo {
-	nodeInfo := NewNodeInfo(node, nil)
+	nodeInfo := NewNodeInfo(node, NodeInfoConfig{CSINode: csiNode})
 	for _, pod := range pods {
 		nodeInfo.AddPod(NewPodInfo(pod, nil))
 	}
-	nodeInfo.CSINode = csiNode
 	return nodeInfo
 }
 

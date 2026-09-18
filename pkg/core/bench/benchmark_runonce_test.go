@@ -404,7 +404,7 @@ func setupScaleUp(nodes int) func(*integration.FakeSet) error {
 		SetNodeReadyState(nTemplate, true, time.Now())
 
 		clusterFakes.CloudProvider.AddNodeGroup(ngName,
-			testprovider.WithTemplate(framework.NewNodeInfo(nTemplate, nil)),
+			testprovider.WithTemplate(framework.NewNodeInfo(nTemplate, framework.NodeInfoConfig{})),
 			testprovider.WithNGSize(0, maxNGSize),
 		)
 
@@ -462,7 +462,7 @@ func setupScaleUpDRA(nodes int) func(*integration.FakeSet) error {
 		}
 
 		clusterFakes.CloudProvider.AddNodeGroup(ngName,
-			testprovider.WithTemplate(framework.NewNodeInfo(nTemplate, []*resourceapi.ResourceSlice{nodeSlice})),
+			testprovider.WithTemplate(framework.NewNodeInfo(nTemplate, framework.NodeInfoConfig{Slices: []*resourceapi.ResourceSlice{nodeSlice}})),
 			testprovider.WithNGSize(0, maxNGSize),
 		)
 

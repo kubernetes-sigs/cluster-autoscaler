@@ -118,7 +118,7 @@ func TestSanitizedTemplateNodeInfoFromNodeGroup(t *testing.T) {
 		{
 			testName: "simple template with no pods",
 			nodeGroup: &fakeNodeGroup{
-				templateNodeInfoResult: framework.NewNodeInfo(exampleNode, nil),
+				templateNodeInfoResult: framework.NewNodeInfo(exampleNode, framework.NodeInfoConfig{}),
 			},
 			wantPods: []*apiv1.Pod{
 				buildDSPod(ds1, "n"),
@@ -129,14 +129,13 @@ func TestSanitizedTemplateNodeInfoFromNodeGroup(t *testing.T) {
 		{
 			testName: "template with all kinds of pods",
 			nodeGroup: &fakeNodeGroup{
-				templateNodeInfoResult: framework.NewNodeInfo(exampleNode, nil,
+				templateNodeInfoResult: framework.NewNodeInfo(exampleNode, framework.NodeInfoConfig{Pods: []*framework.PodInfo{
 					framework.NewPodInfo(BuildScheduledTestPod("p1", 100, 1, "n"), nil),
 					framework.NewPodInfo(BuildScheduledTestPod("p2", 100, 1, "n"), nil),
 					framework.NewPodInfo(SetMirrorPodSpec(BuildScheduledTestPod("p3", 100, 1, "n")), nil),
 					framework.NewPodInfo(setDeletionTimestamp(SetMirrorPodSpec(BuildScheduledTestPod("p4", 100, 1, "n"))), nil),
 					framework.NewPodInfo(buildDSPod(ds1, "n"), nil),
-					framework.NewPodInfo(setDeletionTimestamp(buildDSPod(ds2, "n")), nil),
-				),
+					framework.NewPodInfo(setDeletionTimestamp(buildDSPod(ds2, "n")), nil)}}),
 			},
 			wantPods: []*apiv1.Pod{
 				SetMirrorPodSpec(BuildScheduledTestPod("p3", 100, 1, "n")),
@@ -358,12 +357,9 @@ func TestSanitizedTemplateNodeInfoFromNodeInfo(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			nodeGroupId := "nodeGroupId"
-			exampleNodeInfo := framework.NewNodeInfo(exampleNode, nil)
+			exampleNodeInfo := framework.NewNodeInfo(exampleNode, framework.NodeInfoConfig{CSINode: tc.csiNode})
 			for _, pod := range tc.pods {
 				exampleNodeInfo.AddPod(framework.NewPodInfo(pod, nil))
-			}
-			if tc.csiNode != nil {
-				exampleNodeInfo.SetCSINode(tc.csiNode)
 			}
 
 			templateNodeInfo, err := SanitizedTemplateNodeInfoFromNodeInfo(context.Background(), exampleNodeInfo, nodeGroupId, tc.daemonSets, tc.forceDS, taints.TaintConfig{})
@@ -408,7 +404,7 @@ func TestSanitizedNodeInfo(t *testing.T) {
 		framework.NewPodInfo(BuildTestPod("p1", 80, 0, WithNodeName(nodeName)), nil),
 		framework.NewPodInfo(BuildTestPod("p2", 80, 0, WithNodeName(nodeName)), nil),
 	}
-	templateNodeInfo := framework.NewNodeInfo(templateNode, nil, pods...)
+	templateNodeInfo := framework.NewNodeInfo(templateNode, framework.NodeInfoConfig{Pods: pods})
 
 	suffix := "abc"
 	freshNodeInfo, err := SanitizedNodeInfo(context.Background(), templateNodeInfo, suffix)
@@ -532,7 +528,7 @@ func TestCreateSanitizedNodeInfo(t *testing.T) {
 		},
 		{
 			testName: "sanitize node with ResourceSlices",
-			nodeInfo: framework.NewNodeInfo(basicNode, resourceSlices),
+			nodeInfo: framework.NewNodeInfo(basicNode, framework.NodeInfoConfig{Slices: resourceSlices}),
 		},
 		{
 			testName:    "sanitize node taints - disabled",
@@ -548,25 +544,25 @@ func TestCreateSanitizedNodeInfo(t *testing.T) {
 		},
 		{
 			testName: "sanitize pods",
-			nodeInfo: framework.NewNodeInfo(basicNode, nil, framework.NewPodInfo(pod1, nil), framework.NewPodInfo(pod2, nil)),
+			nodeInfo: framework.NewNodeInfo(basicNode, framework.NodeInfoConfig{Pods: []*framework.PodInfo{framework.NewPodInfo(pod1, nil), framework.NewPodInfo(pod2, nil)}}),
 		},
 		{
 			testName: "sanitize pods with ResourceClaims",
-			nodeInfo: framework.NewNodeInfo(basicNode, nil, framework.NewPodInfo(pod1WithClaims, pod1ResourceClaims), framework.NewPodInfo(pod2WithClaims, pod2ResourceClaims)),
+			nodeInfo: framework.NewNodeInfo(basicNode, framework.NodeInfoConfig{Pods: []*framework.PodInfo{framework.NewPodInfo(pod1WithClaims, pod1ResourceClaims), framework.NewPodInfo(pod2WithClaims, pod2ResourceClaims)}}),
 		},
 		{
 			testName:    "sanitize everything",
-			nodeInfo:    framework.NewNodeInfo(taintsLabelsNode, resourceSlices, framework.NewPodInfo(pod1WithClaims, pod1ResourceClaims), framework.NewPodInfo(pod2WithClaims, pod2ResourceClaims)),
+			nodeInfo:    framework.NewNodeInfo(taintsLabelsNode, framework.NodeInfoConfig{Slices: resourceSlices, Pods: []*framework.PodInfo{framework.NewPodInfo(pod1WithClaims, pod1ResourceClaims), framework.NewPodInfo(pod2WithClaims, pod2ResourceClaims)}}),
 			taintConfig: &taintConfig,
 			wantTaints:  []apiv1.Taint{{Key: "a", Value: "b", Effect: apiv1.TaintEffectNoSchedule}},
 		},
 		{
 			testName: "sanitize node with NodeDeclaredFeatures",
-			nodeInfo: framework.NewNodeInfo(nodeWithDeclaredFeatures, resourceSlices, framework.NewPodInfo(pod1WithClaims, pod1ResourceClaims), framework.NewPodInfo(pod2WithClaims, pod2ResourceClaims)),
+			nodeInfo: framework.NewNodeInfo(nodeWithDeclaredFeatures, framework.NodeInfoConfig{Slices: resourceSlices, Pods: []*framework.PodInfo{framework.NewPodInfo(pod1WithClaims, pod1ResourceClaims), framework.NewPodInfo(pod2WithClaims, pod2ResourceClaims)}}),
 		},
 		{
 			testName:                     "sanitize node with NodeDeclaredFeatures disabled",
-			nodeInfo:                     framework.NewNodeInfo(nodeWithDeclaredFeatures, resourceSlices, framework.NewPodInfo(pod1WithClaims, pod1ResourceClaims), framework.NewPodInfo(pod2WithClaims, pod2ResourceClaims)),
+			nodeInfo:                     framework.NewNodeInfo(nodeWithDeclaredFeatures, framework.NodeInfoConfig{Slices: resourceSlices, Pods: []*framework.PodInfo{framework.NewPodInfo(pod1WithClaims, pod1ResourceClaims), framework.NewPodInfo(pod2WithClaims, pod2ResourceClaims)}}),
 			nodeDeclaredFeaturesDisabled: true,
 		},
 	}
@@ -615,7 +611,7 @@ func verifyNodeInfoSanitization(initialNodeInfo, sanitizedNodeInfo *framework.No
 	if expectedPods != nil {
 		// If the sanitization is expected to change the set of pods, hack the initial NodeInfo to have the expected pods.
 		// Then we can just compare things pod-by-pod as if the set didn't change.
-		initialNodeInfo = framework.NewNodeInfo(initialNodeInfo.Node(), nil)
+		initialNodeInfo = framework.NewNodeInfo(initialNodeInfo.Node(), framework.NodeInfoConfig{})
 		for _, pod := range expectedPods {
 			initialNodeInfo.AddPod(framework.NewPodInfo(pod, nil))
 		}
