@@ -25,7 +25,7 @@ import (
 
 var (
 	// AvailableExpanders is a list of available expander options
-	AvailableExpanders = []string{RandomExpanderName, MostPodsExpanderName, LeastWasteExpanderName, PriceBasedExpanderName, PriorityBasedExpanderName, GRPCExpanderName}
+	AvailableExpanders = []string{RandomExpanderName, MostPodsExpanderName, LeastWasteExpanderName, LeastNodesExpanderName, PriceBasedExpanderName, PriorityBasedExpanderName, GRPCExpanderName}
 	// RandomExpanderName selects a node group at random
 	RandomExpanderName = "random"
 	// MostPodsExpanderName selects a node group that fits the most pods
