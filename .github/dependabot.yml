@@ -61,3 +61,20 @@ updates:
     - "area/dependency"
     - "ok-to-test"
     - "release-note-none"
+
+# Dev/Build Tools Go Modules
+- directory: "/tools"
+  package-ecosystem: "gomod"
+  open-pull-requests-limit: 5
+  schedule:
+    interval: "daily"
+    time: "15:00"
+    timezone: "America/New_York"
+  commit-message:
+    prefix: "dependabot"
+    include: scope
+  labels:
+    - "area/cluster-autoscaler"
+    - "area/dependency"
+    - "ok-to-test"
+    - "release-note-none"
