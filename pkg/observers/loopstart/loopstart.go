@@ -19,7 +19,6 @@ package loopstart
 import "context"
 
 // Observer interface is used to store object that needed to be refreshed in each CA loop.
-// It returns error and a bool value whether the loop should be skipped.
 type Observer interface {
 	Refresh(context.Context)
 }
