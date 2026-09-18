@@ -23,11 +23,15 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuretesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/dynamic-resource-allocation/structured"
 	schedulerinterface "k8s.io/kube-scheduler/framework"
+	"k8s.io/kubernetes/pkg/features"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 )
 
@@ -189,6 +193,101 @@ func TestSnapshotClaimTrackerListAllAllocatedDevices(t *testing.T) {
 			if diff := cmp.Diff(tc.wantDevices, devices, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("snapshotClaimTracker.ListAllAllocatedDevices(): unexpected output (-want +got): %s", diff)
 			}
+		})
+	}
+}
+
+func TestSnapshotClaimTrackerGatherAllocatedState(t *testing.T) {
+	makeClaim := func(name, device, share, capacity string) *resourceapi.ResourceClaim {
+		result := resourceapi.DeviceRequestAllocationResult{
+			Request: "request",
+			Driver:  "driver.example.com",
+			Pool:    "pool",
+			Device:  device,
+		}
+		if share != "" {
+			shareID := types.UID(share)
+			result.ShareID = &shareID
+		}
+		if capacity != "" {
+			result.ConsumedCapacity = map[resourceapi.QualifiedName]resource.Quantity{
+				"capacity": resource.MustParse(capacity),
+			}
+		}
+		return &resourceapi.ResourceClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name)},
+			Status: resourceapi.ResourceClaimStatus{
+				Allocation: &resourceapi.AllocationResult{
+					Devices: resourceapi.DeviceAllocationResult{
+						Results: []resourceapi.DeviceRequestAllocationResult{result},
+					},
+				},
+			},
+		}
+	}
+
+	for _, tc := range []struct {
+		testName                  string
+		enabledConsumableCapacity bool
+	}{
+		{testName: "consumable capacity enabled", enabledConsumableCapacity: true},
+		{testName: "consumable capacity disabled", enabledConsumableCapacity: false},
+	} {
+		t.Run(tc.testName, func(t *testing.T) {
+			featuretesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DRAConsumableCapacity, tc.enabledConsumableCapacity)
+			firstShare := makeClaim("first", "device-1", "share-1", "2")
+			secondShare := makeClaim("second", "device-1", "share-2", "3")
+			shareWithoutCapacity := makeClaim("no-capacity", "device-2", "share-3", "")
+			dedicated := makeClaim("dedicated", "device-3", "", "")
+			claims := map[ResourceClaimId]*resourceapi.ResourceClaim{}
+			for _, claim := range []*resourceapi.ResourceClaim{firstShare, secondShare, shareWithoutCapacity, dedicated, claim3} {
+				claims[GetClaimId(claim)] = claim
+			}
+			snapshot := NewSnapshot(claims, nil, nil, nil)
+			device1 := structured.MakeDeviceID("driver.example.com", "pool", "device-1")
+			device2 := structured.MakeDeviceID("driver.example.com", "pool", "device-2")
+			device3 := structured.MakeDeviceID("driver.example.com", "pool", "device-3")
+
+			expectState := func(shared sets.Set[structured.DeviceID], capacity string) *structured.AllocatedState {
+				t.Helper()
+				want := &structured.AllocatedState{
+					AllocatedDevices:         sets.New(device3),
+					AllocatedSharedDeviceIDs: shared,
+					AggregatedCapacity:       structured.NewConsumedCapacityCollection(),
+				}
+				if !tc.enabledConsumableCapacity {
+					want.AllocatedDevices = want.AllocatedDevices.Union(shared)
+					want.AllocatedSharedDeviceIDs = sets.New[structured.DeviceID]()
+				} else if capacity != "" {
+					want.AggregatedCapacity.Insert(structured.NewDeviceConsumedCapacity(device1,
+						map[resourceapi.QualifiedName]resource.Quantity{"capacity": resource.MustParse(capacity)}))
+				}
+				got, err := snapshot.ResourceClaims().GatherAllocatedState()
+				if err != nil {
+					t.Fatalf("snapshotClaimTracker.GatherAllocatedState(): got unexpected error: %v", err)
+				}
+				if diff := cmp.Diff(want, got, cmpopts.EquateEmpty()); diff != "" {
+					t.Fatalf("snapshotClaimTracker.GatherAllocatedState(): unexpected output (-want +got): %s", diff)
+				}
+				return got
+			}
+
+			original := expectState(sets.New(device1, device2), "5")
+			snapshot.Fork()
+			snapshot.resourceClaims.DeleteCurrent(GetClaimId(firstShare))
+			expectState(sets.New(device1, device2), "3")
+			if tc.enabledConsumableCapacity && original.AggregatedCapacity[device1]["capacity"].Cmp(resource.MustParse("5")) != 0 {
+				t.Fatal("a later gather mutated the previously returned allocation state")
+			}
+			snapshot.Revert()
+			expectState(sets.New(device1, device2), "5")
+
+			snapshot.Fork()
+			snapshot.resourceClaims.DeleteCurrent(GetClaimId(firstShare))
+			snapshot.resourceClaims.DeleteCurrent(GetClaimId(secondShare))
+			expectState(sets.New(device2), "")
+			snapshot.Commit()
+			expectState(sets.New(device2), "")
 		})
 	}
 }
