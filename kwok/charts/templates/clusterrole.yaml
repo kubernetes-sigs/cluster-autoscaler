@@ -62,6 +62,7 @@ rules:
       - resourceslices
       - deviceclasses
       - resourceclaims
+      - resourceclaimtemplates
     verbs:
       - watch
       - list
