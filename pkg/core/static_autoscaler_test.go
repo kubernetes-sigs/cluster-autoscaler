@@ -3095,6 +3095,114 @@ func TestStaticAutoscalerRunOnceInvokesScaleDownStatusProcessor(t *testing.T) {
 
 }
 
+func TestStaticAutoscalerRunOnceHonorsScaleDownDelayAfterAsyncDeletionFailure(t *testing.T) {
+	options := config.AutoscalingOptions{
+		NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+			ScaleDownUnneededTime:         -1 * time.Nanosecond, // enforce immediate scaledown/drain for ready
+			ScaleDownUnreadyTime:          -1 * time.Nanosecond, // enforce immediate scaledown/drain for unready
+			ScaleDownUtilizationThreshold: 0.5,
+			MaxNodeProvisionTime:          10 * time.Second,
+		},
+		EstimatorName:              estimator.BinpackingEstimatorName,
+		ScaleDownEnabled:           true,
+		MaxNodesTotal:              10,
+		MaxCoresTotal:              10,
+		MaxMemoryTotal:             100000,
+		ScaleDownDelayAfterFailure: 10 * time.Hour,
+	}
+	now := time.Now()
+	n1 := BuildTestNode("n1", 1000, 1000)
+	SetNodeReadyState(n1, true, now)
+	// A highly utilized pod keeps n1 from becoming a scale-down candidate, so
+	// this loop doesn't start any new deletions and we can observe how the
+	// deletion results from a previous loop are handled on their own.
+	utilizedPod := BuildTestPod("p1", 800, 800, WithNodeName("n1"))
+
+	testCases := map[string]struct {
+		deletionResult   status.NodeDeleteResult
+		wantFailCooldown bool
+	}{
+		"failed deletion starts scale down fail cooldown": {
+			// Simulate a node deletion that was started by a previous loop and
+			// failed asynchronously. Such a failure only surfaces through
+			// DeletionResults, never through the error returned by StartDeletion.
+			deletionResult: status.NodeDeleteResult{
+				Err:        errors.NewAutoscalerError(errors.TransientError, "simulated async node deletion failure"),
+				ResultType: status.NodeDeleteErrorFailedToDelete,
+			},
+			wantFailCooldown: true,
+		},
+		"successful deletion doesn't start scale down fail cooldown": {
+			deletionResult:   status.NodeDeleteResult{ResultType: status.NodeDeleteOk},
+			wantFailCooldown: false,
+		},
+	}
+
+	for testName, test := range testCases {
+		// prevent issues with scoping, we should be able to get rid of that with Go 1.22
+		test := test
+		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
+
+			mocks := newCommonMocks()
+			tracker := deletiontracker.NewNodeDeletionTracker(0 * time.Second)
+			tracker.StartDeletion("ng1", "n2")
+			tracker.EndDeletion(context.TODO(), "ng1", "n2", test.deletionResult)
+			mocks.nodeDeletionTracker = tracker
+
+			setupConfig := &autoscalerSetupConfig{
+				autoscalingOptions: options,
+				nodeGroups: []*nodeGroup{{
+					name:  "ng1",
+					min:   0,
+					max:   10,
+					nodes: []*apiv1.Node{n1},
+				}},
+				nodeStateUpdateTime: now,
+				mocks:               mocks,
+				clusterStateConfig: clusterstate.ClusterStateRegistryConfig{
+					OkTotalUnreadyCount: 1,
+				},
+			}
+			autoscaler, err := setupAutoscaler(setupConfig)
+			assert.NoError(t, err)
+
+			statusProcessor := &scaleDownStatusProcessorMock{}
+			autoscaler.processors.ScaleDownStatusProcessor = statusProcessor
+
+			setupConfig.mocks.readyNodeLister.SetNodes([]*apiv1.Node{n1})
+			setupConfig.mocks.allNodeLister.SetNodes([]*apiv1.Node{n1})
+			setupConfig.mocks.allPodLister.On("List").Return([]*apiv1.Pod{utilizedPod}, nil)
+			setupConfig.mocks.daemonSetLister.On("List", labels.Everything()).Return([]*appsv1.DaemonSet{}, nil)
+			setupConfig.mocks.podDisruptionBudgetLister.On("List").Return([]*policyv1.PodDisruptionBudget{}, nil)
+
+			assert.True(t, autoscaler.lastScaleDownFailTime.IsZero())
+
+			err = autoscaler.RunOnce(t.Context(), now)
+			assert.NoError(t, err)
+			assert.Equal(t, 1, statusProcessor.called)
+
+			// The drained deletion result must have been consumed...
+			results, _ := autoscaler.scaleDownActuator.DeletionResults()
+			assert.Empty(t, results)
+
+			if test.wantFailCooldown {
+				// ...and a failure among the results must refresh
+				// lastScaleDownFailTime, so that a subsequent scale-down attempt
+				// is in cooldown while the configured
+				// --scale-down-delay-after-failure hasn't elapsed...
+				assert.False(t, autoscaler.lastScaleDownFailTime.IsZero())
+				assert.True(t, autoscaler.isScaleDownInCooldown(now.Add(time.Minute)))
+				// ...and the cooldown is lifted once it has.
+				assert.False(t, autoscaler.isScaleDownInCooldown(now.Add(11*time.Hour)))
+			} else {
+				assert.True(t, autoscaler.lastScaleDownFailTime.IsZero())
+				assert.False(t, autoscaler.isScaleDownInCooldown(now.Add(time.Minute)))
+			}
+		})
+	}
+}
+
 func TestFilterNodesFromSelectedGroups(t *testing.T) {
 	node1 := BuildTestNode("node1", 1000, 1000)
 	node1.Spec.ProviderID = "A"
