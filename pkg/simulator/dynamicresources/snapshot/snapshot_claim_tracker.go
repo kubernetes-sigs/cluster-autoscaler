@@ -57,7 +57,7 @@ func (ct snapshotClaimTracker) ListAllAllocatedDevices() (sets.Set[structured.De
 
 func (ct snapshotClaimTracker) GatherAllocatedState() (*structured.AllocatedState, error) {
 	allocatedDevices := sets.New[structured.DeviceID]()
-	allocatedSharedDeviceIDs := sets.New[structured.SharedDeviceID]()
+	allocatedSharedDeviceIDs := sets.New[structured.DeviceID]()
 	aggregatedCapacity := structured.NewConsumedCapacityCollection()
 
 	enabledConsumableCapacity := utilfeature.DefaultFeatureGate.Enabled(features.DRAConsumableCapacity)
@@ -69,7 +69,7 @@ func (ct snapshotClaimTracker) GatherAllocatedState() (*structured.AllocatedStat
 			},
 			enabledConsumableCapacity,
 			func(sharedDeviceID structured.SharedDeviceID) {
-				allocatedSharedDeviceIDs.Insert(sharedDeviceID)
+				allocatedSharedDeviceIDs.Insert(sharedDeviceID.GetDeviceID())
 			},
 			func(capacity structured.DeviceConsumedCapacity) {
 				aggregatedCapacity.Insert(capacity)
