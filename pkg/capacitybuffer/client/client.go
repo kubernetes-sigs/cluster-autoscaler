@@ -286,6 +286,21 @@ func (c *CapacityBufferClient) ListCapacityBuffers(namespace string) ([]*v1.Capa
 	return buffersCopy, nil
 }
 
+// GetCapacityBuffer fetches the cached object using a lister object in the client.
+//
+// WARNING: returns a raw pointer to the cached CapacityBuffer. Use DeepCopy() before mutating.
+func (c *CapacityBufferClient) GetCapacityBuffer(namespace, name string) (*v1.CapacityBuffer, error) {
+	if c.buffersLister == nil {
+		return nil, fmt.Errorf("Capacity buffer client is not configured to get capacity buffers")
+	}
+
+	buffer, err := c.buffersLister.CapacityBuffers(namespace).Get(name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get CapacityBuffer: %w", err)
+	}
+	return buffer, nil
+}
+
 // ListResourceQuotas lists all resource quotas in the passed namespace
 func (c *CapacityBufferClient) ListResourceQuotas(namespace string) ([]*corev1.ResourceQuota, error) {
 	if c.rqLister != nil {
