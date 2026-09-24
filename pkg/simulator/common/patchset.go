@@ -222,6 +222,42 @@ func (p *PatchSet[K, V]) InCurrentPatch(key K) bool {
 	return found
 }
 
+// IsForked reports whether there is a layer above the base one, which is exactly when
+// Revert has something to drop. Revert may always be called - without a Fork under it there
+// is simply nothing to discard, so no key's effective value changes.
+//
+// Callers maintaining state derived from the PatchSet need this to tell an unforked
+// PatchSet, where WalkCurrentPatchKeys reports the whole base layer, apart from one whose
+// topmost layer is about to be discarded.
+func (p *PatchSet[K, V]) IsForked() bool {
+	return len(p.patches) > 1
+}
+
+// WalkCurrentPatchKeys calls f for every key modified or deleted in the topmost patch
+// layer, stopping early if f returns false. When that layer is about to be reverted these
+// are exactly the keys whose effective value changes, which lets callers maintaining state
+// derived from the PatchSet refresh only what a Revert affects.
+//
+// Note the topmost layer is the base layer on an unforked PatchSet, and Revert does not
+// drop that one - see IsForked, which such a caller has to consult first.
+func (p *PatchSet[K, V]) WalkCurrentPatchKeys(f func(K) bool) {
+	if len(p.patches) == 0 {
+		return
+	}
+
+	currentPatch := p.patches[len(p.patches)-1]
+	for key := range currentPatch.modified {
+		if !f(key) {
+			return
+		}
+	}
+	for key := range currentPatch.deleted {
+		if !f(key) {
+			return
+		}
+	}
+}
+
 // totalKeyCount calculates an approximate total number of key-value
 // pairs across all patches taking the highest number of records possible
 // this calculation does not consider deleted records - thus it is likely
