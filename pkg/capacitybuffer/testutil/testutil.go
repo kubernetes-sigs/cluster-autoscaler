@@ -19,6 +19,7 @@ package testutil
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer"
 )
@@ -211,6 +212,13 @@ func WithStatusPodTemplateGeneration(generation int64) BufferOption {
 	}
 }
 
+// WithStatusReadyReplicas sets the Status.ReadyReplicas
+func WithStatusReadyReplicas(readyReplicas int32) BufferOption {
+	return func(b *v1.CapacityBuffer) {
+		b.Status.ReadyReplicas = &readyReplicas
+	}
+}
+
 // WithActiveProvisioningStrategy sets the ProvisioningStrategy to ActiveProvisioningStrategy
 func WithActiveProvisioningStrategy() BufferOption {
 	return func(b *v1.CapacityBuffer) {
@@ -335,5 +343,12 @@ func WithResourceQuotaScopeSelector(selector *corev1.ScopeSelector) ResourceQuot
 func WithNamespace[T metav1.Object](namespace string) func(T) {
 	return func(obj T) {
 		obj.SetNamespace(namespace)
+	}
+}
+
+// WithUID is a generic functional option that sets the UID for any Kubernetes resource.
+func WithUID[T metav1.Object](uid types.UID) func(T) {
+	return func(obj T) {
+		obj.SetUID(uid)
 	}
 }

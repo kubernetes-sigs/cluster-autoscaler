@@ -18,6 +18,7 @@ package status
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate"
@@ -48,4 +49,35 @@ func (p *NoOpAutoscalingStatusProcessor) Process(ctx context.Context, autoscalin
 
 // CleanUp cleans up the processor's internal structures.
 func (p *NoOpAutoscalingStatusProcessor) CleanUp() {
+}
+
+// CombinedAutoscalingStatusProcessor combines multiple AutoscalingStatusProcessors.
+type CombinedAutoscalingStatusProcessor struct {
+	processors []AutoscalingStatusProcessor
+}
+
+// Process runs Process of every child processor and returns combined error if any.
+func (p *CombinedAutoscalingStatusProcessor) Process(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, csr *clusterstate.ClusterStateRegistry, now time.Time) error {
+	var errs []error
+	for _, processor := range p.processors {
+		err := processor.Process(ctx, autoscalingCtx, csr, now)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// CleanUp runs Cleanup of every child processor.
+func (p *CombinedAutoscalingStatusProcessor) CleanUp() {
+	for _, processor := range p.processors {
+		processor.CleanUp()
+	}
+}
+
+// NewCombinedAutoscalingStatusProcessor returns a new CombinedAutoscalingStatusProcessor.
+func NewCombinedAutoscalingStatusProcessor(processors []AutoscalingStatusProcessor) *CombinedAutoscalingStatusProcessor {
+	return &CombinedAutoscalingStatusProcessor{
+		processors: processors,
+	}
 }

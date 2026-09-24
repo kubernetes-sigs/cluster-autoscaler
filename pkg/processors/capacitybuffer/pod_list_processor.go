@@ -93,6 +93,10 @@ func (p *CapacityBufferPodListProcessor) Process(ctx context.Context, autoscalin
 		return unschedulablePods, nil
 	}
 	buffers = p.filterBuffersProvStrategy(buffers)
+	// All buffers with an allowed provisioning strategy are considered processed by this
+	// processor, even if they're filtered out below or no fake pods are created for them.
+	// This is done in order for their .status.readyReplicas to be set to 0.
+	p.markBuffersProcessed(buffers)
 	_, buffers = p.statusFilter.Filter(ctx, buffers)
 	_, buffers = p.podTemplateGenFilter.Filter(ctx, buffers)
 
@@ -117,6 +121,15 @@ func (p *CapacityBufferPodListProcessor) updateCapacityBufferRegistry(fakePods [
 	}
 	for _, fakePod := range fakePods {
 		p.buffersRegistry.SetCapacityBuffer(fakePod.UID, buffer)
+	}
+}
+
+func (p *CapacityBufferPodListProcessor) markBuffersProcessed(buffers []*v1beta1.CapacityBuffer) {
+	if p.buffersRegistry == nil {
+		return
+	}
+	for _, buffer := range buffers {
+		p.buffersRegistry.MarkProcessed(buffer)
 	}
 }
 

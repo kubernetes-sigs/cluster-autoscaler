@@ -96,7 +96,9 @@ e2e-install-ca: image-kwok
 		--set extraArgs.scale-down-unneeded-time=10s \
 		--set extraArgs.scale-down-delay-after-add=0s \
 		--set extraArgs.unremovable-node-recheck-timeout=0s \
-		--set extraArgs.enable-csi-node-aware-scheduling=false
+		--set extraArgs.enable-csi-node-aware-scheduling=false \
+		--set extraArgs.capacity-buffer-controller-enabled=true \
+		--set extraArgs.capacity-buffer-pod-injection-enabled=true
 
 .PHONY: e2e-teardown
 e2e-teardown:
