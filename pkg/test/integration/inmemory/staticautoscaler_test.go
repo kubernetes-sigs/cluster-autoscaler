@@ -17,7 +17,6 @@ limitations under the License.
 package inmemory
 
 import (
-	"context"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -48,7 +47,7 @@ func TestStaticAutoscaler_FullLifecycle(t *testing.T) {
 	fakes := infra.Fakes
 
 	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := test.GetTestContextWithCancel(t)
 		defer synctestutils.TearDown(cancel)
 
 		autoscaler, _, err := integration.DefaultAutoscalingBuilder(options, infra).Build(ctx)
@@ -64,8 +63,8 @@ func TestStaticAutoscaler_FullLifecycle(t *testing.T) {
 		fakes.K8s.AddPod(p)
 
 		// Run a loop, CA should scale up a single Node for the pending Pod.
-		synctestutils.MustRunOnceAfter(t, autoscaler, stepDuration)
-		tg1, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(context.Background())
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, stepDuration)
+		tg1, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(ctx)
 		assert.Equal(t, 2, tg1)
 		assert.Equal(t, 2, len(fakes.K8s.Nodes().Items))
 
@@ -73,11 +72,11 @@ func TestStaticAutoscaler_FullLifecycle(t *testing.T) {
 		fakes.K8s.DeletePod(p.Namespace, p.Name)
 
 		// Run CA loop once to mark the Node as unneeded.
-		synctestutils.MustRunOnceAfter(t, autoscaler, stepDuration)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, stepDuration)
 		// Run another CA loop after the unneeded time elapses, CA should delete the Node.
-		synctestutils.MustRunOnceAfter(t, autoscaler, unneededTime+time.Nanosecond)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, unneededTime+time.Nanosecond)
 
-		finalSize, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(context.Background())
+		finalSize, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(ctx)
 		assert.Equal(t, 1, finalSize)
 	})
 }
@@ -90,7 +89,7 @@ func TestScaleUp_ResourceLimits(t *testing.T) {
 	fakes := infra.Fakes
 
 	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := test.GetTestContextWithCancel(t)
 		defer synctestutils.TearDown(cancel)
 
 		autoscaler, _, err := integration.DefaultAutoscalingBuilder(options, infra).Build(ctx)
@@ -106,15 +105,15 @@ func TestScaleUp_ResourceLimits(t *testing.T) {
 		// Scale-up should be blocked.
 		fakes.CloudProvider.SetResourceLimit(cloudprovider.ResourceNameCores, 0, 1)
 
-		synctestutils.MustRunOnceAfter(t, autoscaler, unneededTime)
-		size, _ := fakes.CloudProvider.GetNodeGroup("ng").TargetSize(context.Background())
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, unneededTime)
+		size, _ := fakes.CloudProvider.GetNodeGroup("ng").TargetSize(ctx)
 		assert.Equal(t, 1, size, "Should not scale up when max cores limit is reached")
 
 		// Scale-up should succeed.
 		fakes.CloudProvider.SetResourceLimit(cloudprovider.ResourceNameCores, 0, 2)
 
-		synctestutils.MustRunOnceAfter(t, autoscaler, unneededTime)
-		newSize, _ := fakes.CloudProvider.GetNodeGroup("ng").TargetSize(context.Background())
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, unneededTime)
+		newSize, _ := fakes.CloudProvider.GetNodeGroup("ng").TargetSize(ctx)
 		assert.Equal(t, 2, newSize, "Should scale up after resource limit is increased")
 	})
 }
@@ -133,7 +132,7 @@ func TestFixNodeGroupSize_ZeroOrMaxNodeScaling(t *testing.T) {
 	fakes := infra.Fakes
 
 	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := test.GetTestContextWithCancel(t)
 		defer synctestutils.TearDown(cancel)
 
 		autoscaler, _, err := integration.DefaultAutoscalingBuilder(options, infra).Build(ctx)
@@ -157,18 +156,18 @@ func TestFixNodeGroupSize_ZeroOrMaxNodeScaling(t *testing.T) {
 		fakes.K8s.AddPod(test.BuildScheduledTestPod("pod-1", 1000, 1000, "atomic-ng-node-1"))
 
 		// First cycle: Autoscaler initializes cluster state with the 2 registered nodes.
-		synctestutils.MustRunOnceAfter(t, autoscaler, time.Second)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, time.Second)
 
 		// Simulate discrepancy: TargetSize is 4 in cloud provider, but only 2 nodes exist.
 		ng.SetTargetSize(4)
 
 		// Second cycle: Autoscaler observes discrepancy (2 registered nodes vs target 4).
-		synctestutils.MustRunOnceAfter(t, autoscaler, time.Second)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, time.Second)
 
 		// Third cycle: Advance time past MaxNodeProvisionTime (10s).
 		// fixNodeGroupSize triggers: for ZeroOrMaxNodeScaling, it skips decreasing target size.
 		// RunOnce succeeds without error.
-		err = synctestutils.RunOnceAfter(t, autoscaler, 15*time.Second)
+		err = synctestutils.RunOnceAfter(ctx, t, autoscaler, 15*time.Second)
 		assert.NoError(t, err)
 
 		// Verify target size was not decreased and remained 4.
