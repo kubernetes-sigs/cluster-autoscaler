@@ -214,9 +214,13 @@ func AddTaints(ctx context.Context, node *apiv1.Node, client kube_client.Interfa
 		if refresh {
 			// Get the newest version of the node.
 			freshNode, err = client.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
-			if err != nil || freshNode == nil {
+			if err != nil {
 				logger.Info("Error while adding taints on node", "taints", strings.Join(taintKeys(taints), ","), "node", klog.KObj(node), "err", err)
-				return nil, fmt.Errorf("failed to get node %v: %v", node.Name, err)
+				return nil, fmt.Errorf("failed to get node %v: %w", node.Name, err)
+			}
+			if freshNode == nil {
+				logger.Info("Error while adding taints on node: node is nil", "taints", strings.Join(taintKeys(taints), ","), "node", klog.KObj(node))
+				return nil, fmt.Errorf("failed to get node %v: node is nil", node.Name)
 			}
 		}
 
@@ -331,9 +335,13 @@ func CleanTaints(ctx context.Context, node *apiv1.Node, client kube_client.Inter
 		if refresh {
 			// Get the newest version of the node.
 			freshNode, err = client.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
-			if err != nil || freshNode == nil {
+			if err != nil {
 				logger.Info("Error while removing taints", "taints", strings.Join(taintKeys, ","), "node", klog.KObj(node), "err", err)
-				return nil, fmt.Errorf("failed to get node %v: %v", node.Name, err)
+				return nil, fmt.Errorf("failed to get node %v: %w", node.Name, err)
+			}
+			if freshNode == nil {
+				logger.Info("Error while removing taints: node is nil", "taints", strings.Join(taintKeys, ","), "node", klog.KObj(node))
+				return nil, fmt.Errorf("failed to get node %v: node is nil", node.Name)
 			}
 		}
 		newTaints := make([]apiv1.Taint, 0)
