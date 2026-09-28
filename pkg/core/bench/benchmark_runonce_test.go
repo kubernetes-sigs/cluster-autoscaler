@@ -35,9 +35,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apimachineryruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/kubernetes/fake"
 	k8s_testing "k8s.io/client-go/testing"
+	featuretesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/features"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -513,6 +516,72 @@ func setupScaleUpDRA(nodes int) func(*integration.FakeSet) error {
 	}
 }
 
+// labelNodeHostnames sets a unique kubernetes.io/hostname label on every existing node, so that
+// hostname-scoped (anti)affinity terms can match on them. Simulated scale-up nodes get theirs
+// from the node template sanitizer.
+func labelNodeHostnames(clusterFakes *integration.FakeSet) {
+	for _, node := range clusterFakes.K8s.Nodes().Items {
+		node.Labels[corev1.LabelHostname] = node.Name
+		clusterFakes.K8s.UpdateNode(&node)
+	}
+}
+
+// setupScaleUpAntiAffinity prepares a large stable cluster with resident anti-affinity pods and
+// a mixed pending burst: schedulable pods that fit on existing free capacity, and spread pods
+// with required hostname anti-affinity to each other that fit only on new nodes. Every simulated
+// placement reads the affinity node lists, and every spread pod placed during binpacking updates
+// them, all against a cluster-sized node list.
+func setupScaleUpAntiAffinity(existingNodes, schedulablePods, spreadPods int) func(*integration.FakeSet) error {
+	return func(clusterFakes *integration.FakeSet) error {
+		nTemplate := BuildTestNode("n-template", nodeCPU, nodeMem)
+		SetNodeReadyState(nTemplate, true, time.Now())
+
+		ng := clusterFakes.CloudProvider.AddNodeGroup(ngName,
+			testprovider.WithNodes(nTemplate, existingNodes),
+			testprovider.WithNGSize(0, maxNGSize),
+		)
+		labelNodeHostnames(clusterFakes)
+
+		// One filler pod per node at 60% utilisation, leaving 40% free.
+		for i := range existingNodes {
+			podName := fmt.Sprintf("pod-fill-%d", i)
+			pod := BuildTestPod(podName, int64(nodeCPU*6/10), int64(nodeMem*6/10))
+			pod.Spec.NodeName = fmt.Sprintf("%s-node-%d", ng.Id(), i)
+			clusterFakes.K8s.AddPod(pod)
+		}
+
+		// Resident anti-affinity pods on every 20th node keep the affinity node lists non-empty.
+		antiAffinityLabels := map[string]string{"app": "anti-affinity-app"}
+		for i := 0; i < existingNodes; i += 20 {
+			podName := fmt.Sprintf("pod-aa-%d", i)
+			pod := BuildTestPod(podName, int64(nodeCPU/10), int64(nodeMem/10),
+				WithLabels(antiAffinityLabels), WithPodHostnameAntiAffinity(antiAffinityLabels))
+			pod.Spec.NodeName = fmt.Sprintf("%s-node-%d", ng.Id(), i)
+			clusterFakes.K8s.AddPod(pod)
+		}
+
+		// Pending pods at 1% of node resources each. They fit on existing free capacity, so
+		// they are filtered out as schedulable rather than triggering a scale-up.
+		for i := range schedulablePods {
+			podName := fmt.Sprintf("pod-pending-%d", i)
+			pod := BuildTestPod(podName, int64(nodeCPU/100), int64(nodeMem/100), MarkUnschedulable())
+			clusterFakes.K8s.AddPod(pod)
+		}
+
+		// Pending spread pods at 45% of node resources with required hostname anti-affinity to
+		// each other. They don't fit in the 40% free on existing nodes, and the anti-affinity
+		// allows only one per new node, so each spread pod scales up one node.
+		spreadLabels := map[string]string{"app": "spread-app"}
+		for i := range spreadPods {
+			podName := fmt.Sprintf("pod-spread-%d", i)
+			pod := BuildTestPod(podName, int64(nodeCPU*45/100), int64(nodeMem*45/100), MarkUnschedulable(),
+				WithLabels(spreadLabels), WithPodHostnameAntiAffinity(spreadLabels))
+			clusterFakes.K8s.AddPod(pod)
+		}
+		return nil
+	}
+}
+
 // setupScaleDown60Percent prepares a scenario where the workload is reduced such
 // that it fits on 40% of the existing nodes, triggering a 60% scale-down.
 // Each node starts with 40 pods, each consuming 1% of the node's resources,
@@ -543,6 +612,52 @@ func setupScaleDown60Percent(nodesCount int) func(*integration.FakeSet) error {
 			clusterFakes.K8s.AddPod(pod)
 		}
 
+		return nil
+	}
+}
+
+// setupScaleDownAntiAffinity prepares a scale-down scenario on a large cluster where every 10th
+// node hosts a non-evictable pod with required hostname anti-affinity, so the affinity node
+// lists are read and invalidated for every pod rescheduled during drain simulation, against a
+// cluster-sized node list.
+func setupScaleDownAntiAffinity(nodesCount int) func(*integration.FakeSet) error {
+	return func(clusterFakes *integration.FakeSet) error {
+		nTemplate := BuildTestNode("n-template", nodeCPU, nodeMem)
+		SetNodeReadyState(nTemplate, true, time.Now())
+
+		ng := clusterFakes.CloudProvider.AddNodeGroup(ngName,
+			testprovider.WithNodes(nTemplate, nodesCount),
+			testprovider.WithNGSize(0, maxNGSize),
+		)
+		labelNodeHostnames(clusterFakes)
+
+		// Create 20 pods per node.
+		// Each pod uses 1% of a node's resources, leading to 20% utilization.
+		for i := range nodesCount * 20 {
+			podName := fmt.Sprintf("pod-%d", i)
+			nodeName := fmt.Sprintf("%s-node-%d", ng.Id(), i%nodesCount)
+			cpu := int64(nodeCPU / 100)
+			mem := int64(nodeMem / 100)
+			pod := BuildTestPod(podName, cpu, mem)
+			pod.Spec.NodeName = nodeName
+			if pod.Annotations == nil {
+				pod.Annotations = make(map[string]string)
+			}
+			pod.Annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"] = "true"
+			clusterFakes.K8s.AddPod(pod)
+		}
+
+		// Anti-affinity pods use 20% of node resources and aren't safe-to-evict,
+		// so their nodes are never scaled down.
+		antiAffinityLabels := map[string]string{"app": "anti-affinity-app"}
+		for i := 0; i < nodesCount; i += 10 {
+			podName := fmt.Sprintf("pod-aa-%d", i)
+			nodeName := fmt.Sprintf("%s-node-%d", ng.Id(), i)
+			pod := BuildTestPod(podName, int64(nodeCPU/5), int64(nodeMem/5),
+				WithLabels(antiAffinityLabels), WithPodHostnameAntiAffinity(antiAffinityLabels))
+			pod.Spec.NodeName = nodeName
+			clusterFakes.K8s.AddPod(pod)
+		}
 		return nil
 	}
 }
@@ -757,10 +872,44 @@ func BenchmarkRunOnceScaleUpDRA(b *testing.B) {
 	s.run(b)
 }
 
+func BenchmarkRunOnceScaleUpAntiAffinity(b *testing.B) {
+	featuretesting.SetFeatureGateDuringTest(b, utilfeature.DefaultFeatureGate, features.InterPodAffinityHostnameFastPath, true)
+	const existingNodes = 3000
+	const spreadPods = 500
+	s := scenario{
+		setup:  setupScaleUpAntiAffinity(existingNodes, 5000, spreadPods),
+		verify: verifyTargetSize(existingNodes + spreadPods),
+		config: func(opts *config.AutoscalingOptions) {
+			opts.MaxNodesPerScaleUp = maxNGSize
+		},
+	}
+	s.run(b)
+}
+
 func BenchmarkRunOnceScaleDown(b *testing.B) {
 	s := scenario{
 		setup:  setupScaleDown60Percent(2000),
 		verify: verifyToBeDeleted(1200),
+		config: func(opts *config.AutoscalingOptions) {
+			opts.NodeGroupDefaults.ScaleDownUnneededTime = 0
+			opts.MaxScaleDownParallelism = 2000
+			opts.MaxDrainParallelism = 2000
+			opts.ScaleDownDelayAfterAdd = 0
+			opts.ScaleDownEnabled = true
+			opts.ScaleDownNonEmptyCandidatesCount = 2000
+			opts.ScaleDownUnreadyEnabled = true
+			opts.ScaleDownSimulationTimeout = 60 * time.Second
+		},
+	}
+	s.run(b)
+}
+
+func BenchmarkRunOnceScaleDownAntiAffinity(b *testing.B) {
+	featuretesting.SetFeatureGateDuringTest(b, utilfeature.DefaultFeatureGate, features.InterPodAffinityHostnameFastPath, true)
+	s := scenario{
+		setup: setupScaleDownAntiAffinity(2000),
+		// 1800 drainable nodes at 20% repack into 240 of them + spare capacity on the anti-affinity nodes -> 1560 drained.
+		verify: verifyToBeDeleted(1560),
 		config: func(opts *config.AutoscalingOptions) {
 			opts.NodeGroupDefaults.ScaleDownUnneededTime = 0
 			opts.MaxScaleDownParallelism = 2000
