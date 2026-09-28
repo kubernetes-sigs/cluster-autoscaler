@@ -19,6 +19,7 @@ package actuation
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -48,6 +49,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupconfig"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/utilization"
+	caerrors "sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
@@ -525,6 +527,19 @@ func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suf
 				"test-node-1": {
 					{toBeDeletedTaint},
 				},
+				// The other drain nodes are tainted and then reverted, because one drain node failed.
+				"test-node-3": {
+					{toBeDeletedTaint},
+					{},
+				},
+				"test-node-4": {
+					{toBeDeletedTaint},
+					{},
+				},
+				"test-node-5": {
+					{toBeDeletedTaint},
+					{},
+				},
 			},
 			wantNodeDeleteResults: map[string]status.NodeDeleteResult{
 				"test-node-0": {ResultType: status.NodeDeleteOk},
@@ -572,6 +587,26 @@ func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suf
 				},
 				"test-node-1": {
 					{toBeDeletedTaint},
+				},
+				"atomic-6-node-0": {
+					{toBeDeletedTaint},
+					{},
+				},
+				"atomic-6-node-1": {
+					{toBeDeletedTaint},
+					{},
+				},
+				"atomic-6-node-3": {
+					{toBeDeletedTaint},
+					{},
+				},
+				"atomic-6-node-4": {
+					{toBeDeletedTaint},
+					{},
+				},
+				"atomic-6-node-5": {
+					{toBeDeletedTaint},
+					{},
 				},
 			},
 			wantNodeDeleteResults: map[string]status.NodeDeleteResult{
@@ -1093,6 +1128,7 @@ func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suf
 }
 
 func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
+	ctx := GetTestContext(t)
 	// Insert all nodes into a map to support live node updates and GETs.
 	emptyNodeGroupViews, drainNodeGroupViews := []*budgets.NodeGroupView{}, []*budgets.NodeGroupView{}
 	allEmptyNodes, allDrainNodes := []*apiv1.Node{}, []*apiv1.Node{}
@@ -1126,7 +1162,14 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 		nodeName string
 		taints   []apiv1.Taint
 	}
-	taintUpdates := make(chan nodeTaints, 20)
+	allUpdatesCount := 0
+	for _, updates := range tc.wantTaintUpdates {
+		allUpdatesCount += len(updates)
+	}
+	// Nothing reads taintUpdates until all deletion results are in, and the update reactor sends to it while holding
+	// nodesLock, so the buffer has to fit every update. The extra room lets unexpected updates show up in the diff
+	// instead of blocking the reactor.
+	taintUpdates := make(chan nodeTaints, allUpdatesCount+2*len(nodesByName))
 	deletedNodes := make(chan string, 10)
 	deletedPods := make(chan string, 10)
 
@@ -1154,7 +1197,8 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 			defer nodesLock.Unlock()
 			update := action.(core.UpdateAction)
 			obj := update.GetObject().(*apiv1.Node)
-			if tc.failedNodeTaint[obj.Name] {
+			// Checking if a node has ToBeDeletedTaint allows reactor to fail attempts to add the taint, without failing attempts to untaint it.
+			if tc.failedNodeTaint[obj.Name] && taints.HasToBeDeletedTaint(obj) {
 				return true, nil, fmt.Errorf("SIMULATED ERROR: won't taint")
 			}
 			nt := nodeTaints{
@@ -1290,9 +1334,9 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 	var gotScaleDownNodes []*status.ScaleDownNode
 	var gotErr error
 	if force {
-		gotResult, gotScaleDownNodes, gotErr = actuator.StartForceDeletion(context.Background(), allEmptyNodes, allDrainNodes)
+		gotResult, gotScaleDownNodes, gotErr = actuator.StartForceDeletion(ctx, allEmptyNodes, allDrainNodes)
 	} else {
-		gotResult, gotScaleDownNodes, gotErr = actuator.StartDeletion(context.Background(), allEmptyNodes, allDrainNodes)
+		gotResult, gotScaleDownNodes, gotErr = actuator.StartDeletion(ctx, allEmptyNodes, allDrainNodes)
 	}
 
 	if diff := cmp.Diff(tc.wantErr, gotErr, cmpopts.EquateErrors()); diff != "" {
@@ -1345,32 +1389,9 @@ podsLoop:
 		t.Errorf("deletedPods diff (-want +got):\n%s", diff)
 	}
 
-	// Verify that all expected taint updates happened using the fake k8s client hook.
-	allUpdatesCount := 0
-	for _, updates := range tc.wantTaintUpdates {
-		allUpdatesCount += len(updates)
-	}
-	gotTaintUpdates := make(map[string][][]apiv1.Taint)
-taintsLoop:
-	for i := 0; i < allUpdatesCount; i++ {
-		select {
-		case taintUpdate := <-taintUpdates:
-			gotTaintUpdates[taintUpdate.nodeName] = append(gotTaintUpdates[taintUpdate.nodeName], taintUpdate.taints)
-		case <-time.After(3 * time.Second):
-			t.Errorf("Timeout while waiting for taint updates.")
-			break taintsLoop
-		}
-	}
-	startupTaintValue := cmpopts.IgnoreFields(apiv1.Taint{}, "Value")
-	if diff := cmp.Diff(tc.wantTaintUpdates, gotTaintUpdates, startupTaintValue, cmpopts.EquateEmpty()); diff != "" {
-		t.Errorf("taintUpdates diff (-want +got):\n%s", diff)
-	}
-
-	// Wait for all expected deletions to be reported in NodeDeletionTracker. Reporting happens shortly after the deletion
-	// in cloud provider we sync to above and so this will usually not wait at all. However, it can still happen
-	// that there is a delay between cloud provider deletion and reporting, in which case the results are not there yet
-	// and we need to wait for them before asserting.
-	err = waitForDeletionResultsCount(actuator.nodeDeletionTracker, len(tc.wantNodeDeleteResults), 3*time.Second, 200*time.Millisecond)
+	// Wait for all expected deletions (including failed drains/deletions that clean up taints before
+	// calling EndDeletion) to be reported in NodeDeletionTracker before asserting on taint updates.
+	err = waitForDeletionResultsCount(actuator.nodeDeletionTracker, len(tc.wantNodeDeleteResults), 3*time.Second, 5*time.Millisecond)
 	if err != nil {
 		t.Errorf("Timeout while waiting for node deletion results")
 	}
@@ -1379,6 +1400,24 @@ taintsLoop:
 	nodeDeleteResults, _ := actuator.DeletionResults()
 	if diff := cmp.Diff(tc.wantNodeDeleteResults, nodeDeleteResults, cmpopts.EquateEmpty(), cmpopts.EquateErrors()); diff != "" {
 		t.Errorf("NodeDeleteResults diff (-want +got):\n%s", diff)
+	}
+
+	// Collect all taint updates recorded by the fake k8s client hook.
+	// Because StartDeletion and all background EndDeletion calls have completed above,
+	// all taint updates have already been pushed to the buffered taintUpdates channel.
+	gotTaintUpdates := make(map[string][][]apiv1.Taint)
+extraTaintsLoop:
+	for {
+		select {
+		case taintUpdate := <-taintUpdates:
+			gotTaintUpdates[taintUpdate.nodeName] = append(gotTaintUpdates[taintUpdate.nodeName], taintUpdate.taints)
+		default:
+			break extraTaintsLoop
+		}
+	}
+	startupTaintValue := cmpopts.IgnoreFields(apiv1.Taint{}, "Value")
+	if diff := cmp.Diff(tc.wantTaintUpdates, gotTaintUpdates, startupTaintValue, cmpopts.EquateEmpty()); diff != "" {
+		t.Errorf("taintUpdates diff (-want +got):\n%s", diff)
 	}
 }
 
@@ -1754,4 +1793,72 @@ func waitForDeletionResultsCount(ndt *deletiontracker.NodeDeletionTracker, resul
 		}
 	}
 	return fmt.Errorf("timed out while waiting for node deletion results")
+}
+
+func TestSummarizeTaintErrors(t *testing.T) {
+	// taintNode wraps API errors like this.
+	wrap := func(err error) error { return caerrors.ToAutoscalerError(caerrors.ApiCallError, err) }
+	nodeResource := apiv1.Resource("nodes")
+	testCases := []struct {
+		name        string
+		failedNodes map[string]error
+		wantSummary map[string]int
+	}{
+		{
+			name: "mixed errors",
+			failedNodes: map[string]error{
+				"n1": wrap(errors.NewTooManyRequests("throttled", 1)),
+				"n2": wrap(errors.NewTooManyRequests("throttled", 1)),
+				"n3": wrap(errors.NewServiceUnavailable("unavailable")),
+				"n4": wrap(errors.NewConflict(nodeResource, "n4", fmt.Errorf("conflict"))),
+				"n5": wrap(fmt.Errorf("connection refused")),
+			},
+			wantSummary: map[string]int{
+				"Conflict(409)":           1,
+				"OTHER":                   1,
+				"ServiceUnavailable(503)": 1,
+				"TooManyRequests(429)":    2,
+			},
+		},
+		{
+			name: "5xx without a known reason uses the HTTP status text",
+			failedNodes: map[string]error{
+				"n1": wrap(&errors.StatusError{ErrStatus: metav1.Status{Code: http.StatusBadGateway}}),
+			},
+			wantSummary: map[string]int{
+				"Bad Gateway(502)": 1,
+			},
+		},
+		{
+			name: "internal error",
+			failedNodes: map[string]error{
+				"n1": wrap(errors.NewInternalError(fmt.Errorf("boom"))),
+			},
+			wantSummary: map[string]int{
+				"InternalError(500)": 1,
+			},
+		},
+		{
+			name: "API error wrapped with fmt.Errorf keeps its code",
+			failedNodes: map[string]error{
+				"n1": wrap(fmt.Errorf("failed to get node n1: %w", errors.NewTooManyRequests("throttled", 1))),
+			},
+			wantSummary: map[string]int{
+				"TooManyRequests(429)": 1,
+			},
+		},
+		{
+			name:        "empty map",
+			failedNodes: map[string]error{},
+			wantSummary: map[string]int{},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotSummary := summarizeTaintErrors(tc.failedNodes)
+			if diff := cmp.Diff(tc.wantSummary, gotSummary, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("summary diff (-want +got):\n%s", diff)
+			}
+		})
+	}
 }
