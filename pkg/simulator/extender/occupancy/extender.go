@@ -44,6 +44,9 @@ type Extender struct {
 	resources []string
 }
 
+// Filter evaluates pod against each node and its complete resident occupancy
+// without mutating the supplied objects. It returns feasible nodes and failure
+// reasons, or an error if the request, transport or acknowledged response is invalid.
 func (e *Extender) Filter(pod *v1.Pod, nodes []fwk.NodeInfo) ([]fwk.NodeInfo, extenderv1.FailedNodesMap, extenderv1.FailedNodesMap, error) {
 	body, err := e.buildRequest(pod, nodes)
 	if err != nil {

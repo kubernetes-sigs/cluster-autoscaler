@@ -23,7 +23,8 @@ import (
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
 
-// Version identifies a local experiment, not an accepted Kubernetes API.
+// Version identifies the opt-in occupancy contract, which is not part of the
+// standard Kubernetes scheduler extender API.
 const Version = "experimental-full-occupancy-v1alpha1"
 
 // Preserve requires the evaluator to validate and retain the Pod's assignment.
@@ -43,6 +44,8 @@ type Allocation struct {
 	Mode string `json:"mode"`
 }
 
+// Resident describes a Pod occupying a candidate node and whether its device
+// assignment must be preserved or computed afresh during feasibility evaluation.
 type Resident struct {
 	Pod        *v1.Pod    `json:"pod"`
 	Allocation Allocation `json:"allocation"`
@@ -73,6 +76,9 @@ type Request struct {
 	Simulation *Input `json:"simulation,omitempty"`
 }
 
+// Result extends a Filter response with acknowledgement of the occupancy request.
+// A successful occupancy evaluation requires Simulation to match the request's
+// protocol version and digest.
 type Result struct {
 	extenderv1.ExtenderFilterResult
 	Simulation *Ack `json:"simulation,omitempty"`
