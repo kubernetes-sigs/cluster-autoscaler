@@ -22,10 +22,14 @@ import (
 
 	apiv1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/dynamic-resource-allocation/resourceclaim"
+	"k8s.io/klog/v2"
 	schedulerinterface "k8s.io/kube-scheduler/framework"
+	"k8s.io/kubernetes/pkg/features"
 	schedulerimpl "k8s.io/kubernetes/pkg/scheduler/framework"
+	schedulerdra "k8s.io/kubernetes/pkg/scheduler/framework/plugins/dynamicresources"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
 	csisnapshot "sigs.k8s.io/cluster-autoscaler/pkg/simulator/csi/snapshot"
 	drasnapshot "sigs.k8s.io/cluster-autoscaler/pkg/simulator/dynamicresources/snapshot"
@@ -473,6 +477,12 @@ func (s *PredicateSnapshot) modifyResourceClaimsForScheduledPod(pod *apiv1.Pod, 
 	// manually here. It shouldn't fail, it only fails if ReservedFor is at max length already, but that is checked during the Filter phase.
 	if err := s.draSnapshot.ReservePodClaims(pod); err != nil {
 		return fmt.Errorf("couldn't add pod %s/%s reservations to claims, this shouldn't happen: %v", pod.Namespace, pod.Name, err)
+	}
+
+	// Extract node-allocatable claim statuses computed by the DRA plugin in the Filter stage.
+	// This is used for resource accounting in PodRequests()
+	if feature.DefaultFeatureGate.Enabled(features.DRANodeAllocatableResources) {
+		pod.Status.NodeAllocatableResourceClaimStatuses = schedulerdra.ExtractPodNodeAllocatableResourceClaimStatus(klog.Background(), postFilterState, node.Name)
 	}
 	return nil
 }
