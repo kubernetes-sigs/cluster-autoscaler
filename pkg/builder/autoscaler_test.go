@@ -18,31 +18,52 @@ package builder
 
 import (
 	"context"
+	"testing"
+	"testing/synctest"
+	"time"
+
 	"github.com/stretchr/testify/assert"
+	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	schedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
+	schedulerconfiglatest "k8s.io/kubernetes/pkg/scheduler/apis/config/latest"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/debuggingsnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/expander"
 	"sigs.k8s.io/cluster-autoscaler/pkg/loop"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/gpu"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"testing"
-	"testing/synctest"
-	"time"
 )
 
 func TestAutoscalerBuilderNoError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
+		customResource := apiv1.ResourceName("example.com/extender-managed-resource")
+		originalGPUVendorResourceNames := append([]apiv1.ResourceName(nil), gpu.GPUVendorResourceNames...)
+		t.Cleanup(func() {
+			gpu.GPUVendorResourceNames = originalGPUVendorResourceNames
+		})
+
+		schedulerConfig, err := schedulerconfiglatest.Default()
+		assert.NoError(t, err)
+		schedulerConfig.Extenders = []schedulerconfig.Extender{{
+			URLPrefix:  "http://127.0.0.1",
+			FilterVerb: "filter",
+			ManagedResources: []schedulerconfig.ExtenderManagedResource{{
+				Name: string(customResource),
+			}},
+		}}
 
 		options := config.AutoscalingOptions{
 			CloudProviderName: "gce",
 			EstimatorName:     estimator.BinpackingEstimatorName,
 			ExpanderNames:     expander.LeastWasteExpanderName,
+			SchedulerConfig:   schedulerConfig,
 		}
 
 		debuggingSnapshotter := debuggingsnapshot.NewDebuggingSnapshotter(false)
@@ -67,6 +88,7 @@ func TestAutoscalerBuilderNoError(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, autoscaler)
 		assert.NotNil(t, trigger)
+		assert.Contains(t, gpu.GPUVendorResourceNames, customResource)
 
 		cancel()
 

@@ -143,6 +143,8 @@ func (s *PredicateSnapshot) setClusterStatePods(ctx context.Context, nodeInfos [
 		}
 
 		podInfo := framework.NewPodInfo(pod, claims)
+		// Nominated pods occupy the snapshot but do not have a real device binding.
+		podInfo.SimulatedPlacement = pod.Spec.NodeName == "" && pod.Status.NominatedNodeName != ""
 		podInfosForNode[nodeIdx] = append(podInfosForNode[nodeIdx], podInfo)
 	}
 
@@ -282,6 +284,7 @@ func (s *PredicateSnapshot) SchedulePod(pod *apiv1.Pod, nodeName string) cluster
 	if err != nil {
 		return clustersnapshot.NewSchedulingInternalError(pod, err.Error())
 	}
+	podInfo.SimulatedPlacement = true
 	if err := s.ClusterSnapshotStore.StorePodInfo(podInfo, nodeName); err != nil {
 		return clustersnapshot.NewSchedulingInternalError(pod, err.Error())
 	}
@@ -310,6 +313,7 @@ func (s *PredicateSnapshot) SchedulePodOnAnyNodeMatching(pod *apiv1.Pod, opts cl
 	if err != nil {
 		return "", clustersnapshot.NewSchedulingInternalError(pod, err.Error())
 	}
+	podInfo.SimulatedPlacement = true
 	if err := s.ClusterSnapshotStore.StorePodInfo(podInfo, node.Name); err != nil {
 		return "", clustersnapshot.NewSchedulingInternalError(pod, err.Error())
 	}

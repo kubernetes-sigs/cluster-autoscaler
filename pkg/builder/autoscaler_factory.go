@@ -20,7 +20,9 @@ import (
 	"context"
 	"strings"
 
+	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
+	scheduler_config "k8s.io/kubernetes/pkg/scheduler/apis/config"
 	cloudBuilder "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/builder"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core"
@@ -40,6 +42,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/backoff"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/gpu"
 )
 
 // NewAutoscaler creates an autoscaler of an appropriate type according to the parameters
@@ -73,6 +76,17 @@ func NewAutoscaler(ctx context.Context, opts coreoptions.AutoscalerOptions, info
 	), nil
 }
 
+func registerExtenderManagedResources(schedConfig *scheduler_config.KubeSchedulerConfiguration) {
+	if schedConfig == nil {
+		return
+	}
+	for _, extender := range schedConfig.Extenders {
+		for _, managedResource := range extender.ManagedResources {
+			gpu.RegisterGPUResourceNames(apiv1.ResourceName(managedResource.Name))
+		}
+	}
+}
+
 // Initialize default options if not provided.
 func initializeDefaultOptions(ctx context.Context, opts *coreoptions.AutoscalerOptions, informerFactory informers.SharedInformerFactory) error {
 	if opts.Processors == nil {
@@ -81,12 +95,16 @@ func initializeDefaultOptions(ctx context.Context, opts *coreoptions.AutoscalerO
 	if opts.AutoscalingKubeClients == nil {
 		opts.AutoscalingKubeClients = ca_context.NewAutoscalingKubeClients(ctx, opts.AutoscalingOptions, opts.KubeClient, opts.InformerFactory)
 	}
+	registerExtenderManagedResources(opts.SchedulerConfig)
 	if opts.FrameworkHandle == nil {
 		fwHandle, err := framework.NewHandle(ctx, opts.InformerFactory, opts.SchedulerConfig, opts.DynamicResourceAllocationEnabled, opts.CSINodeAwareSchedulingEnabled)
 		if err != nil {
 			return err
 		}
 		opts.FrameworkHandle = fwHandle
+	}
+	if err := opts.FrameworkHandle.ConfigureExtenderOccupancy(opts.SchedulerConfig, opts.ExtenderOccupancyURLs); err != nil {
+		return err
 	}
 	if opts.ClusterSnapshot == nil {
 		opts.ClusterSnapshot = predicate.NewPredicateSnapshot(store.NewBasicSnapshotStore(), opts.FrameworkHandle, opts.DynamicResourceAllocationEnabled, opts.PredicateParallelism, opts.CSINodeAwareSchedulingEnabled, opts.SchedulerVerbosityOffset)
