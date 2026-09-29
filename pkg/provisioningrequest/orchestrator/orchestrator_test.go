@@ -19,12 +19,14 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -429,7 +431,7 @@ func TestScaleUp(t *testing.T) {
 			}
 
 			client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, testProvReqs...)
-			orchestrator, nodeInfos := setupTest(t, client, nodes, onScaleUpFunc, tc.autoprovisioning, tc.batchProcessing, tc.maxBatchSize, tc.batchTimebox)
+			orchestrator, nodeInfos := setupTest(t, client, nodes, onScaleUpFunc, tc.autoprovisioning, batchTestOptions{checkCapacity: tc.batchProcessing, maxBatchSize: tc.maxBatchSize, timebox: tc.batchTimebox})
 
 			st, err := orchestrator.ScaleUp(context.Background(), prPods, []*apiv1.Node{}, []*appsv1.DaemonSet{}, nodeInfos, false)
 			if !tc.err {
@@ -458,7 +460,701 @@ func TestScaleUp(t *testing.T) {
 	}
 }
 
-func setupTest(t *testing.T, client *provreqclient.ProvisioningRequestClient, nodes []*apiv1.Node, onScaleUpFunc func(string, int) error, autoprovisioning bool, batchProcessing bool, maxBatchSize int, batchTimebox time.Duration) (*provReqOrchestrator, map[string]*framework.NodeInfo) {
+// batchTestOptions configures batch processing for a test cluster.
+type batchTestOptions struct {
+	checkCapacity     bool
+	bestEffortAtomic  bool
+	maxBatchSize      int
+	timebox           time.Duration
+	scheduledPods     []*apiv1.Pod
+	nodeGroupMaxSize  int
+	nodeGroups        []batchTestNodeGroup
+	balanceNodeGroups bool
+	parallelScaleUp   bool
+}
+
+type batchTestNodeGroup struct {
+	name    string
+	minSize int
+	maxSize int
+	nodes   []*apiv1.Node
+}
+
+type batchTestEnvironment struct {
+	orchestrator    *provReqOrchestrator
+	nodeInfos       map[string]*framework.NodeInfo
+	provider        *testprovider.TestCloudProvider
+	clusterSnapshot clustersnapshot.ClusterSnapshot
+	clusterState    *clusterstate.ClusterStateRegistry
+}
+
+// TestBestEffortAtomicBatchScaleUp verifies that several best-effort-atomic ProvisioningRequests
+// are flattened into one all-or-nothing capacity calculation.
+//
+// The test cluster has 100 schedulable nodes with 100 millicpu each, in a node group that can grow
+// to 150. Each request asks for 40 pods of 100 millicpu, so exactly one pod fits per node:
+// the combined 120 pods consume the 100 existing nodes and trigger one 20-node scale-up.
+func TestBestEffortAtomicBatchScaleUp(t *testing.T) {
+	now := time.Now()
+	allNodes := []*apiv1.Node{}
+	for i := 0; i < 100; i++ {
+		node := BuildTestNode(fmt.Sprintf("test-cpu-node-%d", i), 100, 10)
+		SetNodeReadyState(node, true, now.Add(-2*time.Minute))
+		allNodes = append(allNodes, node)
+	}
+	for i := 0; i < 100; i++ {
+		node := BuildTestNode(fmt.Sprintf("test-mem-node-%d", i), 1, 1000)
+		SetNodeReadyState(node, true, now.Add(-2*time.Minute))
+		allNodes = append(allNodes, node)
+	}
+
+	newBatchProvReq := func(name string) *provreqwrapper.ProvisioningRequest {
+		return provreqwrapper.BuildValidTestProvisioningRequestFromOptions(
+			provreqwrapper.TestProvReqOptions{
+				Name:     name,
+				CPU:      "100m",
+				Memory:   "1",
+				PodCount: int32(40),
+				Class:    v1.ProvisioningClassBestEffortAtomicScaleUp,
+			})
+	}
+
+	testCases := []struct {
+		name                string
+		batchProcessing     bool
+		maxBatchSize        int
+		wantResult          status.ScaleUpResult
+		wantProvisionedTrue int
+		wantScaleUpCalls    int
+		wantNodesAdded      int
+	}{
+		{
+			name:            "batching disabled, only the first request is processed",
+			batchProcessing: false,
+			// Only the first request fits without a scale-up, and the other two are left for
+			// the following iterations - this is the one-request-per-loop behaviour.
+			wantResult:          status.ScaleUpNotNeeded,
+			wantProvisionedTrue: 1,
+			wantScaleUpCalls:    0,
+			wantNodesAdded:      0,
+		},
+		{
+			name:            "batching enabled, all requests are flattened into one scale-up calculation",
+			batchProcessing: true,
+			maxBatchSize:    10,
+			// The third request needs 20 more nodes, which makes the aggregated result successful.
+			wantResult:          status.ScaleUpSuccessful,
+			wantProvisionedTrue: 3,
+			wantScaleUpCalls:    1,
+			wantNodesAdded:      20,
+		},
+		{
+			name:            "batch size caps the number of requests processed",
+			batchProcessing: true,
+			maxBatchSize:    2,
+			// Only the first two requests are injected, and both fit without a scale-up.
+			wantResult:          status.ScaleUpNotNeeded,
+			wantProvisionedTrue: 2,
+			wantScaleUpCalls:    0,
+			wantNodesAdded:      0,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			nodes := []*apiv1.Node{}
+			for _, n := range allNodes {
+				nodes = append(nodes, n.DeepCopy())
+			}
+
+			provReqs := []*provreqwrapper.ProvisioningRequest{
+				newBatchProvReq("batchProvReqA"),
+				newBatchProvReq("batchProvReqB"),
+				newBatchProvReq("batchProvReqC"),
+			}
+
+			// The injector only injects pods for as many requests as the batch allows, and a
+			// single request when batching is disabled.
+			injectedProvReqs := provReqs
+			if !tc.batchProcessing {
+				injectedProvReqs = provReqs[:1]
+			} else if tc.maxBatchSize < len(provReqs) {
+				injectedProvReqs = provReqs[:tc.maxBatchSize]
+			}
+			var prPods []*apiv1.Pod
+			for _, pr := range injectedProvReqs {
+				podsForPr, err := pods.PodsForProvisioningRequest(pr)
+				assert.NoError(t, err)
+				prPods = append(prPods, podsForPr...)
+			}
+
+			var mu sync.Mutex
+			scaleUpCalls := 0
+			nodesAdded := 0
+			onScaleUpFunc := func(_ string, n int) error {
+				mu.Lock()
+				defer mu.Unlock()
+				scaleUpCalls++
+				nodesAdded += n
+				return nil
+			}
+
+			testProvReqs := []*provreqwrapper.ProvisioningRequest{}
+			for _, pr := range provReqs {
+				testProvReqs = append(testProvReqs, &provreqwrapper.ProvisioningRequest{ProvisioningRequest: pr.DeepCopy(), PodTemplates: pr.PodTemplates})
+			}
+			client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, testProvReqs...)
+
+			orchestrator, nodeInfos := setupTest(t, client, nodes, onScaleUpFunc, false, batchTestOptions{
+				bestEffortAtomic: tc.batchProcessing,
+				maxBatchSize:     tc.maxBatchSize,
+			})
+
+			st, aErr := orchestrator.ScaleUp(context.Background(), prPods, []*apiv1.Node{}, []*appsv1.DaemonSet{}, nodeInfos, false)
+			assert.NoError(t, aErr)
+			assert.Equal(t, tc.wantResult, st.Result)
+
+			provReqsAfterScaleUp, err := client.ProvisioningRequestsNoCache()
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantProvisionedTrue, NumProvisioningRequestsWithCondition(provReqsAfterScaleUp, v1.Provisioned, metav1.ConditionTrue))
+			assert.Equal(t, 0, NumProvisioningRequestsWithCondition(provReqsAfterScaleUp, v1.Failed, metav1.ConditionTrue))
+
+			mu.Lock()
+			defer mu.Unlock()
+			assert.Equal(t, tc.wantScaleUpCalls, scaleUpCalls, "unexpected number of scale-up requests")
+			assert.Equal(t, tc.wantNodesAdded, nodesAdded, "unexpected number of nodes requested")
+		})
+	}
+}
+
+// TestBestEffortAtomicBatchCoalescesInfrastructureScaleUp covers the customer scenario where
+// many one-pod ProvisioningRequests each need one new node. Flattening must turn the requests into
+// one estimator input and one infrastructure resize, rather than issuing one resize per request.
+func TestBestEffortAtomicBatchCoalescesInfrastructureScaleUp(t *testing.T) {
+	const requestCount = 100
+	now := time.Now()
+	allNodes := make([]*apiv1.Node, 0, 200)
+	occupiedPods := make([]*apiv1.Pod, 0, requestCount)
+	for i := 0; i < requestCount; i++ {
+		node := BuildTestNode(fmt.Sprintf("test-cpu-node-%d", i), 100, 10)
+		SetNodeReadyState(node, true, now.Add(-2*time.Minute))
+		allNodes = append(allNodes, node)
+
+		pod := BuildTestPod(fmt.Sprintf("occupied-pod-%d", i), 100, 1)
+		pod.Spec.NodeName = node.Name
+		occupiedPods = append(occupiedPods, pod)
+	}
+	for i := 0; i < 100; i++ {
+		node := BuildTestNode(fmt.Sprintf("test-mem-node-%d", i), 1, 1000)
+		SetNodeReadyState(node, true, now.Add(-2*time.Minute))
+		allNodes = append(allNodes, node)
+	}
+
+	provReqs := make([]*provreqwrapper.ProvisioningRequest, 0, requestCount)
+	var injectedPods []*apiv1.Pod
+	for i := 0; i < requestCount; i++ {
+		pr := provreqwrapper.BuildValidTestProvisioningRequestFromOptions(
+			provreqwrapper.TestProvReqOptions{
+				Name:              fmt.Sprintf("batch-provreq-%03d", i),
+				CPU:               "100m",
+				Memory:            "1",
+				PodCount:          1,
+				CreationTimestamp: now.Add(time.Duration(i) * time.Nanosecond),
+				Class:             v1.ProvisioningClassBestEffortAtomicScaleUp,
+			})
+		provReqs = append(provReqs, pr)
+		podsForPr, err := pods.PodsForProvisioningRequest(pr)
+		assert.NoError(t, err)
+		injectedPods = append(injectedPods, podsForPr...)
+	}
+
+	client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, provReqs...)
+	var mu sync.Mutex
+	var scaleUpDeltas []int
+	onScaleUpFunc := func(_ string, delta int) error {
+		mu.Lock()
+		defer mu.Unlock()
+		scaleUpDeltas = append(scaleUpDeltas, delta)
+		return nil
+	}
+	orchestrator, nodeInfos := setupTest(t, client, allNodes, onScaleUpFunc, false, batchTestOptions{
+		bestEffortAtomic: true,
+		maxBatchSize:     requestCount,
+		scheduledPods:    occupiedPods,
+		nodeGroupMaxSize: 250,
+	})
+
+	st, aErr := orchestrator.ScaleUp(context.Background(), injectedPods, allNodes, []*appsv1.DaemonSet{}, nodeInfos, false)
+	assert.NoError(t, aErr)
+	assert.Equal(t, status.ScaleUpSuccessful, st.Result)
+
+	updatedProvReqs, err := client.ProvisioningRequestsNoCache()
+	assert.NoError(t, err)
+	assert.Equal(t, requestCount, NumProvisioningRequestsWithCondition(updatedProvReqs, v1.Provisioned, metav1.ConditionTrue))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []int{requestCount}, scaleUpDeltas, "the flattened batch should produce one combined infrastructure resize")
+}
+
+func TestBestEffortAtomicFlattenedBatchFailsTogether(t *testing.T) {
+	now := time.Now()
+	allNodes := make([]*apiv1.Node, 0, 200)
+	for i := 0; i < 100; i++ {
+		node := BuildTestNode(fmt.Sprintf("test-cpu-node-%d", i), 100, 10)
+		SetNodeReadyState(node, true, now.Add(-2*time.Minute))
+		allNodes = append(allNodes, node)
+	}
+	for i := 0; i < 100; i++ {
+		node := BuildTestNode(fmt.Sprintf("test-mem-node-%d", i), 1, 1000)
+		SetNodeReadyState(node, true, now.Add(-2*time.Minute))
+		allNodes = append(allNodes, node)
+	}
+
+	possible := provreqwrapper.BuildValidTestProvisioningRequestFromOptions(provreqwrapper.TestProvReqOptions{
+		Name: "possible-batch-request", CPU: "100m", Memory: "1", PodCount: 1, Class: v1.ProvisioningClassBestEffortAtomicScaleUp,
+	})
+	impossible := provreqwrapper.BuildValidTestProvisioningRequestFromOptions(provreqwrapper.TestProvReqOptions{
+		Name: "impossible-batch-request", CPU: "101m", Memory: "1", PodCount: 1, Class: v1.ProvisioningClassBestEffortAtomicScaleUp,
+	})
+	provReqs := []*provreqwrapper.ProvisioningRequest{possible, impossible}
+	var injectedPods []*apiv1.Pod
+	for _, pr := range provReqs {
+		podsForPr, err := pods.PodsForProvisioningRequest(pr)
+		assert.NoError(t, err)
+		injectedPods = append(injectedPods, podsForPr...)
+	}
+
+	client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, provReqs...)
+	scaleUpCalls := 0
+	orchestrator, nodeInfos := setupTest(t, client, allNodes, func(_ string, _ int) error {
+		scaleUpCalls++
+		return nil
+	}, false, batchTestOptions{bestEffortAtomic: true, maxBatchSize: 2})
+
+	st, aErr := orchestrator.ScaleUp(context.Background(), injectedPods, allNodes, []*appsv1.DaemonSet{}, nodeInfos, false)
+	assert.NoError(t, aErr)
+	assert.Equal(t, status.ScaleUpNoOptionsAvailable, st.Result)
+	assert.Equal(t, 0, scaleUpCalls)
+
+	updatedProvReqs, err := client.ProvisioningRequestsNoCache()
+	assert.NoError(t, err)
+	assert.Equal(t, len(provReqs), NumProvisioningRequestsWithCondition(updatedProvReqs, v1.Provisioned, metav1.ConditionFalse))
+	assert.Equal(t, 0, NumProvisioningRequestsWithCondition(updatedProvReqs, v1.Provisioned, metav1.ConditionTrue))
+}
+
+// TestBestEffortAtomicFlattenedBatchScalesMultipleNodeGroups verifies that the generic scale-up
+// recipe can distribute one flattened ProvisioningRequest batch across similar node groups. The
+// infrastructure operation remains atomic per node group, so this produces one atomic resize for
+// each participating group rather than one provider call spanning both groups.
+func TestBestEffortAtomicFlattenedBatchScalesMultipleNodeGroups(t *testing.T) {
+	now := time.Now()
+	nodeA := BuildTestNode("test-cpu-a-node", 100, 10)
+	nodeB := BuildTestNode("test-cpu-b-node", 100, 10)
+	SetNodeReadyState(nodeA, true, now.Add(-2*time.Minute))
+	SetNodeReadyState(nodeB, true, now.Add(-2*time.Minute))
+	allNodes := []*apiv1.Node{nodeA, nodeB}
+
+	occupiedPodA := BuildTestPod("occupied-pod-a", 100, 1)
+	occupiedPodA.Spec.NodeName = nodeA.Name
+	occupiedPodB := BuildTestPod("occupied-pod-b", 100, 1)
+	occupiedPodB.Spec.NodeName = nodeB.Name
+
+	provReqs := []*provreqwrapper.ProvisioningRequest{
+		provreqwrapper.BuildValidTestProvisioningRequestFromOptions(provreqwrapper.TestProvReqOptions{
+			Name: "batch-request-a", CPU: "100m", Memory: "1", PodCount: 1, Class: v1.ProvisioningClassBestEffortAtomicScaleUp,
+		}),
+		provreqwrapper.BuildValidTestProvisioningRequestFromOptions(provreqwrapper.TestProvReqOptions{
+			Name: "batch-request-b", CPU: "100m", Memory: "1", PodCount: 1, Class: v1.ProvisioningClassBestEffortAtomicScaleUp,
+		}),
+	}
+	var injectedPods []*apiv1.Pod
+	for _, pr := range provReqs {
+		podsForPr, err := pods.PodsForProvisioningRequest(pr)
+		assert.NoError(t, err)
+		injectedPods = append(injectedPods, podsForPr...)
+	}
+
+	client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, provReqs...)
+	var mu sync.Mutex
+	scaleUpDeltas := make(map[string]int)
+	onScaleUpFunc := func(group string, delta int) error {
+		mu.Lock()
+		defer mu.Unlock()
+		scaleUpDeltas[group] += delta
+		return nil
+	}
+	orchestrator, nodeInfos := setupTest(t, client, allNodes, onScaleUpFunc, false, batchTestOptions{
+		bestEffortAtomic:  true,
+		maxBatchSize:      len(provReqs),
+		scheduledPods:     []*apiv1.Pod{occupiedPodA, occupiedPodB},
+		balanceNodeGroups: true,
+		nodeGroups: []batchTestNodeGroup{
+			{name: "test-cpu-a", minSize: 0, maxSize: 2, nodes: []*apiv1.Node{nodeA}},
+			{name: "test-cpu-b", minSize: 0, maxSize: 2, nodes: []*apiv1.Node{nodeB}},
+		},
+	})
+
+	st, aErr := orchestrator.ScaleUp(context.Background(), injectedPods, allNodes, []*appsv1.DaemonSet{}, nodeInfos, false)
+	assert.NoError(t, aErr)
+	assert.Equal(t, status.ScaleUpSuccessful, st.Result)
+	assert.Len(t, st.ScaleUpInfos, 2)
+
+	updatedProvReqs, err := client.ProvisioningRequestsNoCache()
+	assert.NoError(t, err)
+	assert.Equal(t, len(provReqs), NumProvisioningRequestsWithCondition(updatedProvReqs, v1.Provisioned, metav1.ConditionTrue))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, map[string]int{"test-cpu-a": 1, "test-cpu-b": 1}, scaleUpDeltas)
+}
+
+// TestBestEffortAtomicFlattenedBatchConvergesAfterPartialScaleUpFailure verifies that
+// successful capacity from a partially failed multi-node-group scale-up admits requests
+// immediately. Pool A starts 20 nodes smaller than pool B, so balancing 100 one-node requests
+// produces A +60 and B +40. After B rejects its first atomic resize, the oldest 60 requests are
+// fulfilled. The retry requests only B's missing 40 nodes for the remaining requests.
+func TestBestEffortAtomicFlattenedBatchConvergesAfterPartialScaleUpFailure(t *testing.T) {
+	testBestEffortAtomicFlattenedBatchConvergesAfterPartialScaleUpFailure(t, 0, 100, map[string]int{"test-cpu-b": 40})
+}
+
+// TestBestEffortAtomicFlattenedBatchConvergesWithNewRequests verifies that requests arriving
+// after a partial failure join the next flattened planning pass. Pool B is capped after its
+// original 40-node allocation, so the three new requests add three nodes to Pool A while Pool B's
+// rejected 40-node allocation is retried.
+func TestBestEffortAtomicFlattenedBatchConvergesWithNewRequests(t *testing.T) {
+	testBestEffortAtomicFlattenedBatchConvergesAfterPartialScaleUpFailure(t, 3, 61, map[string]int{"test-cpu-a": 3, "test-cpu-b": 40})
+}
+
+func testBestEffortAtomicFlattenedBatchConvergesAfterPartialScaleUpFailure(t *testing.T, newRequestCount, poolBMaxSize int, expectedRetryDeltas map[string]int) {
+	const (
+		initialRequestCount = 100
+		poolAName           = "test-cpu-a"
+		poolBName           = "test-cpu-b"
+		poolAStart          = 1
+		poolBStart          = 21
+	)
+	totalRequestCount := initialRequestCount + newRequestCount
+	now := time.Now()
+	poolANodes := make([]*apiv1.Node, 0, poolAStart)
+	poolBNodes := make([]*apiv1.Node, 0, poolBStart)
+	occupiedPods := make([]*apiv1.Pod, 0, poolAStart+poolBStart)
+	for i := 0; i < poolAStart; i++ {
+		node := BuildTestNode(fmt.Sprintf("%s-node-%d", poolAName, i), 100, 10)
+		SetNodeReadyState(node, true, now.Add(-2*time.Minute))
+		poolANodes = append(poolANodes, node)
+		pod := BuildTestPod(fmt.Sprintf("%s-occupied-%d", poolAName, i), 100, 1)
+		pod.Spec.NodeName = node.Name
+		occupiedPods = append(occupiedPods, pod)
+	}
+	for i := 0; i < poolBStart; i++ {
+		node := BuildTestNode(fmt.Sprintf("%s-node-%d", poolBName, i), 100, 10)
+		SetNodeReadyState(node, true, now.Add(-2*time.Minute))
+		poolBNodes = append(poolBNodes, node)
+		pod := BuildTestPod(fmt.Sprintf("%s-occupied-%d", poolBName, i), 100, 1)
+		pod.Spec.NodeName = node.Name
+		occupiedPods = append(occupiedPods, pod)
+	}
+	initialNodes := append(append([]*apiv1.Node{}, poolANodes...), poolBNodes...)
+
+	provReqs := make([]*provreqwrapper.ProvisioningRequest, 0, totalRequestCount)
+	var injectedPods []*apiv1.Pod
+	for i := 0; i < initialRequestCount; i++ {
+		pr := provreqwrapper.BuildValidTestProvisioningRequestFromOptions(provreqwrapper.TestProvReqOptions{
+			Name:              fmt.Sprintf("partial-failure-request-%03d", i),
+			CPU:               "100m",
+			Memory:            "1",
+			PodCount:          1,
+			CreationTimestamp: now.Add(time.Duration(i) * time.Nanosecond),
+			Class:             v1.ProvisioningClassBestEffortAtomicScaleUp,
+		})
+		provReqs = append(provReqs, pr)
+		podsForPr, err := pods.PodsForProvisioningRequest(pr)
+		assert.NoError(t, err)
+		injectedPods = append(injectedPods, podsForPr...)
+	}
+
+	client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, provReqs...)
+	var environment *batchTestEnvironment
+	var mu sync.Mutex
+	attempt := 1
+	scaleUpDeltas := map[int]map[string]int{1: {}, 2: {}}
+	onScaleUpFunc := func(group string, delta int) error {
+		mu.Lock()
+		defer mu.Unlock()
+		scaleUpDeltas[attempt][group] += delta
+		if attempt == 1 && group == poolBName {
+			// TestNodeGroup advances target size before invoking this callback. Restore the
+			// target to model the AtomicIncreaseSize contract: an error changes no capacity.
+			environment.provider.GetNodeGroup(poolBName).(*testprovider.TestNodeGroup).SetTargetSize(poolBStart)
+			return fmt.Errorf("simulated atomic resize rejection for %s", poolBName)
+		}
+		return nil
+	}
+	environment = setupTestEnvironment(t, client, initialNodes, onScaleUpFunc, false, batchTestOptions{
+		bestEffortAtomic:  true,
+		maxBatchSize:      totalRequestCount,
+		scheduledPods:     occupiedPods,
+		balanceNodeGroups: true,
+		nodeGroups: []batchTestNodeGroup{
+			{name: poolAName, minSize: 0, maxSize: 100, nodes: poolANodes},
+			{name: poolBName, minSize: 0, maxSize: poolBMaxSize, nodes: poolBNodes},
+		},
+	})
+
+	firstStatus, firstErr := environment.orchestrator.ScaleUp(context.Background(), injectedPods, initialNodes, []*appsv1.DaemonSet{}, environment.nodeInfos, false)
+	assert.Error(t, firstErr)
+	assert.Equal(t, status.ScaleUpError, firstStatus.Result)
+	assert.Equal(t, map[string]int{poolAName: 60, poolBName: 40}, scaleUpDeltas[1])
+
+	updatedProvReqs, err := client.ProvisioningRequestsNoCache()
+	assert.NoError(t, err)
+	assert.Equal(t, initialRequestCount-60, NumProvisioningRequestsWithCondition(updatedProvReqs, v1.Provisioned, metav1.ConditionFalse))
+	assert.Equal(t, 60, NumProvisioningRequestsWithCondition(updatedProvReqs, v1.Provisioned, metav1.ConditionTrue))
+	for index, request := range provReqs {
+		updated, err := client.ProvisioningRequestNoCache(request.Namespace, request.Name)
+		assert.NoError(t, err)
+		assert.Equal(t, index < 60, apimeta.IsStatusConditionTrue(updated.Status.Conditions, v1.Provisioned), "request %s", request.Name)
+	}
+	assert.Len(t, firstStatus.ScaleUpInfos, 1)
+	if len(firstStatus.ScaleUpInfos) == 1 {
+		assert.Equal(t, poolAName, firstStatus.ScaleUpInfos[0].Group.Id())
+		assert.Equal(t, 60, firstStatus.ScaleUpInfos[0].NewSize-firstStatus.ScaleUpInfos[0].CurrentSize)
+	}
+	admittedPods := injectedPods[:60]
+	injectedPods = injectedPods[60:]
+
+	poolATarget, err := environment.provider.GetNodeGroup(poolAName).TargetSize(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, poolAStart+60, poolATarget)
+	poolBTarget, err := environment.provider.GetNodeGroup(poolBName).TargetSize(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, poolBStart, poolBTarget)
+
+	// Add requests that arrive after the partial scale-up result but before the next planning
+	// pass. They reuse an existing PodTemplate so the fake client only needs to create the new
+	// ProvisioningRequest resources and wait for its informer to observe them.
+	for i := 0; i < newRequestCount; i++ {
+		pr := provreqwrapper.BuildValidTestProvisioningRequestFromOptions(provreqwrapper.TestProvReqOptions{
+			Name:              fmt.Sprintf("new-request-%03d", i),
+			CPU:               "100m",
+			Memory:            "1",
+			PodCount:          1,
+			CreationTimestamp: now.Add(time.Minute + time.Duration(i)*time.Nanosecond),
+			Class:             v1.ProvisioningClassBestEffortAtomicScaleUp,
+		})
+		pr.Spec.PodSets[0].PodTemplateRef = provReqs[0].Spec.PodSets[0].PodTemplateRef
+		pr.PodTemplates = provReqs[0].PodTemplates
+		assert.NoError(t, client.CreateProvisioningRequestForTesting(context.Background(), pr))
+		provReqs = append(provReqs, pr)
+		podsForPr, err := pods.PodsForProvisioningRequest(pr)
+		assert.NoError(t, err)
+		injectedPods = append(injectedPods, podsForPr...)
+	}
+	updatedProvReqs, err = client.ProvisioningRequestsNoCache()
+	assert.NoError(t, err)
+	assert.Len(t, updatedProvReqs, totalRequestCount)
+	assert.Equal(t, initialRequestCount-60, NumProvisioningRequestsWithCondition(updatedProvReqs, v1.Provisioned, metav1.ConditionFalse))
+	assert.Equal(t, 60, NumProvisioningRequestsWithCondition(updatedProvReqs, v1.Provisioned, metav1.ConditionTrue))
+
+	// Model the next CA loop after Pool A's successful nodes have registered. The failed
+	// ProvisioningRequests and any newly arrived requests are evaluated as one batch against this
+	// refreshed cluster state, with the admitted requests consuming Pool A's capacity.
+	retryNodes := append([]*apiv1.Node{}, initialNodes...)
+	for i := 0; i < 60; i++ {
+		node := BuildTestNode(fmt.Sprintf("%s-new-node-%d", poolAName, i), 100, 10)
+		SetNodeReadyState(node, true, now)
+		environment.provider.AddNode(poolAName, node)
+		retryNodes = append(retryNodes, node)
+		pod := admittedPods[i].DeepCopy()
+		pod.Spec.NodeName = node.Name
+		occupiedPods = append(occupiedPods, pod)
+	}
+	clustersnapshot.InitializeClusterSnapshotOrDie(t, environment.clusterSnapshot, retryNodes, occupiedPods)
+	assert.NoError(t, environment.clusterState.UpdateNodes(context.Background(), retryNodes, now.Add(time.Minute)))
+
+	mu.Lock()
+	attempt = 2
+	mu.Unlock()
+	secondStatus, secondErr := environment.orchestrator.ScaleUp(context.Background(), injectedPods, retryNodes, []*appsv1.DaemonSet{}, environment.nodeInfos, false)
+	assert.NoError(t, secondErr)
+	assert.Equal(t, status.ScaleUpSuccessful, secondStatus.Result)
+	assert.Equal(t, expectedRetryDeltas, scaleUpDeltas[2])
+
+	updatedProvReqs, err = client.ProvisioningRequestsNoCache()
+	assert.NoError(t, err)
+	assert.Equal(t, totalRequestCount, NumProvisioningRequestsWithCondition(updatedProvReqs, v1.Provisioned, metav1.ConditionTrue))
+	assert.Equal(t, 0, NumProvisioningRequestsWithCondition(updatedProvReqs, v1.Provisioned, metav1.ConditionFalse))
+}
+
+func TestBestEffortAtomicPartialScaleUpOutcomes(t *testing.T) {
+	tests := []struct {
+		name             string
+		podCounts        []int32
+		failFirst        bool
+		failSecond       bool
+		parallel         bool
+		freeExistingNode bool
+		wantProvisioned  []bool
+		wantScaleUps     map[string]int
+		wantCalls        map[string]int
+	}{
+		{
+			name:      "oldest requests use successful capacity",
+			podCounts: []int32{1, 1, 1, 1, 1}, failSecond: true,
+			wantProvisioned: []bool{true, true, true, false, false},
+			wantScaleUps:    map[string]int{"pool-a": 3}, wantCalls: map[string]int{"pool-a": 3, "pool-b": 2},
+		},
+		{
+			name:      "a request spanning successful and failed capacity is not admitted",
+			podCounts: []int32{2, 2, 1}, failSecond: true,
+			wantProvisioned: []bool{true, false, true},
+			wantScaleUps:    map[string]int{"pool-a": 3}, wantCalls: map[string]int{"pool-a": 3, "pool-b": 2},
+		},
+		{
+			name:      "failed request releases its tentative placements",
+			podCounts: []int32{4, 1}, failSecond: true,
+			wantProvisioned: []bool{false, true},
+			wantScaleUps:    map[string]int{"pool-a": 3}, wantCalls: map[string]int{"pool-a": 3, "pool-b": 2},
+		},
+		{
+			name:      "multi-pod request is admitted only in full",
+			podCounts: []int32{3, 2}, failSecond: true,
+			wantProvisioned: []bool{true, false},
+			wantScaleUps:    map[string]int{"pool-a": 3}, wantCalls: map[string]int{"pool-a": 3, "pool-b": 2},
+		},
+		{
+			name:      "serial execution does not count unattempted groups",
+			podCounts: []int32{1, 1, 1, 1, 1}, failFirst: true,
+			wantProvisioned: []bool{false, false, false, false, false},
+			wantScaleUps:    map[string]int{}, wantCalls: map[string]int{"pool-a": 3},
+		},
+		{
+			name:      "parallel execution preserves success after another group fails",
+			podCounts: []int32{1, 1, 1, 1, 1}, failFirst: true, parallel: true,
+			wantProvisioned: []bool{true, true, false, false, false},
+			wantScaleUps:    map[string]int{"pool-b": 2}, wantCalls: map[string]int{"pool-a": 3, "pool-b": 2},
+		},
+		{
+			name:      "parallel execution preserves success before another group fails",
+			podCounts: []int32{1, 1, 1, 1, 1}, failSecond: true, parallel: true,
+			wantProvisioned: []bool{true, true, true, false, false},
+			wantScaleUps:    map[string]int{"pool-a": 3}, wantCalls: map[string]int{"pool-a": 3, "pool-b": 2},
+		},
+		{
+			name:      "all resizes fail",
+			podCounts: []int32{1, 1, 1, 1, 1}, failFirst: true, failSecond: true, parallel: true,
+			wantProvisioned: []bool{false, false, false, false, false},
+			wantScaleUps:    map[string]int{}, wantCalls: map[string]int{"pool-a": 3, "pool-b": 2},
+		},
+		{
+			name:      "existing capacity is assigned only once",
+			podCounts: []int32{1, 1, 1, 1, 1, 1}, failSecond: true, freeExistingNode: true,
+			wantProvisioned: []bool{true, true, true, true, false, false},
+			wantScaleUps:    map[string]int{"pool-a": 3}, wantCalls: map[string]int{"pool-a": 3, "pool-b": 2},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Now()
+			nodes := []*apiv1.Node{
+				BuildTestNode("pool-a-node", 100, 10),
+				BuildTestNode("pool-b-node-1", 100, 10),
+				BuildTestNode("pool-b-node-2", 100, 10),
+			}
+			var occupiedPods []*apiv1.Pod
+			for index, node := range nodes {
+				SetNodeReadyState(node, true, now.Add(-2*time.Minute))
+				if test.freeExistingNode && index == 0 {
+					continue
+				}
+				pod := BuildTestPod(fmt.Sprintf("occupied-%d", index), 100, 1)
+				pod.Spec.NodeName = node.Name
+				occupiedPods = append(occupiedPods, pod)
+			}
+			var requests []*provreqwrapper.ProvisioningRequest
+			var injectedPods []*apiv1.Pod
+			for index, podCount := range test.podCounts {
+				request := provreqwrapper.BuildValidTestProvisioningRequestFromOptions(provreqwrapper.TestProvReqOptions{
+					Name: fmt.Sprintf("request-%02d", index), CPU: "100m", Memory: "1", PodCount: podCount,
+					CreationTimestamp: now.Add(time.Duration(index) * time.Nanosecond), Class: v1.ProvisioningClassBestEffortAtomicScaleUp,
+				})
+				requests = append(requests, request)
+				requestPods, err := pods.PodsForProvisioningRequest(request)
+				if !assert.NoError(t, err) {
+					return
+				}
+				injectedPods = append(injectedPods, requestPods...)
+			}
+			client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, requests...)
+			var environment *batchTestEnvironment
+			var mutex sync.Mutex
+			calls := map[string]int{}
+			onScaleUp := func(group string, delta int) error {
+				mutex.Lock()
+				defer mutex.Unlock()
+				calls[group] += delta
+				if group == "pool-a" && test.failFirst || group == "pool-b" && test.failSecond {
+					originalSize := 1
+					if group == "pool-b" {
+						originalSize = 2
+					}
+					environment.provider.GetNodeGroup(group).(*testprovider.TestNodeGroup).SetTargetSize(originalSize)
+					return fmt.Errorf("atomic resize rejected for %s", group)
+				}
+				return nil
+			}
+			environment = setupTestEnvironment(t, client, nodes, onScaleUp, false, batchTestOptions{
+				bestEffortAtomic: true, maxBatchSize: len(requests), scheduledPods: occupiedPods,
+				balanceNodeGroups: true, parallelScaleUp: test.parallel,
+				nodeGroups: []batchTestNodeGroup{
+					{name: "pool-a", minSize: 0, maxSize: 10, nodes: nodes[:1]},
+					{name: "pool-b", minSize: 0, maxSize: 10, nodes: nodes[1:]},
+				},
+			})
+			result, err := environment.orchestrator.ScaleUp(context.Background(), injectedPods, nodes, nil, environment.nodeInfos, false)
+			assert.Error(t, err)
+			if !assert.NotNil(t, result) {
+				return
+			}
+			assert.Equal(t, status.ScaleUpError, result.Result)
+			assert.NotNil(t, result.ScaleUpError)
+			gotScaleUps := map[string]int{}
+			for _, scaleUpInfo := range result.ScaleUpInfos {
+				gotScaleUps[scaleUpInfo.Group.Id()] += scaleUpInfo.NewSize - scaleUpInfo.CurrentSize
+			}
+			assert.Equal(t, test.wantScaleUps, gotScaleUps)
+			assert.Equal(t, test.wantCalls, calls)
+			for index, request := range requests {
+				updated, err := client.ProvisioningRequestNoCache(request.Namespace, request.Name)
+				if !assert.NoError(t, err) {
+					continue
+				}
+				assert.Equal(t, test.wantProvisioned[index], apimeta.IsStatusConditionTrue(updated.Status.Conditions, v1.Provisioned), "request %s", request.Name)
+				assert.Equal(t, !test.wantProvisioned[index], apimeta.IsStatusConditionFalse(updated.Status.Conditions, v1.Provisioned), "request %s", request.Name)
+				assert.False(t, apimeta.IsStatusConditionTrue(updated.Status.Conditions, v1.Failed), "request %s should remain retryable", request.Name)
+			}
+			snapshotNodes, snapshotErr := environment.clusterSnapshot.ListNodeInfos()
+			assert.NoError(t, snapshotErr)
+			assert.Len(t, snapshotNodes, len(nodes))
+			podCount := 0
+			for _, nodeInfo := range snapshotNodes {
+				podCount += len(nodeInfo.Pods())
+			}
+			assert.Equal(t, len(occupiedPods), podCount, "admission must not leak simulated pods into the cluster snapshot")
+		})
+	}
+}
+
+func setupTest(t *testing.T, client *provreqclient.ProvisioningRequestClient, nodes []*apiv1.Node, onScaleUpFunc func(string, int) error, autoprovisioning bool, batch batchTestOptions) (*provReqOrchestrator, map[string]*framework.NodeInfo) {
+	environment := setupTestEnvironment(t, client, nodes, onScaleUpFunc, autoprovisioning, batch)
+	return environment.orchestrator, environment.nodeInfos
+}
+
+func setupTestEnvironment(t *testing.T, client *provreqclient.ProvisioningRequestClient, nodes []*apiv1.Node, onScaleUpFunc func(string, int) error, autoprovisioning bool, batch batchTestOptions) *batchTestEnvironment {
 	provider := testprovider.NewTestCloudProviderBuilder().WithOnScaleUp(onScaleUpFunc).Build()
 	clock := clocktesting.NewFakePassiveClock(time.Now())
 	now := clock.Now()
@@ -474,9 +1170,22 @@ func setupTest(t *testing.T, client *provreqclient.ProvisioningRequestClient, no
 		provider = testprovider.NewTestCloudProviderBuilder().WithOnScaleUp(onScaleUpFunc).WithOnNodeGroupCreate(onNodeGroupCreateFunc).WithMachineTypes(machineTypes).WithMachineTemplates(machineTemplates).Build()
 	}
 
-	provider.AddNodeGroup("test-cpu", 50, 150, 100)
-	for _, n := range nodes[:100] {
-		provider.AddNode("test-cpu", n)
+	if len(batch.nodeGroups) > 0 {
+		for _, group := range batch.nodeGroups {
+			provider.AddNodeGroup(group.name, group.minSize, group.maxSize, len(group.nodes))
+			for _, node := range group.nodes {
+				provider.AddNode(group.name, node)
+			}
+		}
+	} else {
+		nodeGroupMaxSize := batch.nodeGroupMaxSize
+		if nodeGroupMaxSize == 0 {
+			nodeGroupMaxSize = 150
+		}
+		provider.AddNodeGroup("test-cpu", 50, nodeGroupMaxSize, 100)
+		for _, n := range nodes[:100] {
+			provider.AddNode("test-cpu", n)
+		}
 	}
 
 	podLister := kube_util.NewTestPodLister(nil)
@@ -484,18 +1193,24 @@ func setupTest(t *testing.T, client *provreqclient.ProvisioningRequestClient, no
 
 	options := config.AutoscalingOptions{
 		MaxNodeGroupBinpackingDuration: 1 * time.Second,
+		BalanceSimilarNodeGroups:       batch.balanceNodeGroups,
+		ParallelScaleUp:                batch.parallelScaleUp,
 	}
-	if batchProcessing {
+	if batch.checkCapacity {
 		options.CheckCapacityBatchProcessing = true
-		options.CheckCapacityProvisioningRequestMaxBatchSize = maxBatchSize
-		options.CheckCapacityProvisioningRequestBatchTimebox = batchTimebox
+		options.CheckCapacityProvisioningRequestMaxBatchSize = batch.maxBatchSize
+		options.CheckCapacityProvisioningRequestBatchTimebox = batch.timebox
+	}
+	if batch.bestEffortAtomic {
+		options.BestEffortAtomicBatchProcessing = true
+		options.BestEffortAtomicProvisioningRequestMaxBatchSize = batch.maxBatchSize
 	}
 
 	processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(options)
 	autoscalingCtx, err := NewScaleTestAutoscalingContext(options, &fake.Clientset{}, listers, provider, nil, nil, templateNodeInfoRegistry)
 	assert.NoError(t, err)
 
-	clustersnapshot.InitializeClusterSnapshotOrDie(t, autoscalingCtx.ClusterSnapshot, nodes, nil)
+	clustersnapshot.InitializeClusterSnapshotOrDie(t, autoscalingCtx.ClusterSnapshot, nodes, batch.scheduledPods)
 	if autoprovisioning {
 		processors.NodeGroupListProcessor = &MockAutoprovisioningNodeGroupListProcessor{T: t}
 		processors.NodeGroupManager = &MockAutoprovisioningNodeGroupManager{T: t, ExtraGroups: 2}
@@ -516,7 +1231,7 @@ func setupTest(t *testing.T, client *provreqclient.ProvisioningRequestClient, no
 	clusterState.UpdateNodes(context.Background(), nodes, now)
 
 	var injector *provreq.ProvisioningRequestPodsInjector
-	if batchProcessing {
+	if batch.checkCapacity {
 		injector = provreq.NewFakePodsInjector(client, clocktesting.NewFakePassiveClock(now))
 	}
 
@@ -529,7 +1244,13 @@ func setupTest(t *testing.T, client *provreqclient.ProvisioningRequestClient, no
 		provisioningClasses: []ProvisioningClass{checkcapacity.New(client, injector), besteffortatomic.New(client)},
 	}
 	orchestrator.Initialize(&autoscalingCtx, processors, clusterState, estimatorBuilder, taints.TaintConfig{}, quotasTrackerFactory)
-	return orchestrator, nodeInfos
+	return &batchTestEnvironment{
+		orchestrator:    orchestrator,
+		nodeInfos:       nodeInfos,
+		provider:        provider,
+		clusterSnapshot: autoscalingCtx.ClusterSnapshot,
+		clusterState:    clusterState,
+	}
 }
 
 func NumProvisioningRequestsWithCondition(prList []*provreqwrapper.ProvisioningRequest, conditionType string, conditionStatus metav1.ConditionStatus) int {
