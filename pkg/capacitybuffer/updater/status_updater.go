@@ -17,7 +17,9 @@ limitations under the License.
 package updater
 
 import (
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
+	"k8s.io/klog/v2"
 	cbclient "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/client"
 )
 
@@ -34,11 +36,20 @@ func NewStatusUpdater(client *cbclient.CapacityBufferClient) *StatusUpdater {
 }
 
 // Update updates the buffer status with pod capacity
+//
+// Buffers whose status is already up to date are returned without being written, so that
+// a steady state cluster does not generate a write per buffer per resync.
 func (u *StatusUpdater) Update(buffers []*v1.CapacityBuffer) ([]*v1.CapacityBuffer, []error) {
 	var errors []error
 	var updatedBuffers []*v1.CapacityBuffer
 
 	for _, buffer := range buffers {
+		if !u.statusChanged(buffer) {
+			// The buffer was still reconciled, so report it back to the caller to keep
+			// the reconciliation timestamps it tracks accurate.
+			updatedBuffers = append(updatedBuffers, buffer)
+			continue
+		}
 		updatedBuffer, err := u.client.UpdateCapacityBuffer(buffer)
 		if err != nil {
 			errors = append(errors, err)
@@ -49,6 +60,17 @@ func (u *StatusUpdater) Update(buffers []*v1.CapacityBuffer) ([]*v1.CapacityBuff
 		}
 	}
 	return updatedBuffers, errors
+}
+
+// statusChanged reports whether writing the passed buffer would change the status the
+// informer cache currently holds.
+func (u *StatusUpdater) statusChanged(buffer *v1.CapacityBuffer) bool {
+	observed, err := u.client.GetCapacityBuffer(buffer.Namespace, buffer.Name)
+	if err != nil {
+		klog.V(4).Infof("capacity buffer status updater: failed to read the cached buffer %s/%s, updating unconditionally: %v", buffer.Namespace, buffer.Name, err)
+		return true
+	}
+	return !apiequality.Semantic.DeepEqual(observed.Status, buffer.Status)
 }
 
 // CleanUp cleans up the updater's internal structures.
