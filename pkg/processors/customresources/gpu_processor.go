@@ -117,8 +117,19 @@ func (p *GpuCustomResourcesProcessor) GetNodeGpuTarget(ctx context.Context, auto
 		logger.Error(err, "Failed to build template for getting GPU estimation for node", "node", klog.KObj(node))
 		return CustomResourceTarget{}, errors.ToAutoscalerError(errors.CloudProviderError, err)
 	}
+	gpuConfig := autoscalingCtx.CloudProvider.GetNodeGpuConfig(ctx, node)
+	if gpuConfig != nil && gpuConfig.ExtendedResourceName != "" {
+		if gpuCapacity, found := template.Node().Status.Capacity[gpuConfig.ExtendedResourceName]; found {
+			return CustomResourceTarget{gpuLabel, gpuCapacity.Value()}, nil
+		}
+	}
 	for _, gpuVendorResourceName := range gpu.GPUVendorResourceNames {
 		if gpuCapacity, found := template.Node().Status.Capacity[gpuVendorResourceName]; found {
+			return CustomResourceTarget{gpuLabel, gpuCapacity.Value()}, nil
+		}
+	}
+	for resourceName, gpuCapacity := range template.Node().Status.Capacity {
+		if gpu.IsGPUResource(resourceName) {
 			return CustomResourceTarget{gpuLabel, gpuCapacity.Value()}, nil
 		}
 	}

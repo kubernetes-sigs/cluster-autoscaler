@@ -77,15 +77,43 @@ func TestNodeHasGpu(t *testing.T) {
 		},
 	}
 	assert.False(t, gpu.NodeHasGpu(GPULabel, nodeNoGpu))
+
+	nodeWithMigGpu := test.BuildTestNode("nodeWithMigGpu", 1000, 1000)
+	nodeWithMigGpu.Status.Allocatable["nvidia.com/mig-2g.24gb"] = *resource.NewQuantity(1, resource.DecimalSI)
+	assert.True(t, gpu.NodeHasGpu(GPULabel, nodeWithMigGpu))
+}
+
+func TestIsGPUResource(t *testing.T) {
+	testCases := []struct {
+		name         string
+		resourceName apiv1.ResourceName
+		want         bool
+	}{
+		{name: "known GPU", resourceName: gpu.ResourceNvidiaGPU, want: true},
+		{name: "MIG GPU", resourceName: "nvidia.com/mig-2g.24gb", want: true},
+		{name: "time-sliced GPU", resourceName: "nvidia.com/gpu.shared", want: true},
+		{name: "unrelated resource", resourceName: "example.com/fpga", want: false},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, gpu.IsGPUResource(tc.resourceName))
+		})
+	}
 }
 
 func TestPodRequestsGpu(t *testing.T) {
 	podNoGpu := test.BuildTestPod("podNoGpu", 0, 1000)
 	podWithGpu := test.BuildTestPod("pod1AnyGpu", 0, 1000)
+	podWithMigGpu := test.BuildTestPod("podWithMigGpu", 0, 1000)
+	podWithSharedGpu := test.BuildTestPod("podWithSharedGpu", 0, 1000)
 	podWithGpu.Spec.Containers[0].Resources.Requests[gpu.ResourceNvidiaGPU] = *resource.NewQuantity(1, resource.DecimalSI)
+	podWithMigGpu.Spec.Containers[0].Resources.Requests["nvidia.com/mig-2g.24gb"] = *resource.NewQuantity(1, resource.DecimalSI)
+	podWithSharedGpu.Spec.Containers[0].Resources.Requests["nvidia.com/gpu.shared"] = *resource.NewQuantity(1, resource.DecimalSI)
 
 	assert.False(t, gpu.PodRequestsGpu(podNoGpu))
 	assert.True(t, gpu.PodRequestsGpu(podWithGpu))
+	assert.True(t, gpu.PodRequestsGpu(podWithMigGpu))
+	assert.True(t, gpu.PodRequestsGpu(podWithSharedGpu))
 }
 
 func TestGetGpuInfoForMetrics(t *testing.T) {
@@ -279,6 +307,21 @@ func TestDetectNodeGPUResourceName(t *testing.T) {
 				},
 			},
 			expectedResourceName: gpu.ResourceAMDGPU,
+		},
+		{
+			name: "nvidia MIG GPU",
+			node: &apiv1.Node{Status: apiv1.NodeStatus{Allocatable: apiv1.ResourceList{
+				"nvidia.com/mig-2g.24gb": *resource.NewQuantity(2, resource.DecimalSI),
+			}}},
+			expectedResourceName: "nvidia.com/mig-2g.24gb",
+		},
+		{
+			name: "known resource takes precedence",
+			node: &apiv1.Node{Status: apiv1.NodeStatus{Allocatable: apiv1.ResourceList{
+				gpu.ResourceNvidiaGPU:   *resource.NewQuantity(1, resource.DecimalSI),
+				"nvidia.com/gpu.shared": *resource.NewQuantity(4, resource.DecimalSI),
+			}}},
+			expectedResourceName: gpu.ResourceNvidiaGPU,
 		},
 		{
 			name: "test default gpu resource name",
