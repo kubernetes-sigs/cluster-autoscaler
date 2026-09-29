@@ -212,6 +212,8 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 		}
 	}
 
+	autoscalingStatusProcessors := []status.AutoscalingStatusProcessor{opts.Processors.AutoscalingStatusProcessor}
+
 	if autoscalingOptions.CapacitybufferPodInjectionEnabled {
 		// Add CapacityBuffer types to the default scheme for event recording.
 		if err := cbv1beta1.AddToScheme(clientgoscheme.Scheme); err != nil {
@@ -231,8 +233,11 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 			podListProcessor = pods.NewCombinedPodListProcessor([]pods.PodListProcessor{bufferPodInjector, podListProcessor})
 			opts.Processors.ScaleUpStatusProcessor = status.NewCombinedScaleUpStatusProcessor([]status.ScaleUpStatusProcessor{
 				cbprocessor.NewFakePodsScaleUpStatusProcessor(buffersPodsRegistry), opts.Processors.ScaleUpStatusProcessor})
+			autoscalingStatusProcessors = append(autoscalingStatusProcessors, cbprocessor.NewCapacityBufferAutoscalingStatusProcessor(b.manager.GetClient(), buffersPodsRegistry))
 		}
 	}
+
+	opts.Processors.AutoscalingStatusProcessor = status.NewCombinedAutoscalingStatusProcessor(autoscalingStatusProcessors)
 
 	if autoscalingOptions.CapacityQuotasEnabled {
 		cqReconciler := capacityquota.NewCapacityQuotaReconciler(b.manager.GetClient(), capacityquota.ReconcilerOptions{

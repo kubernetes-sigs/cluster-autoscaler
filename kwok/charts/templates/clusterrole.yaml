@@ -75,10 +75,18 @@ rules:
       - replicationcontrollers
       - persistentvolumeclaims
       - persistentvolumes
+      - resourcequotas
     verbs:
       - watch
       - list
       - get
+  # Required by the capacity buffer controller to build buffer pod templates via server-side dry-run.
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - create
   - apiGroups:
       - batch
     resources:
