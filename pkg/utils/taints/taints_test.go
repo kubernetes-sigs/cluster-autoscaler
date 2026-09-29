@@ -999,3 +999,30 @@ func TestNewTaintConfigWithCustomPrefixes(t *testing.T) {
 		})
 	}
 }
+
+func TestAddTaintsKeepsApiErrorOnGetFailure(t *testing.T) {
+	n := BuildTestNode("node", 1000, 1000)
+	// The taint is already present, so AddTaints refreshes the node with Get before skipping the update.
+	n.Spec.Taints = []apiv1.Taint{{Key: "t1", Effect: apiv1.TaintEffectNoSchedule}}
+	fakeClient := buildFakeClient(t, n)
+	fakeClient.Fake.PrependReactor("get", "nodes", func(action core.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.NewTooManyRequests("throttled", 1)
+	})
+
+	_, err := AddTaints(context.Background(), n, fakeClient, []apiv1.Taint{{Key: "t1", Effect: apiv1.TaintEffectNoSchedule}}, false)
+	require.Error(t, err)
+	assert.True(t, errors.IsTooManyRequests(err), "expected the 429 to be preserved in the error chain, got %v", err)
+}
+
+func TestCleanTaintsKeepsApiErrorOnGetFailure(t *testing.T) {
+	n := BuildTestNode("node", 1000, 1000)
+	// The taint is already absent, so CleanTaints refreshes the node with Get before skipping the update.
+	fakeClient := buildFakeClient(t, n)
+	fakeClient.Fake.PrependReactor("get", "nodes", func(action core.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.NewTooManyRequests("throttled", 1)
+	})
+
+	_, err := CleanTaints(context.Background(), n, fakeClient, []string{"t1"}, false)
+	require.Error(t, err)
+	assert.True(t, errors.IsTooManyRequests(err), "expected the 429 to be preserved in the error chain, got %v", err)
+}
