@@ -169,28 +169,29 @@ type caMetrics struct {
 	pendingNodeDeletions    *k8smetrics.Gauge
 
 	// Metrics related to autoscaler operations
-	errorsCount                      *k8smetrics.CounterVec
-	scaleUpCount                     *k8smetrics.CounterVec
-	gpuScaleUpCount                  *k8smetrics.CounterVec
-	failedScaleUpCount               *k8smetrics.CounterVec
-	failedNodeCreationCount          *k8smetrics.CounterVec
-	failedGPUScaleUpCount            *k8smetrics.CounterVec
-	scaleDownCount                   *k8smetrics.CounterVec
-	gpuScaleDownCount                *k8smetrics.CounterVec
-	evictionsCount                   *k8smetrics.CounterVec
-	unneededNodesCount               *k8smetrics.Gauge
-	unremovableNodesCount            *k8smetrics.GaugeVec
-	scaleDownInCooldown              *k8smetrics.Gauge
-	oldUnregisteredNodesRemovedCount *k8smetrics.Counter
-	overflowingControllersCount      *k8smetrics.Gauge
-	skippedScaleEventsCount          *k8smetrics.CounterVec
-	nodeGroupCreationCount           *k8smetrics.CounterVec
-	nodeGroupDeletionCount           *k8smetrics.CounterVec
-	nodeTaintsCount                  *k8smetrics.GaugeVec
-	inconsistentInstancesMigsCount   *k8smetrics.Gauge
-	binpackingHeterogeneity          *k8smetrics.HistogramVec
-	maxNodeSkipEvalDurationSeconds   *k8smetrics.Gauge
-	scaleDownNodeRemovalLatency      *k8smetrics.HistogramVec
+	errorsCount                       *k8smetrics.CounterVec
+	scaleUpCount                      *k8smetrics.CounterVec
+	gpuScaleUpCount                   *k8smetrics.CounterVec
+	failedScaleUpCount                *k8smetrics.CounterVec
+	failedNodeCreationCount           *k8smetrics.CounterVec
+	failedGPUScaleUpCount             *k8smetrics.CounterVec
+	scaleDownCount                    *k8smetrics.CounterVec
+	gpuScaleDownCount                 *k8smetrics.CounterVec
+	evictionsCount                    *k8smetrics.CounterVec
+	unneededNodesCount                *k8smetrics.Gauge
+	unremovableNodesCount             *k8smetrics.GaugeVec
+	scaleDownInCooldown               *k8smetrics.Gauge
+	oldUnregisteredNodesRemovedCount  *k8smetrics.Counter
+	nodesWithCreateErrorsDeletedCount *k8smetrics.Counter
+	overflowingControllersCount       *k8smetrics.Gauge
+	skippedScaleEventsCount           *k8smetrics.CounterVec
+	nodeGroupCreationCount            *k8smetrics.CounterVec
+	nodeGroupDeletionCount            *k8smetrics.CounterVec
+	nodeTaintsCount                   *k8smetrics.GaugeVec
+	inconsistentInstancesMigsCount    *k8smetrics.Gauge
+	binpackingHeterogeneity           *k8smetrics.HistogramVec
+	maxNodeSkipEvalDurationSeconds    *k8smetrics.Gauge
+	scaleDownNodeRemovalLatency       *k8smetrics.HistogramVec
 
 	// Metrics related to autoscaler prediction correctness
 	nodeTemplateResourcesMismatch *k8smetrics.GaugeVec
@@ -456,6 +457,14 @@ func newCaMetrics() *caMetrics {
 			},
 		),
 
+		nodesWithCreateErrorsDeletedCount: k8smetrics.NewCounter(
+			&k8smetrics.CounterOpts{
+				Namespace: caNamespace,
+				Name:      "nodes_with_create_errors_deleted_total",
+				Help:      "Number of nodes with create errors deleted by CA.",
+			},
+		),
+
 		overflowingControllersCount: k8smetrics.NewGauge(
 			&k8smetrics.GaugeOpts{
 				Namespace: caNamespace,
@@ -588,6 +597,7 @@ func (m *caMetrics) RegisterAll(emitPerNodeGroupMetrics bool) {
 	m.mustRegister(m.unremovableNodesCount)
 	m.mustRegister(m.scaleDownInCooldown)
 	m.mustRegister(m.oldUnregisteredNodesRemovedCount)
+	m.mustRegister(m.nodesWithCreateErrorsDeletedCount)
 	m.mustRegister(m.overflowingControllersCount)
 	m.mustRegister(m.skippedScaleEventsCount)
 	m.mustRegister(m.nodeGroupCreationCount)
@@ -873,6 +883,12 @@ func (m *caMetrics) UpdateScaleDownInCooldown(inCooldown bool) {
 // nodes that have been removed by the cluster autoscaler
 func (m *caMetrics) RegisterOldUnregisteredNodesRemoved(nodesCount int) {
 	m.oldUnregisteredNodesRemovedCount.Add(float64(nodesCount))
+}
+
+// RegisterNodesWithCreateErrorsDeleted records number of nodes with
+// create errors that have been deleted by the cluster autoscaler
+func (m *caMetrics) RegisterNodesWithCreateErrorsDeleted(nodesCount int) {
+	m.nodesWithCreateErrorsDeletedCount.Add(float64(nodesCount))
 }
 
 // UpdateOverflowingControllers sets the number of controllers that could not
