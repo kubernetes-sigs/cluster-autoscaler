@@ -34,7 +34,7 @@ const (
 	JobKind                   = "Job"
 	ApiGroupApps              = "apps"
 	ApiGroupBatch             = "batch"
-	ApiGroupCore              = "core"
+	ApiGroupCore              = ""
 )
 
 // ScaleObjectPodResolver resolves scale objects into pod specs and number of replicas only if there is at least one exiting pod
