@@ -221,6 +221,11 @@ func WithNodeNamesAffinity(nodeNames ...string) func(*apiv1.Pod) {
 
 // WithPodHostnameAntiAffinity sets pod's anti-affinity for pods matching the given labels at hostname topology level.
 func WithPodHostnameAntiAffinity(labels map[string]string) func(*apiv1.Pod) {
+	return WithPodAntiAffinity(labels, "kubernetes.io/hostname")
+}
+
+// WithPodAntiAffinity sets pod's required anti-affinity for pods matching the given labels at the given topology level.
+func WithPodAntiAffinity(labels map[string]string, topologyKey string) func(*apiv1.Pod) {
 	return func(pod *apiv1.Pod) {
 		if pod.Spec.Affinity == nil {
 			pod.Spec.Affinity = &apiv1.Affinity{}
@@ -231,10 +236,43 @@ func WithPodHostnameAntiAffinity(labels map[string]string) func(*apiv1.Pod) {
 					LabelSelector: &metav1.LabelSelector{
 						MatchLabels: labels,
 					},
-					TopologyKey: "kubernetes.io/hostname",
+					TopologyKey: topologyKey,
 				},
 			},
 		}
+	}
+}
+
+// WithPodAffinity sets pod's required affinity for pods matching the given labels at the given topology level.
+func WithPodAffinity(labels map[string]string, topologyKey string) func(*apiv1.Pod) {
+	return func(pod *apiv1.Pod) {
+		if pod.Spec.Affinity == nil {
+			pod.Spec.Affinity = &apiv1.Affinity{}
+		}
+		pod.Spec.Affinity.PodAffinity = &apiv1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []apiv1.PodAffinityTerm{
+				{
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: labels,
+					},
+					TopologyKey: topologyKey,
+				},
+			},
+		}
+	}
+}
+
+// WithPVC adds a volume backed by the given PersistentVolumeClaim (in the pod's namespace) to the pod.
+func WithPVC(claimName string) func(*apiv1.Pod) {
+	return func(pod *apiv1.Pod) {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, apiv1.Volume{
+			Name: fmt.Sprintf("pvc-%s", claimName),
+			VolumeSource: apiv1.VolumeSource{
+				PersistentVolumeClaim: &apiv1.PersistentVolumeClaimVolumeSource{
+					ClaimName: claimName,
+				},
+			},
+		})
 	}
 }
 
