@@ -875,11 +875,12 @@ func (o *ScaleUpOrchestrator) getRemainingPodsConsideringSkippedNodeGroups(ctx c
 	// For all egs here we need to generate the NoScaleUpInfo object because we only considered egs that are unschedulable in the first place.
 	// eg.SchedulingErrors will contain scheduling errors of this eg for not skipped nodegroups from the previous simulation + errors for skipped nodegroups from current simulation.
 	for _, eg := range egs {
+		skippedNGsPerEg := findSkippedNodeGroupsSatisfyingPodPredicates(eg, skipped)
 		for _, pod := range eg.Pods {
 			noScaleUpInfo := status.NoScaleUpInfo{
 				Pod:                pod,
 				RejectedNodeGroups: eg.SchedulingErrors,
-				SkippedNodeGroups:  findSkippedNodeGroupsSatisfyingPodPredicates(eg, skipped),
+				SkippedNodeGroups:  skippedNGsPerEg,
 			}
 			remaining = append(remaining, noScaleUpInfo)
 		}
