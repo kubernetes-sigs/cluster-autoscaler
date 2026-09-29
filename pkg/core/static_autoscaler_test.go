@@ -3998,3 +3998,17 @@ func TestShouldScaleDown(t *testing.T) {
 		})
 	}
 }
+
+func TestClusterStateRegistryConfig(t *testing.T) {
+	opts := config.AutoscalingOptions{
+		MaxTotalUnreadyPercentage: 30,
+		OkTotalUnreadyCount:       5,
+		UnreadyNodesScope:         config.UnreadyNodesScopeAutoscaled,
+	}
+	want := clusterstate.ClusterStateRegistryConfig{
+		MaxTotalUnreadyPercentage: 30,
+		OkTotalUnreadyCount:       5,
+		UnreadyNodesScope:         config.UnreadyNodesScopeAutoscaled,
+	}
+	assert.Equal(t, want, clusterStateRegistryConfig(opts))
+}

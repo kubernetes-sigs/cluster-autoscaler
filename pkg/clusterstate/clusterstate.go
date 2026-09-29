@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/api"
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/scaleupfailures"
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/utils"
+	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown"
 	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
 	"sigs.k8s.io/cluster-autoscaler/pkg/observers/nodegroupchange"
@@ -91,6 +92,10 @@ type ClusterStateRegistryConfig struct {
 	// Minimum number of nodes that must be unready for MaxTotalUnreadyPercentage to apply.
 	// This is to ensure that in very small clusters (e.g. 2 nodes) a single node's failure doesn't disable autoscaling.
 	OkTotalUnreadyCount int
+	// UnreadyNodesScope selects which nodes IsClusterHealthy counts. config.UnreadyNodesScopeAutoscaled
+	// restricts the check to nodes belonging to an autoscaled node group or whose node group lookup failed.
+	// Any other value, including the empty one, keeps the default behaviour of counting every node in the cluster.
+	UnreadyNodesScope string
 }
 
 // IncorrectNodeGroupSize contains information about how much the current size of the node group
@@ -129,6 +134,7 @@ type ClusterStateRegistry struct {
 	cloudProvider                      cloudprovider.CloudProvider
 	perNodeGroupReadiness              map[string]Readiness
 	totalReadiness                     Readiness
+	nodeGroupLookupErrors              map[string]struct{} // registered node names whose node group lookup failed
 	acceptableRanges                   map[string]AcceptableRange
 	incorrectNodeGroupSizes            map[string]IncorrectNodeGroupSize
 	unregisteredNodes                  map[string]UnregisteredNode
@@ -505,10 +511,25 @@ func (csr *ClusterStateRegistry) IsClusterHealthy() bool {
 	csr.Lock()
 	defer csr.Unlock()
 
-	totalUnready := len(csr.totalReadiness.Unready)
+	unready, registered := len(csr.totalReadiness.Unready), len(csr.nodes)
+	if csr.config.UnreadyNodesScope == config.UnreadyNodesScopeAutoscaled {
+		// Exclude nodes known to be outside autoscaled node groups, but include nodes whose
+		// group lookup failed: their ownership is unknown. Reuse the cluster-wide readiness
+		// classification so startup, deletion and suspension handling stays the same.
+		unready, registered = 0, len(csr.nodeGroupLookupErrors)
+		for _, nodeName := range csr.totalReadiness.Unready {
+			if _, failed := csr.nodeGroupLookupErrors[nodeName]; failed {
+				unready++
+			}
+		}
+		for _, readiness := range csr.perNodeGroupReadiness {
+			unready += len(readiness.Unready)
+			registered += len(readiness.Registered)
+		}
+	}
 
-	if totalUnready > csr.config.OkTotalUnreadyCount &&
-		float64(totalUnready) > csr.config.MaxTotalUnreadyPercentage/100.0*float64(len(csr.nodes)) {
+	if unready > csr.config.OkTotalUnreadyCount &&
+		float64(unready) > csr.config.MaxTotalUnreadyPercentage/100.0*float64(registered) {
 		return false
 	}
 
@@ -737,15 +758,8 @@ func (csr *ClusterStateRegistry) updateReadinessStats(ctx context.Context, curre
 	logger := klog.FromContext(ctx)
 	perNodeGroup := make(map[string]Readiness)
 	total := Readiness{Time: currentTime}
-	maxNodeStartupTime := MaxNodeStartupTime
-	update := func(current Readiness, node *apiv1.Node, nr kube_util.NodeReadiness) Readiness {
-		nodeGroup, errNg := csr.cloudProvider.NodeGroupForNode(ctx, node)
-		if errNg == nil && nodeGroup != nil {
-			if startupTime, err := csr.nodeGroupConfigProcessor.GetMaxNodeStartupTime(ctx, nodeGroup); err == nil {
-				maxNodeStartupTime = startupTime
-			}
-		}
-		logger.V(5).Info("Node: using maxNodeStartupTime", "nodeName", node.Name, "maxNodeStartupTime", maxNodeStartupTime)
+	nodeGroupLookupErrors := make(map[string]struct{})
+	update := func(current Readiness, node *apiv1.Node, nr kube_util.NodeReadiness, maxNodeStartupTime time.Duration) Readiness {
 		current.Registered = append(current.Registered, node.Name)
 		if _, isDeleted := csr.deletedNodes[node.Name]; isDeleted {
 			current.Deleted = append(current.Deleted, node.Name)
@@ -767,19 +781,30 @@ func (csr *ClusterStateRegistry) updateReadinessStats(ctx context.Context, curre
 	for _, node := range csr.nodes {
 		nodeGroup, errNg := csr.cloudProvider.NodeGroupForNode(ctx, node)
 		nr, errReady := kube_util.GetNodeReadiness(node)
+		// Resolve the startup timeout once per node so group and total readiness agree,
+		// and lookup failures cannot inherit another node group's startup grace period.
+		maxNodeStartupTime := MaxNodeStartupTime
+		if errNg == nil && nodeGroup != nil {
+			if startupTime, err := csr.nodeGroupConfigProcessor.GetMaxNodeStartupTime(ctx, nodeGroup); err == nil {
+				maxNodeStartupTime = startupTime
+			}
+		}
+		logger.V(5).Info("Node: using maxNodeStartupTime", "nodeName", node.Name, "maxNodeStartupTime", maxNodeStartupTime)
 
-		// Node is most likely not autoscaled, however check the errors.
+		// A nil group with no error identifies a node outside autoscaled node groups.
+		// Keep failed lookups separate so unknown ownership does not exclude a node from the health check.
 		if nodeGroup == nil {
 			if errNg != nil {
 				logger.Info("Failed to get nodegroup for node", "nodeName", node.Name, "err", errNg)
+				nodeGroupLookupErrors[node.Name] = struct{}{}
 			}
 			if errReady != nil {
 				logger.Info("Failed to get readiness info for node", "nodeName", node.Name, "err", errReady)
 			}
 		} else {
-			perNodeGroup[nodeGroup.Id()] = update(perNodeGroup[nodeGroup.Id()], node, nr)
+			perNodeGroup[nodeGroup.Id()] = update(perNodeGroup[nodeGroup.Id()], node, nr, maxNodeStartupTime)
 		}
-		total = update(total, node, nr)
+		total = update(total, node, nr, maxNodeStartupTime)
 	}
 
 	for _, unregistered := range csr.unregisteredNodes {
@@ -817,6 +842,7 @@ func (csr *ClusterStateRegistry) updateReadinessStats(ctx context.Context, curre
 	}
 	csr.perNodeGroupReadiness = perNodeGroup
 	csr.totalReadiness = total
+	csr.nodeGroupLookupErrors = nodeGroupLookupErrors
 }
 
 // Calculates which node groups have incorrect size.
