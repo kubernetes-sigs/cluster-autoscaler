@@ -205,14 +205,15 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 		}
 	}
 
+	nodeNames := make([]string, 0, len(nodesToTaint))
+	for _, node := range nodesToTaint {
+		nodeNames = append(nodeNames, node.Name)
+	}
+
 	var updateLatencyTracker *UpdateLatencyTracker
 	nodeDeleteDelayAfterTaint := a.nodeDeleteDelayAfterTaint
 	if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
-		taintStartTimes := make(map[string]time.Time, len(nodesToTaint))
-		for _, node := range nodesToTaint {
-			taintStartTimes[node.Name] = time.Now()
-		}
-		updateLatencyTracker = NewUpdateLatencyTracker(a.autoscalingCtx.AutoscalingKubeClients.ListerRegistry.AllNodeLister(), taintStartTimes)
+		updateLatencyTracker = NewUpdateLatencyTracker(a.autoscalingCtx.AutoscalingKubeClients.ListerRegistry.AllNodeLister(), nodeNames)
 		go updateLatencyTracker.Start(ctx)
 	}
 	failedTaintedNodes := make(chan struct {
@@ -222,6 +223,10 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 	taintedNodes := make(chan *apiv1.Node, len(nodesToTaint))
 	workqueue.ParallelizeUntil(context.Background(), maxConcurrentNodesTainting, len(nodesToTaint), func(piece int) {
 		node := nodesToTaint[piece]
+		if updateLatencyTracker != nil {
+			// Record the start time here rather than when the node is queued, so time spent waiting for a free worker doesn't inflate the latency.
+			updateLatencyTracker.RecordStartTime(node.Name)
+		}
 		err := a.taintNode(ctx, node)
 		if err != nil {
 			failedTaintedNodes <- struct {
@@ -239,7 +244,8 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 			a.autoscalingCtx.Recorder.Eventf(nodeWithError.node, apiv1.EventTypeWarning, "ScaleDownFailed", "failed to mark the node as toBeDeleted/unschedulable: %v", nodeWithError.err)
 		}
 		if updateLatencyTracker != nil {
-			close(updateLatencyTracker.ExpectedNodeCountChan)
+			// All applied taints are cleaned up below, so none of the nodes should be awaited or measured.
+			updateLatencyTracker.DropNodes(nodeNames...)
 		}
 		// Clean up already applied taints in case of issues.
 		for taintedNode := range taintedNodes {
@@ -249,9 +255,10 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 	}
 
 	if updateLatencyTracker != nil {
-		updateLatencyTracker.ExpectedNodeCountChan <- len(nodesToTaint)
-		latency, ok := <-updateLatencyTracker.ResultChan
-		if ok {
+		latency, err := updateLatencyTracker.WaitForLatency()
+		if err != nil {
+			klog.FromContext(ctx).Error(err, "Failed to measure taint latency, using the static node delete delay after taint")
+		} else {
 			a.pastLatencies.RegisterElement(latency)
 			a.pastLatencies.DropNotNewerThan(time.Now().Add(-1 * pastLatencyExpireDuration))
 			// CA is expected to wait 3 times the round-trip time between CA and the api-server.

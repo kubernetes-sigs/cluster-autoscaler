@@ -18,7 +18,8 @@ package actuation
 
 import (
 	"context"
-	"maps"
+	"fmt"
+	"sync"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -26,145 +27,180 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 )
 
-const sleepDurationWhenPolling = 50 * time.Millisecond
+const pollInterval = 50 * time.Millisecond
 const waitForTaintingTimeoutDuration = 30 * time.Second
 
-// UpdateLatencyTracker measures the time from CA starting to taint a node with ToBeDeletedTaint
-// until the taint shows up in CA's node watch cache (nodeLister), as an estimate of how long other
-// watchers (e.g. kube-scheduler) take to see the taint. The start time is recorded before the node
-// is queued for tainting, so the measured latency also includes time spent waiting for a free
-// tainting worker and in client-side rate limiting.
+// UpdateLatencyTracker measures the time until the taint appears in CA's own node
+// watch cache. Actuator uses this latency to estimate how long it takes for ToBeDeletedTaint to propagate to other
+// watchers (e.g. kube-scheduler) and delay node drain and deletion until the
+// scheduler is aware of the taints.
+// The latency is measured from the time when RecordStartTime is called for a taint to when the nodeLister returns the node with a ToBeDeleted taint.
 type UpdateLatencyTracker struct {
-	startTimestamp                 map[string]time.Time
-	finishTimestamp                map[string]time.Time
-	nodeLister                     kubernetes.NodeLister
-	sleepDurationWhenPolling       time.Duration
+	// mu synchronizes state transitions across concurrent tainting workers, the background
+	// polling goroutine, and the caller awaiting the result.
+	mu sync.Mutex
+	// notStarted tracks nodes queued for tainting so the polling loop does not exit or start
+	// the timeout clock before all taint workers have begun.
+	notStarted map[string]struct{}
+	// started records when each node's taint request began so latency excludes worker queue
+	// wait time and only nodes being tainted are polled.
+	started map[string]time.Time
+	// finished retains each node's propagation latency once its taint is observed so it is no
+	// longer polled while waiting for remaining nodes.
+	finished map[string]time.Duration
+	// done signals that the background polling loop has stopped and the recorded latencies are
+	// final.
+	done chan struct{}
+
+	// nodeLister provides access to CA's local node watch cache to observe taint propagation
+	// as a proxy for other cluster watchers.
+	nodeLister kubernetes.NodeLister
+	// pollInterval controls how frequently the watch cache is checked, balancing measurement
+	// precision against cache read overhead (and allowing faster polling in tests).
+	pollInterval time.Duration
+	// waitForTaintingTimeoutDuration bounds how long to wait for taints to appear after all
+	// nodes have started tainting, so lost or delayed watch events do not block scale-down.
 	waitForTaintingTimeoutDuration time.Duration
-	// ExpectedNodeCountChan receives the exact count of successfully tainted nodes
-	// to wait for before completing latency calculation. Closing ExpectedNodeCountChan
-	// (or passing <= 0) aborts latency calculation and closes ResultChan without a value.
-	ExpectedNodeCountChan chan int
-	// Communicate back the measured latency
-	ResultChan chan time.Duration
-	// now and sleep are used only to make the testing easier
-	now   func() time.Time
-	sleep func(time.Duration)
 }
 
-// NewUpdateLatencyTracker returns a new UpdateLatencyTracker for the nodes in startTimes, which
-// maps node names to the time CA started tainting them.
-func NewUpdateLatencyTracker(nodeLister kubernetes.NodeLister, startTimes map[string]time.Time) *UpdateLatencyTracker {
+// NewUpdateLatencyTracker registers the full batch of nodes upfront so the concurrent polling loop
+// knows not to exit or start its timeout until every node in the batch has either begun tainting
+// or been dropped.
+func NewUpdateLatencyTracker(nodeLister kubernetes.NodeLister, nodeNames []string) *UpdateLatencyTracker {
+	notStarted := make(map[string]struct{}, len(nodeNames))
+	for _, name := range nodeNames {
+		notStarted[name] = struct{}{}
+	}
 	return &UpdateLatencyTracker{
-		startTimestamp:                 maps.Clone(startTimes),
-		finishTimestamp:                map[string]time.Time{},
+		notStarted:                     notStarted,
+		started:                        make(map[string]time.Time, len(nodeNames)),
+		finished:                       make(map[string]time.Duration, len(nodeNames)),
+		done:                           make(chan struct{}),
 		nodeLister:                     nodeLister,
-		sleepDurationWhenPolling:       sleepDurationWhenPolling,
+		pollInterval:                   pollInterval,
 		waitForTaintingTimeoutDuration: waitForTaintingTimeoutDuration,
-		ExpectedNodeCountChan:          make(chan int, 1),
-		ResultChan:                     make(chan time.Duration),
-		now:                            time.Now,
-		sleep:                          time.Sleep,
 	}
 }
 
-// Start polls the nodeLister and records when the taint first appears for each tracked node.
-// It listens on ExpectedNodeCountChan to transition to awaiting the remaining nodes or to abort
-// latency calculation.
+// RecordStartTime marks the start of tainting for a node and should be called right before the API request is sent.
+func (u *UpdateLatencyTracker) RecordStartTime(nodeName string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if _, ok := u.notStarted[nodeName]; ok {
+		delete(u.notStarted, nodeName)
+		u.started[nodeName] = time.Now()
+	}
+}
+
+// DropNodes removes nodes whose taints failed or were rolled back so the tracker does not wait
+// until timeout for taints that will never appear, and does not include rolled-back nodes in the result.
+func (u *UpdateLatencyTracker) DropNodes(nodeNames ...string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for _, name := range nodeNames {
+		delete(u.notStarted, name)
+		delete(u.started, name)
+		delete(u.finished, name)
+	}
+}
+
+// Start runs concurrently with the tainting workers so fast taint propagations are captured as
+// soon as they reach the watch cache, without waiting for the rest of the batch to finish tainting.
 func (u *UpdateLatencyTracker) Start(ctx context.Context) {
-	defer close(u.ResultChan)
+	defer close(u.done)
+	ticker := time.NewTicker(u.pollInterval)
+	defer ticker.Stop()
+	var allStartedTime time.Time
 	for {
+		u.mu.Lock()
+		u.updateFinishTime(ctx)
+		allStarted := len(u.notStarted) == 0
+		allFinished := allStarted && len(u.started) == 0
+		u.mu.Unlock()
+
+		if allFinished {
+			return
+		}
+		// Start the timeout clock only after every node's taint request has begun, so
+		// worker pool queueing delay for large batches does not consume the timeout budget.
+		if allStarted {
+			if allStartedTime.IsZero() {
+				allStartedTime = time.Now()
+			} else if time.Since(allStartedTime) > u.waitForTaintingTimeoutDuration {
+				return
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			return
-		case expectedCount, ok := <-u.ExpectedNodeCountChan:
-			if ok && expectedCount > 0 {
-				u.updateFinishTime(ctx)
-				u.await(ctx, expectedCount)
-			}
-			return
-		default:
+		case <-ticker.C:
 		}
-		u.updateFinishTime(ctx)
-		u.sleep(u.sleepDurationWhenPolling)
 	}
 }
 
-// updateFinishTime checks the nodeLister for each tracked node that has not yet been observed
-// with ToBeDeletedTaint, and records its finish timestamp when the taint first appears.
+// updateFinishTime captures each node's propagation latency on the first poll where its taint is
+// visible in the watch cache, removing it from started so subsequent ticks don't re-query it.
+// Must be called with mu held.
 func (u *UpdateLatencyTracker) updateFinishTime(ctx context.Context) {
 	logger := klog.FromContext(ctx)
-	for nodeName := range u.startTimestamp {
-		if _, ok := u.finishTimestamp[nodeName]; ok {
-			continue
-		}
+	for nodeName, startTime := range u.started {
 		node, err := u.nodeLister.Get(nodeName)
 		if err != nil {
 			logger.Error(err, "Error getting node")
 			continue
 		}
 		if taints.HasToBeDeletedTaint(node) {
-			u.finishTimestamp[node.Name] = u.now()
+			delete(u.started, nodeName)
+			u.finished[nodeName] = time.Since(startTime)
 		}
 	}
 }
 
-// calculateLatency returns the maximum duration between startTimestamp and finishTimestamp
-// across all nodes that have been observed with ToBeDeletedTaint.
-func (u *UpdateLatencyTracker) calculateLatency() time.Duration {
-	var maxLatency time.Duration = 0
-	for node, startTime := range u.startTimestamp {
-		endTime, ok := u.finishTimestamp[node]
-		if !ok {
-			continue
-		}
-		currentLatency := endTime.Sub(startTime)
-		if currentLatency > maxLatency {
-			maxLatency = currentLatency
-		}
+// WaitForLatency returns the slowest taint propagation latency across the batch so the caller can
+// delay node deletion long enough for all taints to reach the scheduler. If any tracked node was
+// not observed (or none remained to measure), it returns an error so the caller falls back to the
+// static delay instead of acting on an incomplete measurement.
+func (u *UpdateLatencyTracker) WaitForLatency() (time.Duration, error) {
+	u.mu.Lock()
+	if n := len(u.notStarted); n > 0 {
+		// Unblock Start, which would otherwise wait indefinitely for these nodes to start
+		// and leak its goroutine until context cancellation.
+		clear(u.notStarted)
+		clear(u.started)
+		u.mu.Unlock()
+		return 0, fmt.Errorf("%d nodes were neither started nor dropped", n)
 	}
-	return maxLatency
+	u.mu.Unlock()
+
+	<-u.done
+
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if len(u.started) > 0 {
+		return 0, fmt.Errorf("taint wasn't observed for %d nodes", len(u.started))
+	}
+	if len(u.finished) == 0 {
+		return 0, fmt.Errorf("no nodes to measure taint latency for")
+	}
+	var maxLatency time.Duration
+	for _, latency := range u.finished {
+		maxLatency = max(maxLatency, latency)
+	}
+	return maxLatency, nil
 }
 
-// await polls until expectedNodeCount nodes have been observed with ToBeDeletedTaint (sending the
-// measured latency to ResultChan), waitForTaintingTimeoutDuration elapses, or ctx is cancelled.
-func (u *UpdateLatencyTracker) await(ctx context.Context, expectedNodeCount int) {
-	logger := klog.FromContext(ctx)
-	waitingForTaintingStartTime := u.now()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		switch {
-		case len(u.finishTimestamp) >= expectedNodeCount:
-			latency := u.calculateLatency()
-			select {
-			case u.ResultChan <- latency:
-			case <-ctx.Done():
-			}
-			return
-		case u.now().After(waitingForTaintingStartTime.Add(u.waitForTaintingTimeoutDuration)):
-			logger.Error(nil, "Timeout before tainting all nodes, latency measurement will be stale")
-			return
-		default:
-			u.sleep(u.sleepDurationWhenPolling)
-			u.updateFinishTime(ctx)
-		}
-	}
-}
-
-// NewUpdateLatencyTrackerForTesting returns an UpdateLatencyTracker object with
-// reduced sleepDurationWhenPolling and mock clock for testing.
-func NewUpdateLatencyTrackerForTesting(nodeLister kubernetes.NodeLister, startTimes map[string]time.Time, now func() time.Time) *UpdateLatencyTracker {
-	updateLatencyTracker := NewUpdateLatencyTracker(nodeLister, startTimes)
-	updateLatencyTracker.now = now
+// NewUpdateLatencyTrackerForTesting configures shorter polling and timeout intervals so unit tests
+// can exercise polling and timeout paths quickly.
+func NewUpdateLatencyTrackerForTesting(nodeLister kubernetes.NodeLister, nodeNames []string) *UpdateLatencyTracker {
+	updateLatencyTracker := NewUpdateLatencyTracker(nodeLister, nodeNames)
 	updateLatencyTracker.waitForTaintingTimeoutDuration = 200 * time.Millisecond
-	updateLatencyTracker.sleepDurationWhenPolling = time.Millisecond
+	updateLatencyTracker.pollInterval = time.Millisecond
 	return updateLatencyTracker
 }
 
+// maxLatency extracts the highest latency from an untyped expiring.List slice to determine the
+// worst-case propagation delay over the lookback window.
 func maxLatency(latencies []interface{}) time.Duration {
 	var currentMax time.Duration = 0
 	for _, l := range latencies {
