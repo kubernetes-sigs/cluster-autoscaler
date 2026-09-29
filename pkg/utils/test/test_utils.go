@@ -221,6 +221,11 @@ func WithNodeNamesAffinity(nodeNames ...string) func(*apiv1.Pod) {
 
 // WithPodHostnameAntiAffinity sets pod's anti-affinity for pods matching the given labels at hostname topology level.
 func WithPodHostnameAntiAffinity(labels map[string]string) func(*apiv1.Pod) {
+	return WithPodAntiAffinity(labels, "kubernetes.io/hostname")
+}
+
+// WithPodAntiAffinity sets pod's required anti-affinity for pods matching the given labels at the given topology level.
+func WithPodAntiAffinity(labels map[string]string, topologyKey string) func(*apiv1.Pod) {
 	return func(pod *apiv1.Pod) {
 		if pod.Spec.Affinity == nil {
 			pod.Spec.Affinity = &apiv1.Affinity{}
@@ -231,7 +236,7 @@ func WithPodHostnameAntiAffinity(labels map[string]string) func(*apiv1.Pod) {
 					LabelSelector: &metav1.LabelSelector{
 						MatchLabels: labels,
 					},
-					TopologyKey: "kubernetes.io/hostname",
+					TopologyKey: topologyKey,
 				},
 			},
 		}

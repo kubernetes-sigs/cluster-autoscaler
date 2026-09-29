@@ -170,10 +170,8 @@ func (e *BinpackingNodeEstimator) tryToScheduleOnExistingNodes(
 	for index = 0; index < len(pods); index++ {
 		pod := pods[index]
 
-		// Try to schedule the pod on all nodes created during simulation
-		nodeName, err := e.clusterSnapshot.SchedulePodOnAnyNodeMatching(pod, clustersnapshot.SchedulingOptions{IsNodeAcceptable: func(nodeInfo *framework.NodeInfo) bool {
-			return estimationState.newNodeNames[nodeInfo.Node().Name]
-		}})
+		// Try to schedule the pod on the nodes created during simulation that already have pods.
+		nodeName, err := e.scheduleOnExistingNewNodes(estimationState, pod)
 		if err != nil && err.Type() == clustersnapshot.SchedulingInternalError {
 			// Unexpected error.
 			return nil, err
@@ -185,6 +183,34 @@ func (e *BinpackingNodeEstimator) tryToScheduleOnExistingNodes(
 		estimationState.trackScheduledPod(pod, nodeName)
 	}
 	return pods[index:], nil
+}
+
+// scheduleOnExistingNewNodes schedules pod on one of the nodes added during this estimation that already
+// have pods scheduled on them. It returns the name of the chosen node.
+//
+// The most recently added node is tried first and directly, because it's the one most likely to
+// have room left. The nodes before it were typically filled up before it got added. Without the
+// direct check, finding it requires a scan over the node list, which by default starts right after
+// the node matched by the previous scan. When that was the last node too and the list order is
+// stable, the scan runs filters on (almost) all the other, full nodes before it gets back to it.
+//
+// An empty last node is skipped. It could have been added for a pod that then failed to schedule on it
+// (e.g. because of zonal constraints), and filling it before the partially used nodes would inflate the
+// estimate. tryToScheduleOnNewNodes still tries it before adding any more nodes.
+func (e *BinpackingNodeEstimator) scheduleOnExistingNewNodes(estimationState *estimationState, pod *apiv1.Pod) (string, clustersnapshot.SchedulingError) {
+	lastNodeName := estimationState.lastNodeName
+	if estimationState.newNodesWithPods[lastNodeName] {
+		err := e.clusterSnapshot.SchedulePod(pod, lastNodeName)
+		if err == nil || err.Type() == clustersnapshot.SchedulingInternalError {
+			return lastNodeName, err
+		}
+		// The pod can't be scheduled on the last node because of scheduling predicates, try the others.
+	}
+	return e.clusterSnapshot.SchedulePodOnAnyNodeMatching(pod, clustersnapshot.SchedulingOptions{IsNodeAcceptable: func(nodeInfo *framework.NodeInfo) bool {
+		nodeName := nodeInfo.Node().Name
+		// The last node has already been checked above, or is empty.
+		return nodeName != lastNodeName && estimationState.newNodeNames[nodeName]
+	}})
 }
 
 // Returns whether it is worth retrying adding new nodes and error in unexpected
@@ -281,12 +307,17 @@ func (e *BinpackingNodeEstimator) tryFastPath(
 	if len(pods) == 0 {
 		return true, nil
 	}
-	if !e.limiter.PermissionToAddNode(ctx) {
-		return false, nil
-	}
-	// Add test node to snapshot.
-	if err := e.addNewNodeToSnapshot(ctx, estimationState, nodeTemplate); err != nil {
-		return false, fmt.Errorf("Error while adding new node for template to ClusterSnapshot; %w", err)
+	// An empty last node was added for a pod that then failed to schedule on it. It's equivalent to
+	// a fresh node from the template, so reuse it, as tryToScheduleOnNewNodes does, rather than
+	// adding another one and using up the limiter's permission for an extra node.
+	if estimationState.lastNodeName == "" || estimationState.newNodesWithPods[estimationState.lastNodeName] {
+		if !e.limiter.PermissionToAddNode(ctx) {
+			return false, nil
+		}
+		// Add test node to snapshot.
+		if err := e.addNewNodeToSnapshot(ctx, estimationState, nodeTemplate); err != nil {
+			return false, fmt.Errorf("Error while adding new node for template to ClusterSnapshot; %w", err)
+		}
 	}
 
 	i := 0
