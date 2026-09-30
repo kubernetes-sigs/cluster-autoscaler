@@ -200,6 +200,27 @@ func TestNodeLatencyTracker_SimulationLoop(t *testing.T) {
 				},
 			},
 		},
+		{
+			// With partial taint actuation, ScaledDownNodes only has the nodes that were tainted and sent for deletion.
+			name: "Partial taint failure: failed nodes stay tracked until they are scaled down",
+			steps: []step{
+				{
+					unneededList:     []string{"node1", "node2", "node3"},
+					wantTrackedNodes: []string{"node1", "node2", "node3"},
+				},
+				{
+					// node2 failed to taint.
+					unneededList:     []string{"node1", "node2", "node3"},
+					scaledDownList:   []string{"node1", "node3"},
+					wantTrackedNodes: []string{"node2"},
+				},
+				{
+					unneededList:     []string{"node2"},
+					scaledDownList:   []string{"node2"},
+					wantTrackedNodes: []string{},
+				},
+			},
+		},
 	}
 
 	for _, tc := range tests {
