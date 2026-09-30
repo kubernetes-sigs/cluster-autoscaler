@@ -21,7 +21,9 @@ import (
 	goerrors "errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -73,6 +75,7 @@ type Actuator struct {
 	budgetProcessor           *budgets.ScaleDownBudgetProcessor
 	configGetter              actuatorNodeGroupConfigGetter
 	nodeDeleteDelayAfterTaint time.Duration
+	pastLatenciesMu           sync.Mutex
 	pastLatencies             *expiring.List
 }
 
@@ -140,60 +143,50 @@ func (a *Actuator) startDeletion(ctx context.Context, empty, drain []*apiv1.Node
 	deletionStartTime := time.Now()
 	defer func() { metrics.UpdateDuration(ctx, metrics.ScaleDownNodeDeletion, time.Since(deletionStartTime)) }()
 
-	scaledDownNodes := make([]*status.ScaleDownNode, 0)
 	emptyToDelete, drainToDelete := a.budgetProcessor.CropNodes(ctx, a.nodeDeletionTracker, empty, drain)
 	if len(emptyToDelete) == 0 && len(drainToDelete) == 0 {
 		return status.ScaleDownNoNodeDeleted, nil, nil
 	}
 
-	if len(emptyToDelete) > 0 {
-		// Taint all empty nodes synchronously
-		nodeDeleteDelayAfterTaint, err := a.taintNodesSync(ctx, emptyToDelete)
-		if err != nil {
-			return status.ScaleDownError, scaledDownNodes, err
-		}
-
-		emptyScaledDown := a.deleteAsyncEmpty(ctx, emptyToDelete, nodeDeleteDelayAfterTaint, force)
-		scaledDownNodes = append(scaledDownNodes, emptyScaledDown...)
+	var latencyTracker *UpdateLatencyTracker
+	if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
+		latencyTracker = NewUpdateLatencyTracker(a.autoscalingCtx.AutoscalingKubeClients.ListerRegistry.AllNodeLister(), nodeNames(collectNodes(emptyToDelete, drainToDelete)))
+		go latencyTracker.Start(ctx)
 	}
 
-	if len(drainToDelete) > 0 {
-		// Taint all nodes that need drain synchronously, but don't start any drain/deletion yet. Otherwise, pods evicted from one to-be-deleted node
-		// could get recreated on another.
-		nodeDeleteDelayAfterTaint, err := a.taintNodesSync(ctx, drainToDelete)
-		if err != nil {
-			return status.ScaleDownError, scaledDownNodes, err
-		}
-
-		// All nodes involved in the scale-down should be tainted now - start draining and deleting nodes asynchronously.
-		drainScaledDown := a.deleteAsyncDrain(ctx, drainToDelete, nodeDeleteDelayAfterTaint, force)
-		scaledDownNodes = append(scaledDownNodes, drainScaledDown...)
+	tainted := a.taintNodesSync(ctx, emptyToDelete, drainToDelete, latencyTracker)
+	if len(tainted.empty) == 0 && len(tainted.drain) == 0 {
+		a.cleanTaintsSync(ctx, tainted.nodesToClean)
+		return status.ScaleDownError, nil, errors.NewAutoscalerErrorf(errors.ApiCallError, "no nodes scaled down: couldn't taint %d of %d nodes with ToBeDeleted", tainted.failedCount, tainted.nodesCount)
 	}
+
+	// Deletion goroutines wait for the delay after taint themselves, so the main loop doesn't block on it.
+	delayAfterTaint := a.nodeDeleteDelayAfterTaintFunc(ctx, latencyTracker)
+	scaledDownNodes := a.deleteAsyncEmpty(ctx, tainted.empty, delayAfterTaint, force)
+	scaledDownNodes = append(scaledDownNodes, a.deleteAsyncDrain(ctx, tainted.drain, delayAfterTaint, force)...)
+
+	// Nodes of aborted atomic node groups are untainted after the other deletions have started.
+	a.cleanTaintsSync(ctx, tainted.nodesToClean)
 
 	return status.ScaleDownNodeDeleteStarted, scaledDownNodes, nil
 }
 
 // deleteAsyncEmpty immediately starts deletions asynchronously.
 // scaledDownNodes return value contains all nodes for which deletion successfully started.
-func (a *Actuator) deleteAsyncEmpty(ctx context.Context, NodeGroupViews []*budgets.NodeGroupView, nodeDeleteDelayAfterTaint time.Duration, force bool) (reportedSDNodes []*status.ScaleDownNode) {
+func (a *Actuator) deleteAsyncEmpty(ctx context.Context, NodeGroupViews []*budgets.NodeGroupView, delayAfterTaint func() time.Duration, force bool) (reportedSDNodes []*status.ScaleDownNode) {
 	logger := klog.FromContext(ctx)
 	for _, bucket := range NodeGroupViews {
 		for _, node := range bucket.Nodes {
 			logger.V(0).Info("Scale-down: removing empty node", "node", klog.KObj(node))
 			a.autoscalingCtx.LogRecorder.Eventf(apiv1.EventTypeNormal, "ScaleDownEmpty", "Scale-down: removing empty node %q", node.Name)
 
-			if sdNode, err := a.scaleDownNodeToReport(ctx, node, false); err == nil {
-				reportedSDNodes = append(reportedSDNodes, sdNode)
-			} else {
-				logger.Error(err, "Scale-down: couldn't report scaled down node", "node", klog.KObj(node))
-			}
-
+			reportedSDNodes = append(reportedSDNodes, a.scaleDownNodeToReport(ctx, node, bucket.Group, false))
 			a.nodeDeletionTracker.StartDeletion(bucket.Group.Id(), node.Name)
 		}
 	}
 
 	for _, bucket := range NodeGroupViews {
-		go a.deleteNodesAsync(ctx, bucket.Nodes, bucket.Group, false, force, bucket.BatchSize, nodeDeleteDelayAfterTaint)
+		go a.deleteNodesAsync(ctx, bucket.Nodes, bucket.Group, false, force, bucket.BatchSize, delayAfterTaint)
 	}
 
 	return reportedSDNodes
@@ -226,110 +219,219 @@ func taintErrorCode(err error) string {
 	return fmt.Sprintf("%s(%d)", name, status.Code)
 }
 
-// taintNodesSync synchronously taints all provided nodes with NoSchedule. If tainting fails for any of the nodes, already
-// applied taints are cleaned up.
-func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets.NodeGroupView) (time.Duration, errors.AutoscalerError) {
-	nodesToTaint := make([]*apiv1.Node, 0)
+func collectNodes(viewLists ...[]*budgets.NodeGroupView) []*apiv1.Node {
+	var nodes []*apiv1.Node
+	for _, views := range viewLists {
+		for _, bucket := range views {
+			nodes = append(nodes, bucket.Nodes...)
+		}
+	}
+	return nodes
+}
 
-	for _, bucket := range NodeGroupViews {
+func nodeNames(nodes []*apiv1.Node) []string {
+	names := make([]string, len(nodes))
+	for i, node := range nodes {
+		names[i] = node.Name
+	}
+	return names
+}
+
+// taintResult is what taintNodesSync returns.
+type taintResult struct {
+	// empty and drain are the node group views with the tainted nodes that go on to deletion.
+	empty, drain []*budgets.NodeGroupView
+	// nodesToClean are the tainted nodes of atomic node groups whose scale-down was aborted.
+	nodesToClean []*apiv1.Node
+	// nodesCount is the number of nodes in the batch, failedCount the number of nodes that failed to taint.
+	nodesCount, failedCount int
+}
+
+// taintNodesSync taints all nodes from emptyToDelete and drainToDelete and returns the node group views
+// with the nodes that should be deleted. Nodes that failed to taint are left out. Atomic node groups
+// are scaled down all or nothing: after the first taint failure in an atomic node group, its remaining
+// nodes are skipped and its already tainted nodes are returned in nodesToClean.
+// taintNodesSync also does all the latency tracker bookkeeping: every node that won't be deleted is dropped.
+func (a *Actuator) taintNodesSync(
+	ctx context.Context,
+	emptyToDelete, drainToDelete []*budgets.NodeGroupView,
+	latencyTracker *UpdateLatencyTracker,
+) taintResult {
+	logger := klog.FromContext(ctx)
+	type taintTarget struct {
+		node   *apiv1.Node
+		bucket *budgets.NodeGroupView
+	}
+	var targets []taintTarget
+	for _, bucket := range slices.Concat(emptyToDelete, drainToDelete) {
 		for _, node := range bucket.Nodes {
-			nodesToTaint = append(nodesToTaint, node)
+			targets = append(targets, taintTarget{node: node, bucket: bucket})
 		}
 	}
 
-	nodeNames := make([]string, 0, len(nodesToTaint))
-	for _, node := range nodesToTaint {
-		nodeNames = append(nodeNames, node.Name)
-	}
+	var mu sync.Mutex
+	failed := make(map[string]error)
+	// failedAtomicGroups counts taint failures per atomic node group.
+	failedAtomicGroups := make(map[string]int)
+	var tainted []taintTarget
+	// context.Background() makes sure every node is either tainted, failed, or skipped.
+	workqueue.ParallelizeUntil(context.Background(), maxConcurrentNodesTainting, len(targets), func(piece int) {
+		t := targets[piece]
+		// CropNodes sets BatchSize only for atomic node groups.
+		atomic := t.bucket.BatchSize > 0
+		mu.Lock()
+		skip := atomic && failedAtomicGroups[t.bucket.Group.Id()] > 0
+		mu.Unlock()
+		if skip {
+			if latencyTracker != nil {
+				latencyTracker.DropNodes(t.node.Name)
+			}
+			return
+		}
 
-	var updateLatencyTracker *UpdateLatencyTracker
-	nodeDeleteDelayAfterTaint := a.nodeDeleteDelayAfterTaint
-	if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
-		updateLatencyTracker = NewUpdateLatencyTracker(a.autoscalingCtx.AutoscalingKubeClients.ListerRegistry.AllNodeLister(), nodeNames)
-		go updateLatencyTracker.Start(ctx)
-	}
-	type failedTaint struct {
-		nodeName string
-		err      error
-	}
-	failedTaintsChan := make(chan failedTaint, len(nodesToTaint))
-	// context.Background() makes sure every node gets a taint attempt, so each node ends up either tainted or in failedNodes.
-	workqueue.ParallelizeUntil(context.Background(), maxConcurrentNodesTainting, len(nodesToTaint), func(piece int) {
-		node := nodesToTaint[piece]
-		if updateLatencyTracker != nil {
-			// Record the start time here rather than when the node is queued, so time spent waiting for a free worker doesn't inflate the latency.
-			updateLatencyTracker.RecordStartTime(node.Name)
+		if latencyTracker != nil {
+			latencyTracker.RecordStartTime(t.node.Name)
 		}
-		if err := a.taintNode(ctx, node); err != nil {
-			failedTaintsChan <- failedTaint{nodeName: node.Name, err: err}
+		err := a.taintNode(ctx, t.node)
+		if err != nil && latencyTracker != nil {
+			latencyTracker.DropNodes(t.node.Name)
 		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			failed[t.node.Name] = err
+			if atomic {
+				failedAtomicGroups[t.bucket.Group.Id()]++
+			}
+			return
+		}
+		tainted = append(tainted, t)
 	})
-	close(failedTaintsChan)
-
-	failedNodes := make(map[string]error, len(failedTaintsChan))
-	for failed := range failedTaintsChan {
-		failedNodes[failed.nodeName] = failed.err
+	if len(failed) > 0 {
+		logger.Error(nil, "Failed to taint nodes", "nodesCount", len(targets), "errorCount", len(failed), "errorsByCode", summarizeTaintErrors(failed), "failedAtomicNodeGroupsCount", len(failedAtomicGroups))
 	}
-	if len(failedNodes) > 0 {
-		klog.FromContext(ctx).Error(nil, "Failed to taint nodes", "nodesCount", len(nodesToTaint), "errorCount", len(failedNodes), "errorsByCode", summarizeTaintErrors(failedNodes))
-		if updateLatencyTracker != nil {
-			// All applied taints are cleaned up below, so none of the nodes should be awaited or measured.
-			updateLatencyTracker.DropNodes(nodeNames...)
+
+	result := taintResult{nodesCount: len(targets), failedCount: len(failed)}
+	inFailedAtomicGroup := func(bucket *budgets.NodeGroupView) bool {
+		return bucket.BatchSize > 0 && failedAtomicGroups[bucket.Group.Id()] > 0
+	}
+	// Per aborted atomic node group: how many of its nodes are in the batch, and how many were tainted before the failure.
+	abortedNodesCount := make(map[string]int, len(failedAtomicGroups))
+	untaintedCount := make(map[string]int, len(failedAtomicGroups))
+	for _, t := range targets {
+		if inFailedAtomicGroup(t.bucket) {
+			abortedNodesCount[t.bucket.Group.Id()]++
 		}
-		// Clean up already applied taints in case of issues.
-		for _, taintedNode := range nodesToTaint {
-			if _, found := failedNodes[taintedNode.Name]; found {
+	}
+	for _, t := range tainted {
+		if inFailedAtomicGroup(t.bucket) {
+			result.nodesToClean = append(result.nodesToClean, t.node)
+			untaintedCount[t.bucket.Group.Id()]++
+		}
+	}
+	for groupId, failures := range failedAtomicGroups {
+		logger.Error(nil, "Not scaling down atomic node group: some of its nodes couldn't be tainted", "nodeGroupId", groupId, "nodesCount", abortedNodesCount[groupId], "taintFailures", failures, "skipped", abortedNodesCount[groupId]-failures-untaintedCount[groupId], "untainted", untaintedCount[groupId])
+	}
+	if len(result.nodesToClean) > 0 && latencyTracker != nil {
+		latencyTracker.DropNodes(nodeNames(result.nodesToClean)...)
+	}
+
+	filterTainted := func(views []*budgets.NodeGroupView) []*budgets.NodeGroupView {
+		var filtered []*budgets.NodeGroupView
+		for _, bucket := range views {
+			if inFailedAtomicGroup(bucket) {
 				continue
 			}
-			if _, err := taints.CleanToBeDeleted(ctx, taintedNode, a.autoscalingCtx.ClientSet, a.autoscalingCtx.CordonNodeBeforeTerminate); err != nil {
-				klog.FromContext(ctx).Error(err, "Failed to remove ToBeDeleted taint after a failed scale-down", "node", klog.KObj(taintedNode))
+			var nodes []*apiv1.Node
+			for _, node := range bucket.Nodes {
+				if _, isFailed := failed[node.Name]; !isFailed {
+					nodes = append(nodes, node)
+				}
+			}
+			if len(nodes) > 0 {
+				filteredBucket := *bucket
+				filteredBucket.Nodes = nodes
+				filtered = append(filtered, &filteredBucket)
 			}
 		}
-		return nodeDeleteDelayAfterTaint, errors.NewAutoscalerErrorf(errors.ApiCallError, "couldn't taint %d nodes with ToBeDeleted", len(failedNodes))
+		return filtered
 	}
+	result.empty = filterTainted(emptyToDelete)
+	result.drain = filterTainted(drainToDelete)
+	return result
+}
 
-	if updateLatencyTracker != nil {
-		latency, err := updateLatencyTracker.WaitForLatency()
-		if err != nil {
-			klog.FromContext(ctx).Error(err, "Failed to measure taint latency, using the static node delete delay after taint")
-		} else {
-			a.pastLatencies.RegisterElement(latency)
-			a.pastLatencies.DropNotNewerThan(time.Now().Add(-1 * pastLatencyExpireDuration))
-			// CA is expected to wait 3 times the round-trip time between CA and the api-server.
-			// At this point, we have already tainted all the nodes.
-			// Therefore, the nodeDeleteDelayAfterTaint is set 2 times the maximum latency observed during the last hour.
-			nodeDeleteDelayAfterTaint = 2 * maxLatency(a.pastLatencies.ToSlice())
+// cleanTaintsSync removes ToBeDeletedTaint concurrently from nodes whose atomic nodegroup scale-down was aborted.
+func (a *Actuator) cleanTaintsSync(ctx context.Context, nodes []*apiv1.Node) {
+	workqueue.ParallelizeUntil(context.Background(), maxConcurrentNodesTainting, len(nodes), func(piece int) {
+		node := nodes[piece]
+		if _, err := taints.CleanToBeDeleted(ctx, node, a.autoscalingCtx.ClientSet, a.autoscalingCtx.CordonNodeBeforeTerminate); err != nil {
+			klog.FromContext(ctx).Error(err, "Failed to remove ToBeDeleted taint after a failed scale-down", "node", klog.KObj(node))
 		}
-	}
-	return nodeDeleteDelayAfterTaint, nil
+	})
 }
 
 // deleteAsyncDrain asynchronously starts deletions with drain for all provided nodes. scaledDownNodes return value contains all nodes for which
 // deletion successfully started.
-func (a *Actuator) deleteAsyncDrain(ctx context.Context, NodeGroupViews []*budgets.NodeGroupView, nodeDeleteDelayAfterTaint time.Duration, force bool) (reportedSDNodes []*status.ScaleDownNode) {
+func (a *Actuator) deleteAsyncDrain(ctx context.Context, NodeGroupViews []*budgets.NodeGroupView, delayAfterTaint func() time.Duration, force bool) (reportedSDNodes []*status.ScaleDownNode) {
 	logger := klog.FromContext(ctx)
 	for _, bucket := range NodeGroupViews {
 		for _, drainNode := range bucket.Nodes {
-			if sdNode, err := a.scaleDownNodeToReport(ctx, drainNode, true); err == nil {
-				logger.V(0).Info("Scale-down: removing node", "node", klog.KObj(drainNode), "utilization", sdNode.UtilInfo, "podsToReschedule", joinPodNames(sdNode.EvictedPods))
-				a.autoscalingCtx.LogRecorder.Eventf(apiv1.EventTypeNormal, "ScaleDown", "Scale-down: removing node %s, utilization: %v, pods to reschedule: %s", drainNode.Name, sdNode.UtilInfo, joinPodNames(sdNode.EvictedPods))
-				reportedSDNodes = append(reportedSDNodes, sdNode)
-			} else {
-				logger.Error(err, "Scale-down: couldn't report scaled down node", "node", klog.KObj(drainNode))
-			}
-
+			sdNode := a.scaleDownNodeToReport(ctx, drainNode, bucket.Group, true)
+			logger.V(0).Info("Scale-down: removing node", "node", klog.KObj(drainNode), "utilization", sdNode.UtilInfo, "podsToReschedule", joinPodNames(sdNode.EvictedPods))
+			a.autoscalingCtx.LogRecorder.Eventf(apiv1.EventTypeNormal, "ScaleDown", "Scale-down: removing node %s, utilization: %v, pods to reschedule: %s", drainNode.Name, sdNode.UtilInfo, joinPodNames(sdNode.EvictedPods))
+			reportedSDNodes = append(reportedSDNodes, sdNode)
 			a.nodeDeletionTracker.StartDeletionWithDrain(bucket.Group.Id(), drainNode.Name)
 		}
 	}
 
 	for _, bucket := range NodeGroupViews {
-		go a.deleteNodesAsync(ctx, bucket.Nodes, bucket.Group, true, force, bucket.BatchSize, nodeDeleteDelayAfterTaint)
+		go a.deleteNodesAsync(ctx, bucket.Nodes, bucket.Group, true, force, bucket.BatchSize, delayAfterTaint)
 	}
 
 	return reportedSDNodes
 }
 
-func (a *Actuator) deleteNodesAsync(ctx context.Context, nodes []*apiv1.Node, nodeGroup cloudprovider.NodeGroup, drain bool, force bool, batchSize int, nodeDeleteDelayAfterTaint time.Duration) {
+// nodeDeleteDelayAfterTaintFunc returns a function that tells the deletion goroutines how long to wait after
+// tainting before draining and deleting nodes. Without a latency tracker that's the static nodeDeleteDelayAfterTaint.
+// With one, the delay is computed once per batch in the background and the returned function blocks until the
+// taints have shown up in CA's node watch cache. Either way the main loop doesn't wait for it.
+func (a *Actuator) nodeDeleteDelayAfterTaintFunc(ctx context.Context, latencyTracker *UpdateLatencyTracker) func() time.Duration {
+	if latencyTracker == nil {
+		return func() time.Duration { return a.nodeDeleteDelayAfterTaint }
+	}
+	ready := make(chan struct{})
+	var delay time.Duration
+	go func() {
+		defer close(ready)
+		delay = a.dynamicNodeDeleteDelayAfterTaint(ctx, latencyTracker)
+	}()
+	return func() time.Duration {
+		<-ready
+		return delay
+	}
+}
+
+// dynamicNodeDeleteDelayAfterTaint waits for the taint latency of the batch, records it, and returns twice the
+// maximum latency observed over the last hour. If the latency couldn't be measured, it returns the static delay.
+func (a *Actuator) dynamicNodeDeleteDelayAfterTaint(ctx context.Context, latencyTracker *UpdateLatencyTracker) time.Duration {
+	latency, err := latencyTracker.WaitForLatency()
+	if err != nil {
+		klog.FromContext(ctx).Error(err, "Failed to measure taint latency, using the static node delete delay after taint")
+		return a.nodeDeleteDelayAfterTaint
+	}
+	a.pastLatenciesMu.Lock()
+	defer a.pastLatenciesMu.Unlock()
+	a.pastLatencies.RegisterElement(latency)
+	a.pastLatencies.DropNotNewerThan(time.Now().Add(-1 * pastLatencyExpireDuration))
+	// CA is expected to wait 3 times the round-trip time between CA and the api-server.
+	// At this point, we have already tainted all the nodes.
+	// Therefore, the nodeDeleteDelayAfterTaint is set 2 times the maximum latency observed during the last hour.
+	return 2 * maxLatency(a.pastLatencies.ToSlice())
+}
+
+func (a *Actuator) deleteNodesAsync(ctx context.Context, nodes []*apiv1.Node, nodeGroup cloudprovider.NodeGroup, drain bool, force bool, batchSize int, delayAfterTaint func() time.Duration) {
 	logger := klog.FromContext(ctx)
 	var remainingPdbTracker pdb.RemainingPdbTracker
 	var registry kube_util.ListerRegistry
@@ -338,7 +440,7 @@ func (a *Actuator) deleteNodesAsync(ctx context.Context, nodes []*apiv1.Node, no
 		return
 	}
 
-	if nodeDeleteDelayAfterTaint > time.Duration(0) {
+	if nodeDeleteDelayAfterTaint := delayAfterTaint(); nodeDeleteDelayAfterTaint > time.Duration(0) {
 		logger.V(0).Info("Scale-down: waiting before trying to delete nodes", "delay", nodeDeleteDelayAfterTaint)
 		time.Sleep(nodeDeleteDelayAfterTaint)
 	}
@@ -407,40 +509,37 @@ func (a *Actuator) deleteNodesAsync(ctx context.Context, nodes []*apiv1.Node, no
 	}
 }
 
-func (a *Actuator) scaleDownNodeToReport(ctx context.Context, node *apiv1.Node, drain bool) (*status.ScaleDownNode, error) {
-	nodeGroup, err := a.autoscalingCtx.CloudProvider.NodeGroupForNode(ctx, node)
-	if err != nil {
-		return nil, errors.ToAutoscalerError(errors.CloudProviderError, err).AddPrefix("failed to get node group: ")
+// scaleDownNodeToReport builds the status entry for a node whose deletion is being started. Utilization and the
+// list of evicted pods are informational: if they can't be computed, the error is logged and they are left empty.
+func (a *Actuator) scaleDownNodeToReport(ctx context.Context, node *apiv1.Node, nodeGroup cloudprovider.NodeGroup, drain bool) *status.ScaleDownNode {
+	sdNode := &status.ScaleDownNode{
+		Node:      node,
+		NodeGroup: nodeGroup,
 	}
-	if nodeGroup == nil {
-		return nil, errors.NewAutoscalerError(errors.NodeGroupDoesNotExistError, "no node group for node")
-	}
+	logger := klog.FromContext(ctx)
 	nodeInfo, err := a.autoscalingCtx.ClusterSnapshot.GetNodeInfo(node.Name)
 	if err != nil {
-		return nil, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to get node info: ")
+		logger.Error(err, "Scale-down: couldn't get node info for scaled down node", "node", klog.KObj(node))
+		return sdNode
+	}
+	if drain {
+		_, nonDsPodsToEvict := podsToEvict(nodeInfo, a.autoscalingCtx.DaemonSetEvictionForOccupiedNodes)
+		sdNode.EvictedPods = nonDsPodsToEvict
 	}
 
 	ignoreDaemonSetsUtilization, err := a.configGetter.GetIgnoreDaemonSetsUtilization(ctx, nodeGroup)
 	if err != nil {
-		return nil, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to get ignoreDaemonSetsUtilization for node group %s: ", nodeGroup.Id())
+		logger.Error(err, "Scale-down: couldn't get ignoreDaemonSetsUtilization for scaled down node", "node", klog.KObj(node), "nodeGroupId", nodeGroup.Id())
+		return sdNode
 	}
-
 	gpuConfig := a.autoscalingCtx.CloudProvider.GetNodeGpuConfig(ctx, node)
 	utilInfo, err := utilization.Calculate(ctx, nodeInfo, ignoreDaemonSetsUtilization, a.autoscalingCtx.IgnoreMirrorPodsUtilization, a.autoscalingCtx.DynamicResourceAllocationEnabled, gpuConfig, time.Now())
 	if err != nil {
-		return nil, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to calculate utilization: ")
+		logger.Error(err, "Scale-down: couldn't calculate utilization of scaled down node", "node", klog.KObj(node))
+		return sdNode
 	}
-	var evictedPods []*apiv1.Pod
-	if drain {
-		_, nonDsPodsToEvict := podsToEvict(nodeInfo, a.autoscalingCtx.DaemonSetEvictionForOccupiedNodes)
-		evictedPods = nonDsPodsToEvict
-	}
-	return &status.ScaleDownNode{
-		Node:        node,
-		NodeGroup:   nodeGroup,
-		EvictedPods: evictedPods,
-		UtilInfo:    utilInfo,
-	}, nil
+	sdNode.UtilInfo = utilInfo
+	return sdNode
 }
 
 // taintNode taints the node with NoSchedule to prevent new pods scheduling on it.
