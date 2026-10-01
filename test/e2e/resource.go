@@ -22,7 +22,9 @@ import (
 	"context"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	schedulingv1 "k8s.io/api/scheduling/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/e2e-framework/klient"
@@ -56,6 +58,7 @@ func NewTestPodWithResources(name, namespace, cpu, memory string) *corev1.Pod {
 			},
 		},
 		Spec: corev1.PodSpec{
+			TerminationGracePeriodSeconds: new(int64),
 			Containers: []corev1.Container{
 				{
 					Name:  "fake-container",
@@ -128,4 +131,113 @@ func CountNodeGroupNodes(ctx context.Context, client klient.Client, nodeGroup st
 		}
 	}
 	return count, nil
+}
+
+const (
+	expendablePriorityClassName = "expendable-priority"
+	highPriorityClassName       = "high-priority"
+	expendablePriorityValue     = int32(-15)
+	highPriorityValue           = int32(1000)
+)
+
+// EnsurePriorityClasses creates the expendable and high priority classes for testing.
+func EnsurePriorityClasses(ctx context.Context, client klient.Client) error {
+	for name, val := range map[string]int32{
+		expendablePriorityClassName: expendablePriorityValue,
+		highPriorityClassName:       highPriorityValue,
+	} {
+		pc := &schedulingv1.PriorityClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name,
+			},
+			Value: val,
+		}
+		_ = client.Resources().Create(ctx, pc)
+	}
+	return nil
+}
+
+// DeletePriorityClasses cleans up priority classes created for testing.
+func DeletePriorityClasses(ctx context.Context, client klient.Client) {
+	for _, name := range []string{expendablePriorityClassName, highPriorityClassName} {
+		pc := &schedulingv1.PriorityClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name,
+			},
+		}
+		_ = client.Resources().Delete(ctx, pc)
+	}
+}
+
+// NewTestPodWithPriority creates a baseline test pod configuration with a specific PriorityClassName.
+func NewTestPodWithPriority(name, namespace, priorityClassName string) *corev1.Pod {
+	pod := NewTestPod(name, namespace)
+	pod.Spec.PriorityClassName = priorityClassName
+	return pod
+}
+
+// NewTestReplicaSet creates a test ReplicaSet requesting the specified CPU and memory fractions
+// per replica with the safe-to-evict annotation.
+func NewTestReplicaSet(name, namespace string, replicas int32, cpuFraction, memFraction float64, labelKey, labelVal string) *appsv1.ReplicaSet {
+	labels := map[string]string{
+		labelKey: labelVal,
+	}
+	cpu := testCfg.CalculateCPURequest(cpuFraction)
+	memory := testCfg.CalculateMemoryRequest(memFraction)
+	return &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels:    labels,
+		},
+		Spec: appsv1.ReplicaSetSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: labels,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+					Annotations: map[string]string{
+						"cluster-autoscaler.kubernetes.io/safe-to-evict": "true",
+					},
+				},
+				Spec: corev1.PodSpec{
+					TerminationGracePeriodSeconds: new(int64),
+					Containers: []corev1.Container{
+						{
+							Name:  "fake-container",
+							Image: "fake-image",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse(cpu),
+									corev1.ResourceMemory: resource.MustParse(memory),
+								},
+							},
+						},
+					},
+					NodeSelector: map[string]string{
+						testCfg.NodeGroupLabelKey: testCfg.NodeGroup,
+					},
+					Tolerations: testCfg.Tolerations,
+				},
+			},
+		},
+	}
+}
+
+// DeletePodsWithLabel deletes all pods in namespace matching the given label key and value.
+func DeletePodsWithLabel(ctx context.Context, client klient.Client, namespace, labelKey, labelVal string) error {
+	podList := &corev1.PodList{}
+	err := client.Resources(namespace).List(ctx, podList)
+	if err != nil {
+		return err
+	}
+	for _, pod := range podList.Items {
+		if pod.Labels[labelKey] == labelVal {
+			p := pod
+			_ = client.Resources().Delete(ctx, &p)
+		}
+	}
+	return nil
 }

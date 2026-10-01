@@ -21,6 +21,7 @@ package e2e
 import (
 	"context"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
@@ -37,7 +38,7 @@ func TestScaleDownUnneededNode(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// Step 1: Create pod to trigger scale up
+			// Create pod to trigger scale up
 			err = client.Resources().Create(ctx, pod)
 			if err != nil {
 				t.Fatalf("failed to create pod: %v", err)
@@ -54,14 +55,14 @@ func TestScaleDownUnneededNode(t *testing.T) {
 				t.Fatalf("node did not become ready: %v", err)
 			}
 
-			// Step 2: Delete pod to make node unneeded
+			// Delete pod to make node unneeded
 			err = client.Resources().Delete(ctx, pod)
 			if err != nil {
 				t.Fatalf("failed to delete pod: %v", err)
 			}
 			_ = WaitForPodDeleted(ctx, client, pod, testCfg.PodDeletionTimeout)
 
-			// Step 3: Wait for scale down to delete the unneeded node back to 0
+			// Wait for scale down to delete the unneeded node back to 0
 			err = WaitForNodeCount(ctx, client, testCfg.NodeGroup, 0, testCfg.ScaleDownTimeout)
 			if err != nil {
 				t.Fatalf("node was not scaled down after pod deletion: %v", err)
@@ -75,6 +76,147 @@ func TestScaleDownUnneededNode(t *testing.T) {
 				t.Fatal(err)
 			}
 			TeardownPodAndNodeGroup(ctx, client, []*corev1.Pod{pod}, testCfg.NodeGroup)
+			return ctx
+		}).
+		Feature()
+
+	testEnv.Test(t, feature)
+}
+
+func TestScaleDownExpendablePodRunning(t *testing.T) {
+	ns := testEnv.EnvConf().Namespace()
+
+	// Initial workload to trigger scale-up of 1 node
+	triggerPod := NewTestPod("priority-trigger-pod", ns)
+
+	// Expendable pod with priority < -10 (default expendable-pods-priority-cutoff is -10)
+	expendablePod := NewTestPodWithPriority("expendable-pod", ns, expendablePriorityClassName)
+	expendablePod.Annotations = map[string]string{
+		"cluster-autoscaler.kubernetes.io/safe-to-evict": "true",
+	}
+
+	feature := features.New("Scale Down When Expendable Pod Is Running").
+		Assess("scale down node running only expendable pod", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			client, err := cfg.NewClient()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Ensure PriorityClasses are present
+			err = EnsurePriorityClasses(ctx, client)
+			if err != nil {
+				t.Fatalf("failed to ensure priority classes: %v", err)
+			}
+
+			// Create trigger pod to scale up to 1 node
+			err = client.Resources().Create(ctx, triggerPod)
+			if err != nil {
+				t.Fatalf("failed to create trigger pod: %v", err)
+			}
+
+			err = WaitForNodesReady(ctx, client, testCfg.NodeGroup, 1, testCfg.NodeReadyTimeout)
+			if err != nil {
+				t.Fatalf("cluster did not scale up to 1 node: %v", err)
+			}
+
+			err = WaitForPodScheduled(ctx, client, triggerPod, testCfg.PodSchedulingTimeout)
+			if err != nil {
+				t.Fatalf("trigger pod was not scheduled: %v", err)
+			}
+
+			// Create expendable pod on the existing node
+			err = client.Resources().Create(ctx, expendablePod)
+			if err != nil {
+				t.Fatalf("failed to create expendable pod: %v", err)
+			}
+
+			err = WaitForPodScheduled(ctx, client, expendablePod, testCfg.PodSchedulingTimeout)
+			if err != nil {
+				t.Fatalf("expendable pod was not scheduled: %v", err)
+			}
+
+			// Delete trigger pod. Now node 1 runs ONLY the expendable pod.
+			err = client.Resources().Delete(ctx, triggerPod)
+			if err != nil {
+				t.Fatalf("failed to delete trigger pod: %v", err)
+			}
+			_ = WaitForPodDeleted(ctx, client, triggerPod, testCfg.PodDeletionTimeout)
+
+			// Cluster Autoscaler should consider the node unneeded and scale down to 0
+			err = WaitForNodeCount(ctx, client, testCfg.NodeGroup, 0, testCfg.ScaleDownTimeout)
+			if err != nil {
+				t.Fatalf("node with only expendable pod was not scaled down: %v", err)
+			}
+
+			return ctx
+		}).
+		Teardown(func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			client, err := cfg.NewClient()
+			if err != nil {
+				t.Fatal(err)
+			}
+			TeardownPodAndNodeGroup(ctx, client, []*corev1.Pod{triggerPod, expendablePod}, testCfg.NodeGroup)
+			DeletePriorityClasses(ctx, client)
+			return ctx
+		}).
+		Feature()
+
+	testEnv.Test(t, feature)
+}
+
+func TestNotScaleDownNonExpendablePodRunning(t *testing.T) {
+	ns := testEnv.EnvConf().Namespace()
+
+	// Pod with non-expendable (high) priority
+	nonExpendablePod := NewTestPodWithPriority("non-expendable-pod", ns, highPriorityClassName)
+	nonExpendablePod.Annotations = map[string]string{
+		"cluster-autoscaler.kubernetes.io/safe-to-evict": "true",
+	}
+
+	feature := features.New("Scale Down When Non Expendable Pod Is Running").
+		Assess("do not scale down node when non expendable pod is running", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			client, err := cfg.NewClient()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Ensure PriorityClasses are present
+			err = EnsurePriorityClasses(ctx, client)
+			if err != nil {
+				t.Fatalf("failed to ensure priority classes: %v", err)
+			}
+
+			// Create non-expendable pod to scale up 1 node
+			err = client.Resources().Create(ctx, nonExpendablePod)
+			if err != nil {
+				t.Fatalf("failed to create non-expendable pod: %v", err)
+			}
+
+			err = WaitForNodesReady(ctx, client, testCfg.NodeGroup, 1, testCfg.NodeReadyTimeout)
+			if err != nil {
+				t.Fatalf("cluster did not scale up to 1 node: %v", err)
+			}
+
+			err = WaitForPodScheduled(ctx, client, nonExpendablePod, testCfg.PodSchedulingTimeout)
+			if err != nil {
+				t.Fatalf("non-expendable pod was not scheduled: %v", err)
+			}
+
+			// The node is needed because a non-expendable pod is running; verify it does not scale down
+			err = WaitForNodeCountConsistently(ctx, client, testCfg.NodeGroup, 1, 20*time.Second)
+			if err != nil {
+				t.Fatalf("node was unexpectedly scaled down while running non-expendable pod: %v", err)
+			}
+
+			return ctx
+		}).
+		Teardown(func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			client, err := cfg.NewClient()
+			if err != nil {
+				t.Fatal(err)
+			}
+			TeardownPodAndNodeGroup(ctx, client, []*corev1.Pod{nonExpendablePod}, testCfg.NodeGroup)
+			DeletePriorityClasses(ctx, client)
 			return ctx
 		}).
 		Feature()

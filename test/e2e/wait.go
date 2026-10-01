@@ -20,6 +20,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -45,7 +46,7 @@ func WaitForPodsScheduled(ctx context.Context, client klient.Client, pods []*cor
 			}
 		}
 		return true, nil
-	}, wait.WithTimeout(timeout), wait.WithContext(ctx))
+	}, wait.WithTimeout(timeout), wait.WithInterval(1*time.Second), wait.WithImmediate(), wait.WithContext(ctx))
 }
 
 // WaitForPodScheduled waits until the pod is assigned to a node.
@@ -70,7 +71,7 @@ func WaitForPodsDeleted(ctx context.Context, client klient.Client, pods []*corev
 			}
 		}
 		return true, nil
-	}, wait.WithTimeout(timeout), wait.WithContext(ctx))
+	}, wait.WithTimeout(timeout), wait.WithInterval(1*time.Second), wait.WithImmediate(), wait.WithContext(ctx))
 }
 
 // WaitForPodDeleted waits until the pod is deleted.
@@ -86,7 +87,7 @@ func WaitForNodeCount(ctx context.Context, client klient.Client, nodeGroup strin
 			return false, err
 		}
 		return count == expectedCount, nil
-	}, wait.WithTimeout(timeout), wait.WithContext(ctx))
+	}, wait.WithTimeout(timeout), wait.WithInterval(1*time.Second), wait.WithImmediate(), wait.WithContext(ctx))
 }
 
 // WaitForNodesAtLeast waits until the number of nodes in a nodeGroup is at least expectedCount.
@@ -97,7 +98,7 @@ func WaitForNodesAtLeast(ctx context.Context, client klient.Client, nodeGroup st
 			return false, err
 		}
 		return count >= expectedCount, nil
-	}, wait.WithTimeout(timeout), wait.WithContext(ctx))
+	}, wait.WithTimeout(timeout), wait.WithInterval(1*time.Second), wait.WithImmediate(), wait.WithContext(ctx))
 }
 
 // WaitForNodesReady waits until at least expectedCount nodes in a nodeGroup have Ready condition True.
@@ -120,5 +121,55 @@ func WaitForNodesReady(ctx context.Context, client klient.Client, nodeGroup stri
 			}
 		}
 		return readyCount >= expectedCount, nil
-	}, wait.WithTimeout(timeout), wait.WithContext(ctx))
+	}, wait.WithTimeout(timeout), wait.WithInterval(1*time.Second), wait.WithImmediate(), wait.WithContext(ctx))
+}
+
+// WaitForNodeCountConsistently waits for duration while asserting that the node count remains expectedCount.
+func WaitForNodeCountConsistently(ctx context.Context, client klient.Client, nodeGroup string, expectedCount int, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			count, err := CountNodeGroupNodes(ctx, client, nodeGroup)
+			if err != nil {
+				return err
+			}
+			if count != expectedCount {
+				return fmt.Errorf("expected node count %d, got %d", expectedCount, count)
+			}
+			return nil
+		case <-ticker.C:
+			count, err := CountNodeGroupNodes(ctx, client, nodeGroup)
+			if err != nil {
+				return err
+			}
+			if count != expectedCount {
+				return fmt.Errorf("node count deviated: expected %d, got %d", expectedCount, count)
+			}
+		}
+	}
+}
+
+// WaitForPodsWithLabelScheduled waits until at least expectedCount pods matching the label are assigned to a node.
+func WaitForPodsWithLabelScheduled(ctx context.Context, client klient.Client, namespace, labelKey, labelVal string, expectedCount int, timeout time.Duration) error {
+	return wait.For(func(ctx context.Context) (done bool, err error) {
+		podList := &corev1.PodList{}
+		err = client.Resources(namespace).List(ctx, podList)
+		if err != nil {
+			return false, err
+		}
+		scheduledCount := 0
+		for _, pod := range podList.Items {
+			if pod.Labels[labelKey] == labelVal && pod.Spec.NodeName != "" {
+				scheduledCount++
+			}
+		}
+		return scheduledCount >= expectedCount, nil
+	}, wait.WithTimeout(timeout), wait.WithInterval(1*time.Second), wait.WithImmediate(), wait.WithContext(ctx))
 }
