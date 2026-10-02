@@ -18,6 +18,7 @@ package test
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -144,7 +145,7 @@ func WithNamespace(namespace string) func(*apiv1.Pod) {
 // WithLabels sets a Labels to the pod.
 func WithLabels(labels map[string]string) func(*apiv1.Pod) {
 	return func(pod *apiv1.Pod) {
-		pod.ObjectMeta.Labels = labels
+		pod.ObjectMeta.Labels = maps.Clone(labels)
 	}
 }
 
@@ -229,7 +230,7 @@ func WithPodHostnameAntiAffinity(labels map[string]string) func(*apiv1.Pod) {
 			RequiredDuringSchedulingIgnoredDuringExecution: []apiv1.PodAffinityTerm{
 				{
 					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: labels,
+						MatchLabels: maps.Clone(labels),
 					},
 					TopologyKey: "kubernetes.io/hostname",
 				},
