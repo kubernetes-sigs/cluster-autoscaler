@@ -97,7 +97,11 @@ type testCase struct {
 	wantUnneeded    []string
 	wantUnremovable []*simulator.UnremovableNode
 
-	optsPatches []optionsPatch
+	optsPatches   []optionsPatch
+	nodeGroupOpts *config.NodeGroupAutoscalingOptions
+	// nodeGroupTargetSize overrides the target size of the custom-options node group.
+	// Defaults to len(nodes) when zero.
+	nodeGroupTargetSize int
 }
 
 // suite is a group of testCases that share the same default option patches.
@@ -158,6 +162,14 @@ func getTestCases(now time.Time) []testCase {
 
 	dsPod := BuildTestPod("dsPod", 500, 0, WithDSController())
 	dsPod.Spec.NodeName = "regular"
+
+	atomicNode1 := BuildTestNode("atomic1", 1000, 10)
+	SetNodeReadyState(atomicNode1, true, time.Time{})
+	atomicNode2 := BuildTestNode("atomic2", 1000, 10)
+	SetNodeReadyState(atomicNode2, true, time.Time{})
+
+	atomicUtilizedPod := BuildTestPod("atomicUtilizedPod", 600, 0)
+	atomicUtilizedPod.Spec.NodeName = "atomic2"
 
 	brokenUtilNode := BuildTestNode("regular", 0, 0)
 	resourceSliceNodeName := "regular"
@@ -227,6 +239,52 @@ func getTestCases(now time.Time) []testCase {
 			wantUnneeded:    []string{},
 			wantUnremovable: []*simulator.UnremovableNode{{Node: unreadyNode, Reason: simulator.ScaleDownUnreadyDisabled}},
 			optsPatches:     []optionsPatch{withScaleDownUnreadyEnabled(false)},
+		},
+		{
+			desc:         "atomic node group: underutilized nodes in incomplete atomic group are filtered out",
+			nodes:        []*apiv1.Node{atomicNode1, atomicNode2},
+			pods:         []*apiv1.Pod{atomicUtilizedPod},
+			wantUnneeded: []string{},
+			wantUnremovable: []*simulator.UnremovableNode{
+				{Node: atomicNode2, Reason: simulator.NotUnderutilized},
+				{Node: atomicNode1, Reason: simulator.AtomicScaleDownFailed},
+			},
+			nodeGroupOpts: &config.NodeGroupAutoscalingOptions{
+				ZeroOrMaxNodeScaling: true,
+			},
+		},
+		{
+			desc:            "atomic node group: all underutilized nodes stay",
+			nodes:           []*apiv1.Node{atomicNode1, atomicNode2},
+			wantUnneeded:    []string{"atomic1", "atomic2"},
+			wantUnremovable: []*simulator.UnremovableNode{},
+			nodeGroupOpts: &config.NodeGroupAutoscalingOptions{
+				ZeroOrMaxNodeScaling: true,
+			},
+		},
+		{
+			desc:                "atomic node group with AllowNonAtomicScaleUpToMax: all registered nodes unneeded, target size higher, nodes stay",
+			nodes:               []*apiv1.Node{atomicNode1, atomicNode2},
+			wantUnneeded:        []string{"atomic1", "atomic2"},
+			wantUnremovable:     []*simulator.UnremovableNode{},
+			nodeGroupTargetSize: 3,
+			nodeGroupOpts: &config.NodeGroupAutoscalingOptions{
+				ZeroOrMaxNodeScaling:       true,
+				AllowNonAtomicScaleUpToMax: true,
+			},
+		},
+		{
+			desc:         "atomic node group without AllowNonAtomicScaleUpToMax: all registered nodes unneeded, target size higher, nodes are filtered out",
+			nodes:        []*apiv1.Node{atomicNode1, atomicNode2},
+			wantUnneeded: []string{},
+			wantUnremovable: []*simulator.UnremovableNode{
+				{Node: atomicNode1, Reason: simulator.AtomicScaleDownFailed},
+				{Node: atomicNode2, Reason: simulator.AtomicScaleDownFailed},
+			},
+			nodeGroupTargetSize: 3,
+			nodeGroupOpts: &config.NodeGroupAutoscalingOptions{
+				ZeroOrMaxNodeScaling: true,
+			},
 		},
 		{
 			desc:            "Node is not filtered out because of DRA issues if DRA is disabled",
@@ -307,7 +365,15 @@ func TestFilterOutUnremovable(t *testing.T) {
 			s := nodegroupconfig.NewDefaultNodeGroupConfigProcessor(options.NodeGroupDefaults)
 			c := NewChecker(s)
 			provider := testprovider.NewTestCloudProviderBuilder().Build()
-			provider.AddNodeGroup("ng1", 1, 10, 2)
+			if tc.nodeGroupOpts != nil {
+				targetSize := tc.nodeGroupTargetSize
+				if targetSize == 0 {
+					targetSize = len(tc.nodes)
+				}
+				provider.AddNodeGroupWithCustomOptions("ng1", 0, 10, targetSize, tc.nodeGroupOpts)
+			} else {
+				provider.AddNodeGroup("ng1", 1, 10, 2)
+			}
 			for _, n := range tc.nodes {
 				provider.AddNode("ng1", n)
 			}

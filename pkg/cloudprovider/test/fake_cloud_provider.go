@@ -219,6 +219,13 @@ func WithTemplate(template *framework.NodeInfo) NodeGroupOption {
 	}
 }
 
+// WithNGOptions sets the autoscaling options of the node group.
+func WithNGOptions(opts *config.NodeGroupAutoscalingOptions) NodeGroupOption {
+	return func(n *NodeGroup) {
+		n.opts = opts
+	}
+}
+
 // WithNodeGarbageCollectionDelay can be used to simulate Node objects hanging around in the K8s API for some time after their VMs are deleted.
 func WithNodeGarbageCollectionDelay(delay time.Duration) NodeGroupOption {
 	return func(n *NodeGroup) {
