@@ -61,7 +61,6 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/options"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/scheduling"
-	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
@@ -197,8 +196,7 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 	var capacitybufferClientError error
 	var fakePodsResolver fakepods.Resolver
 	if autoscalingOptions.CapacitybufferControllerEnabled {
-		restConfig := kube_util.GetKubeConfig(autoscalingOptions.KubeClientOpts)
-		capacitybufferClient, capacitybufferClientError = capacityclient.NewCapacityBufferClientFromConfig(restConfig)
+		capacitybufferClient, capacitybufferClientError = capacityclient.NewCapacityBufferClientFromManager(b.manager)
 		if capacitybufferClientError == nil && capacitybufferClient != nil {
 			if autoscalingOptions.CapacityBufferPodDryRunEnabled {
 				fakePodsResolver = fakepods.NewDryRunResolver(b.kubeClient)
@@ -218,8 +216,7 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 			klog.Warningf("Failed to add CapacityBuffer (v1beta1) to scheme: %v", err)
 		}
 		if capacitybufferClient == nil {
-			restConfig := kube_util.GetKubeConfig(autoscalingOptions.KubeClientOpts)
-			capacitybufferClient, capacitybufferClientError = capacityclient.NewCapacityBufferClientFromConfig(restConfig)
+			capacitybufferClient, capacitybufferClientError = capacityclient.NewCapacityBufferClientFromManager(b.manager)
 		}
 		if capacitybufferClientError == nil && capacitybufferClient != nil {
 			buffersPodsRegistry := fakepods.NewRegistry(nil)

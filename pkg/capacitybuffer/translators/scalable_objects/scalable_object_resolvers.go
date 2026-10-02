@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	cbclient "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/client"
 )
 
@@ -36,6 +37,20 @@ const (
 	ApiGroupBatch             = "batch"
 	ApiGroupCore              = "core"
 )
+
+var staticallyWatchedKinds = map[schema.GroupKind]bool{
+	{Group: ApiGroupApps, Kind: DeploymentKind}:            true,
+	{Group: ApiGroupApps, Kind: ReplicaSetKind}:            true,
+	{Group: ApiGroupApps, Kind: StatefulSetKind}:           true,
+	{Group: ApiGroupBatch, Kind: JobKind}:                  true,
+	{Group: ApiGroupCore, Kind: ReplicationControllerKind}: true,
+}
+
+// IsStaticallyWatched reports whether the passed api group and kind are already covered
+// by a dedicated informer, and therefore do not need a dynamically established watch.
+func IsStaticallyWatched(apiGroup, kind string) bool {
+	return staticallyWatchedKinds[schema.GroupKind{Group: apiGroup, Kind: kind}]
+}
 
 // ScaleObjectPodResolver resolves scale objects into pod specs and number of replicas only if there is at least one exiting pod
 type ScaleObjectPodResolver struct {

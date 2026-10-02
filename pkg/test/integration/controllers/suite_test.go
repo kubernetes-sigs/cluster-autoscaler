@@ -36,6 +36,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	cbv1beta1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	capacitybuffer "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/clientset/versioned"
 	cqv1beta1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacityquota/autoscaling.x-k8s.io/v1beta1"
 	cbapi "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer"
@@ -71,7 +72,11 @@ var _ = BeforeSuite(func() {
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "apis", "config", "crd")},
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "..", "apis", "config", "crd"),
+			// Test only kinds, e.g. a custom scalable resource for dynamic watches.
+			filepath.Join("testdata", "crd"),
+		},
 		ErrorIfCRDPathMissing: true,
 	}
 
@@ -88,6 +93,8 @@ var _ = BeforeSuite(func() {
 	err = clientgoscheme.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 	err = cqv1beta1.AddToScheme(scheme)
+	Expect(err).NotTo(HaveOccurred())
+	err = cbv1beta1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	k8sClient, err = kubernetes.NewForConfig(cfg)
@@ -110,7 +117,7 @@ var _ = BeforeSuite(func() {
 	err = cqctrl.NewCapacityQuotaReconciler(mgr.GetClient(), cqctrl.ReconcilerOptions{NodeFilter: utils.VirtualKubeletNodeFilter{}}).SetupWithManager(mgr)
 	Expect(err).ToNot(HaveOccurred())
 
-	client, err := cbclient.NewCapacityBufferClientFromConfig(cfg)
+	client, err := cbclient.NewCapacityBufferClientFromManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
 	resolver := fakepods.NewDryRunResolver(k8sClient)
@@ -122,7 +129,8 @@ var _ = BeforeSuite(func() {
 		reconciliationCache,
 		clock,
 	)
-	err = mgr.Add(controller)
+	// Registers the buffer controller and the dynamic scalable ref watcher it owns.
+	err = controller.SetupWithManager(ctx, mgr)
 	Expect(err).ToNot(HaveOccurred())
 
 	go func() {
