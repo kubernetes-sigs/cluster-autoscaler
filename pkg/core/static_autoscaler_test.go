@@ -289,6 +289,7 @@ func applySaneDefaultOpts(autoscalingOptions *config.AutoscalingOptions) {
 	autoscalingOptions.SkipNodesWithSystemPods = true
 	autoscalingOptions.SkipNodesWithLocalStorage = true
 	autoscalingOptions.SkipNodesWithCustomControllerPods = true
+	autoscalingOptions.MaxSchedulablePodGroupsProcessingTime = 2 * time.Minute
 }
 
 func setupAutoscaler(config *autoscalerSetupConfig) (*StaticAutoscaler, error) {
@@ -409,13 +410,14 @@ func TestStaticAutoscalerRunOnce(t *testing.T) {
 			ScaleDownUtilizationThreshold: 0.5,
 			MaxNodeProvisionTime:          10 * time.Second,
 		},
-		EstimatorName:                  estimator.BinpackingEstimatorName,
-		EnforceNodeGroupMinSize:        true,
-		ScaleDownEnabled:               true,
-		MaxNodesTotal:                  1,
-		MaxCoresTotal:                  10,
-		MaxMemoryTotal:                 100000,
-		MaxNodeGroupBinpackingDuration: 1 * time.Second,
+		EstimatorName:                         estimator.BinpackingEstimatorName,
+		EnforceNodeGroupMinSize:               true,
+		ScaleDownEnabled:                      true,
+		MaxNodesTotal:                         1,
+		MaxCoresTotal:                         10,
+		MaxMemoryTotal:                        100000,
+		MaxNodeGroupBinpackingDuration:        1 * time.Second,
+		MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 	}
 	processorCallbacks := newStaticAutoscalerProcessorCallbacks()
 
@@ -666,17 +668,18 @@ func TestStaticAutoscalerRunOnceWithScaleDownDelayPerNG(t *testing.T) {
 					ScaleDownUtilizationThreshold: 0.5,
 					MaxNodeProvisionTime:          10 * time.Second,
 				},
-				EstimatorName:                  estimator.BinpackingEstimatorName,
-				EnforceNodeGroupMinSize:        true,
-				ScaleDownEnabled:               true,
-				MaxNodesTotal:                  1,
-				MaxCoresTotal:                  10,
-				MaxMemoryTotal:                 100000,
-				ScaleDownDelayTypeLocal:        true,
-				ScaleDownDelayAfterAdd:         5 * time.Minute,
-				ScaleDownDelayAfterDelete:      5 * time.Minute,
-				ScaleDownDelayAfterFailure:     5 * time.Minute,
-				MaxNodeGroupBinpackingDuration: 1 * time.Second,
+				EstimatorName:                         estimator.BinpackingEstimatorName,
+				EnforceNodeGroupMinSize:               true,
+				ScaleDownEnabled:                      true,
+				MaxNodesTotal:                         1,
+				MaxCoresTotal:                         10,
+				MaxMemoryTotal:                        100000,
+				ScaleDownDelayTypeLocal:               true,
+				ScaleDownDelayAfterAdd:                5 * time.Minute,
+				ScaleDownDelayAfterDelete:             5 * time.Minute,
+				ScaleDownDelayAfterFailure:            5 * time.Minute,
+				MaxNodeGroupBinpackingDuration:        1 * time.Second,
+				MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 			}
 			processorCallbacks := newStaticAutoscalerProcessorCallbacks()
 
@@ -821,12 +824,13 @@ func TestStaticAutoscalerRunOnceWithAutoprovisionedEnabled(t *testing.T) {
 			ScaleDownUtilizationThreshold: 0.5,
 			MaxNodeProvisionTime:          10 * time.Second,
 		},
-		EstimatorName:                  estimator.BinpackingEstimatorName,
-		ScaleDownEnabled:               true,
-		MaxNodesTotal:                  100,
-		MaxCoresTotal:                  100,
-		MaxMemoryTotal:                 100000,
-		MaxNodeGroupBinpackingDuration: 1 * time.Second,
+		EstimatorName:                         estimator.BinpackingEstimatorName,
+		ScaleDownEnabled:                      true,
+		MaxNodesTotal:                         100,
+		MaxCoresTotal:                         100,
+		MaxMemoryTotal:                        100000,
+		MaxNodeGroupBinpackingDuration:        1 * time.Second,
+		MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 	}
 	processorCallbacks := newStaticAutoscalerProcessorCallbacks()
 
@@ -968,13 +972,14 @@ func TestStaticAutoscalerRunOnceWithALongUnregisteredNode(t *testing.T) {
 					ScaleDownUtilizationThreshold: 0.5,
 					MaxNodeProvisionTime:          10 * time.Second,
 				},
-				EstimatorName:                    estimator.BinpackingEstimatorName,
-				ScaleDownEnabled:                 true,
-				MaxNodesTotal:                    10,
-				MaxCoresTotal:                    10,
-				MaxMemoryTotal:                   100000,
-				ForceDeleteLongUnregisteredNodes: forceDeleteLongUnregisteredNodes,
-				MaxNodeGroupBinpackingDuration:   1 * time.Second,
+				EstimatorName:                         estimator.BinpackingEstimatorName,
+				ScaleDownEnabled:                      true,
+				MaxNodesTotal:                         10,
+				MaxCoresTotal:                         10,
+				MaxMemoryTotal:                        100000,
+				ForceDeleteLongUnregisteredNodes:      forceDeleteLongUnregisteredNodes,
+				MaxNodeGroupBinpackingDuration:        1 * time.Second,
+				MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 			}
 			processorCallbacks := newStaticAutoscalerProcessorCallbacks()
 
@@ -1133,14 +1138,15 @@ func TestStaticAutoscalerRunOncePodsWithPriorities(t *testing.T) {
 			ScaleDownUnreadyTime:          time.Minute,
 			MaxNodeProvisionTime:          10 * time.Second,
 		},
-		EstimatorName:                  estimator.BinpackingEstimatorName,
-		ScaleDownEnabled:               true,
-		MaxNodesTotal:                  10,
-		MaxCoresTotal:                  10,
-		MaxMemoryTotal:                 100000,
-		ExpendablePodsPriorityCutoff:   10,
-		NodeDeletionBatcherInterval:    0 * time.Second,
-		MaxNodeGroupBinpackingDuration: 1 * time.Second,
+		EstimatorName:                         estimator.BinpackingEstimatorName,
+		ScaleDownEnabled:                      true,
+		MaxNodesTotal:                         10,
+		MaxCoresTotal:                         10,
+		MaxMemoryTotal:                        100000,
+		ExpendablePodsPriorityCutoff:          10,
+		NodeDeletionBatcherInterval:           0 * time.Second,
+		MaxNodeGroupBinpackingDuration:        1 * time.Second,
+		MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 	}
 	processorCallbacks := newStaticAutoscalerProcessorCallbacks()
 
@@ -1699,14 +1705,15 @@ func TestStaticAutoscalerRunOnceWithExistingDeletionCandidateNodes(t *testing.T)
 					ScaleDownUtilizationThreshold: 0.5,
 					MaxNodeProvisionTime:          10 * time.Second,
 				},
-				EstimatorName:                  estimator.BinpackingEstimatorName,
-				EnforceNodeGroupMinSize:        true,
-				ScaleDownEnabled:               true,
-				MaxNodesTotal:                  100,
-				MaxCoresTotal:                  100,
-				MaxMemoryTotal:                 100000,
-				NodeDeletionCandidateTTL:       tc.deletionCandidateStalenessTTL,
-				MaxNodeGroupBinpackingDuration: 1 * time.Second,
+				EstimatorName:                         estimator.BinpackingEstimatorName,
+				EnforceNodeGroupMinSize:               true,
+				ScaleDownEnabled:                      true,
+				MaxNodesTotal:                         100,
+				MaxCoresTotal:                         100,
+				MaxMemoryTotal:                        100000,
+				NodeDeletionCandidateTTL:              tc.deletionCandidateStalenessTTL,
+				MaxNodeGroupBinpackingDuration:        1 * time.Second,
+				MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 			}
 
 			processorCallbacks := newStaticAutoscalerProcessorCallbacks()
@@ -3462,13 +3469,14 @@ func TestStaticAutoscalerWithNodeDeclaredFeatures(t *testing.T) {
 			ScaleDownUtilizationThreshold: 0.5,
 			MaxNodeProvisionTime:          10 * time.Second,
 		},
-		EstimatorName:                  estimator.BinpackingEstimatorName,
-		EnforceNodeGroupMinSize:        true,
-		ScaleDownEnabled:               true,
-		MaxNodesTotal:                  10,
-		MaxCoresTotal:                  10,
-		MaxMemoryTotal:                 1000,
-		MaxNodeGroupBinpackingDuration: 1 * time.Second,
+		EstimatorName:                         estimator.BinpackingEstimatorName,
+		EnforceNodeGroupMinSize:               true,
+		ScaleDownEnabled:                      true,
+		MaxNodesTotal:                         10,
+		MaxCoresTotal:                         10,
+		MaxMemoryTotal:                        1000,
+		MaxNodeGroupBinpackingDuration:        1 * time.Second,
+		MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 	}
 
 	type testCase struct {
@@ -3636,7 +3644,9 @@ func TestStaticAutoscalerRunOnceClearsRegistry(t *testing.T) {
 	provider.AddNodeGroup("ng1", 1, 10, 1)
 	provider.AddNode("ng1", n1)
 
-	options := config.AutoscalingOptions{}
+	options := config.AutoscalingOptions{
+		MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
+	}
 	processorCallbacks := newStaticAutoscalerProcessorCallbacks()
 	processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(options)
 	autoscalingCtx, _ := NewScaleTestAutoscalingContext(options, &fake.Clientset{}, nil, provider, processorCallbacks, nil, templateNodeInfoRegistry)
@@ -3731,11 +3741,12 @@ func TestStaticAutoscalerRunOnceWithNominatedNodeName(t *testing.T) {
 			ScaleDownUtilizationThreshold: 0.5,
 			MaxNodeProvisionTime:          10 * time.Second,
 		},
-		EstimatorName:                  estimator.BinpackingEstimatorName,
-		MaxNodesTotal:                  10,
-		MaxCoresTotal:                  10,
-		MaxMemoryTotal:                 100000,
-		MaxNodeGroupBinpackingDuration: 1 * time.Second,
+		EstimatorName:                         estimator.BinpackingEstimatorName,
+		MaxNodesTotal:                         10,
+		MaxCoresTotal:                         10,
+		MaxMemoryTotal:                        100000,
+		MaxNodeGroupBinpackingDuration:        1 * time.Second,
+		MaxSchedulablePodGroupsProcessingTime: 2 * time.Minute,
 	}
 	processorCallbacks := newStaticAutoscalerProcessorCallbacks()
 
