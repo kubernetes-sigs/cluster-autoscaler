@@ -4000,15 +4000,23 @@ func TestShouldScaleDown(t *testing.T) {
 }
 
 func TestClusterStateRegistryConfig(t *testing.T) {
-	opts := config.AutoscalingOptions{
-		MaxTotalUnreadyPercentage: 30,
-		OkTotalUnreadyCount:       5,
-		UnreadyNodesScope:         config.UnreadyNodesScopeAutoscaled,
+	for _, maxNodeStartupTime := range []time.Duration{0, 30 * time.Minute} {
+		t.Run(maxNodeStartupTime.String(), func(t *testing.T) {
+			opts := config.AutoscalingOptions{
+				MaxTotalUnreadyPercentage: 30,
+				OkTotalUnreadyCount:       5,
+				UnreadyNodesScope:         config.UnreadyNodesScopeAutoscaled,
+				NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+					MaxNodeStartupTime: maxNodeStartupTime,
+				},
+			}
+			want := clusterstate.ClusterStateRegistryConfig{
+				MaxTotalUnreadyPercentage: 30,
+				OkTotalUnreadyCount:       5,
+				UnreadyNodesScope:         config.UnreadyNodesScopeAutoscaled,
+				MaxNodeStartupTime:        &maxNodeStartupTime,
+			}
+			assert.Equal(t, want, clusterStateRegistryConfig(opts))
+		})
 	}
-	want := clusterstate.ClusterStateRegistryConfig{
-		MaxTotalUnreadyPercentage: 30,
-		OkTotalUnreadyCount:       5,
-		UnreadyNodesScope:         config.UnreadyNodesScopeAutoscaled,
-	}
-	assert.Equal(t, want, clusterStateRegistryConfig(opts))
 }

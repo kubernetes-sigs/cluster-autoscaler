@@ -96,6 +96,9 @@ type ClusterStateRegistryConfig struct {
 	// restricts the check to nodes belonging to an autoscaled node group or whose node group lookup failed.
 	// Any other value, including the empty one, keeps the default behaviour of counting every node in the cluster.
 	UnreadyNodesScope string
+	// MaxNodeStartupTime is the startup grace period used when a node group or its options cannot be resolved.
+	// Nil preserves the legacy 15-minute default; a non-nil zero disables the startup grace period.
+	MaxNodeStartupTime *time.Duration
 }
 
 // IncorrectNodeGroupSize contains information about how much the current size of the node group
@@ -767,12 +770,16 @@ func (csr *ClusterStateRegistry) updateReadinessStats(ctx context.Context, curre
 		return current
 	}
 
+	defaultMaxNodeStartupTime := MaxNodeStartupTime
+	if csr.config.MaxNodeStartupTime != nil {
+		defaultMaxNodeStartupTime = *csr.config.MaxNodeStartupTime
+	}
 	for _, node := range csr.nodes {
 		nodeGroup, errNg := csr.cloudProvider.NodeGroupForNode(ctx, node)
 		nr, errReady := kube_util.GetNodeReadiness(node)
 		// Resolve the startup timeout once per node so group and total readiness agree,
 		// and lookup failures cannot inherit another node group's startup grace period.
-		maxNodeStartupTime := MaxNodeStartupTime
+		maxNodeStartupTime := defaultMaxNodeStartupTime
 		if errNg == nil && nodeGroup != nil {
 			if startupTime, err := csr.nodeGroupConfigProcessor.GetMaxNodeStartupTime(ctx, nodeGroup); err == nil {
 				maxNodeStartupTime = startupTime

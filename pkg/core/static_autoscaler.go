@@ -153,6 +153,7 @@ func clusterStateRegistryConfig(opts config.AutoscalingOptions) clusterstate.Clu
 		MaxTotalUnreadyPercentage: opts.MaxTotalUnreadyPercentage,
 		OkTotalUnreadyCount:       opts.OkTotalUnreadyCount,
 		UnreadyNodesScope:         opts.UnreadyNodesScope,
+		MaxNodeStartupTime:        &opts.NodeGroupDefaults.MaxNodeStartupTime,
 	}
 }
 

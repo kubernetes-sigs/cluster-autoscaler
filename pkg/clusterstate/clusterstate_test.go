@@ -799,29 +799,109 @@ func TestReadinessConsistentAcrossScopesWithTransientLookupFailure(t *testing.T)
 	assert.False(t, clusterstate.IsClusterHealthy())
 }
 
-func TestNodeGroupLookupFailureStartupGraceIsIndependentOfNodeOrder(t *testing.T) {
+func TestNodeStartupGraceConfigurationAndNodeOrder(t *testing.T) {
 	now := time.Now()
+	configuredStartup, zeroStartup := 30*time.Minute, time.Duration(0)
+	shortStartup, longStartup := 10*time.Minute, time.Hour
 	for _, tc := range []struct {
 		name              string
+		configuredStartup *time.Duration
 		knownGroupStartup time.Duration
-		failedNodeAge     time.Duration
-		wantHealthy       bool
+		groupStartup      *time.Duration
+		external          bool
+		lookupError       bool
+		optionsError      bool
+		nodeAge           time.Duration
+		wantNotStarted    bool
 	}{
-		{"expired grace", time.Hour, 2 * MaxNodeStartupTime, false},
-		{"within grace", time.Minute, MaxNodeStartupTime / 2, true},
+		{
+			name: "unset fallback expires after 15 minutes", lookupError: true,
+			nodeAge: 20 * time.Minute,
+		},
+		{
+			name: "unset fallback preserves 15 minute grace", lookupError: true,
+			knownGroupStartup: time.Minute, nodeAge: 10 * time.Minute, wantNotStarted: true,
+		},
+		{
+			name: "external node uses configured grace", configuredStartup: &configuredStartup, external: true,
+			nodeAge: 20 * time.Minute, wantNotStarted: true,
+		},
+		{
+			name: "lookup failure uses configured grace", configuredStartup: &configuredStartup, lookupError: true,
+			nodeAge: 20 * time.Minute, wantNotStarted: true,
+		},
+		{
+			name: "options failure uses configured grace", configuredStartup: &configuredStartup, optionsError: true,
+			nodeAge: 20 * time.Minute, wantNotStarted: true,
+		},
+		{
+			name: "external node configured grace expires", configuredStartup: &configuredStartup, external: true,
+			nodeAge: 35 * time.Minute,
+		},
+		{
+			name: "lookup failure configured grace expires", configuredStartup: &configuredStartup, lookupError: true,
+			nodeAge: 35 * time.Minute,
+		},
+		{
+			name: "options failure configured grace expires", configuredStartup: &configuredStartup, optionsError: true,
+			nodeAge: 35 * time.Minute,
+		},
+		{
+			name: "external node respects explicit zero grace", configuredStartup: &zeroStartup, external: true,
+			nodeAge: time.Minute,
+		},
+		{
+			name: "lookup failure respects explicit zero grace", configuredStartup: &zeroStartup, lookupError: true,
+			nodeAge: time.Minute,
+		},
+		{
+			name: "options failure respects explicit zero grace", configuredStartup: &zeroStartup, optionsError: true,
+			nodeAge: time.Minute,
+		},
+		{
+			name: "shorter group override is preserved", configuredStartup: &configuredStartup, groupStartup: &shortStartup,
+			nodeAge: 20 * time.Minute,
+		},
+		{
+			name: "longer group override is preserved", configuredStartup: &configuredStartup, groupStartup: &longStartup,
+			nodeAge: 40 * time.Minute, wantNotStarted: true,
+		},
 	} {
 		for _, knownNodeFirst := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/knownNodeFirst=%t", tc.name, knownNodeFirst), func(t *testing.T) {
-				provider := testprovider.NewTestCloudProviderBuilder().WithNodeProcessingError([]string{"failed-0", "failed-1"}).Build()
-				provider.AddNodeGroupWithCustomOptions("known", 0, 10, 1, &config.NodeGroupAutoscalingOptions{MaxNodeStartupTime: tc.knownGroupStartup})
+				nodeNames := []string{"unready-0", "unready-1"}
+				builder := testprovider.NewTestCloudProviderBuilder()
+				if tc.lookupError {
+					builder = builder.WithNodeProcessingError(nodeNames)
+				}
+				provider := builder.Build()
+				knownGroupStartup := tc.knownGroupStartup
+				if knownGroupStartup == 0 {
+					knownGroupStartup = time.Hour
+				}
+				provider.AddNodeGroupWithCustomOptions("known", 0, 10, 1, &config.NodeGroupAutoscalingOptions{MaxNodeStartupTime: knownGroupStartup})
 				known := BuildTestNode("known", 1000, 1000)
 				SetNodeReadyState(known, true, now.Add(-time.Minute))
 				provider.AddNode("known", known)
+				if tc.optionsError {
+					group := &mockprovider.NodeGroup{}
+					group.On("Id").Return("target")
+					group.On("GetOptions", mock.Anything).Return(nil, fmt.Errorf("node group options unavailable"))
+					provider.InsertNodeGroup(group)
+					defer group.AssertExpectations(t)
+				} else if !tc.external {
+					var options *config.NodeGroupAutoscalingOptions
+					if tc.groupStartup != nil {
+						options = &config.NodeGroupAutoscalingOptions{MaxNodeStartupTime: *tc.groupStartup}
+					}
+					provider.AddNodeGroupWithCustomOptions("target", 0, 10, len(nodeNames), options)
+				}
 				var nodes []*apiv1.Node
-				for _, name := range []string{"failed-0", "failed-1"} {
+				for _, name := range nodeNames {
 					node := BuildTestNode(name, 1000, 1000)
 					SetNodeReadyState(node, false, now.Add(-time.Minute))
-					node.CreationTimestamp = metav1.NewTime(now.Add(-tc.failedNodeAge))
+					node.CreationTimestamp = metav1.NewTime(now.Add(-tc.nodeAge))
+					provider.AddNode("target", node)
 					nodes = append(nodes, node)
 				}
 				if knownNodeFirst {
@@ -836,12 +916,20 @@ func TestNodeGroupLookupFailureStartupGraceIsIndependentOfNodeOrder(t *testing.T
 					config: ClusterStateRegistryConfig{
 						MaxTotalUnreadyPercentage: 10,
 						OkTotalUnreadyCount:       1,
+						MaxNodeStartupTime:        tc.configuredStartup,
 					},
 				}
 				clusterstate.updateReadinessStats(context.Background(), now)
-				assert.Equal(t, tc.wantHealthy, clusterstate.IsClusterHealthy())
+				if tc.wantNotStarted {
+					assert.ElementsMatch(t, nodeNames, clusterstate.totalReadiness.NotStarted)
+					assert.Empty(t, clusterstate.totalReadiness.Unready)
+				} else {
+					assert.ElementsMatch(t, nodeNames, clusterstate.totalReadiness.Unready)
+					assert.Empty(t, clusterstate.totalReadiness.NotStarted)
+				}
+				assert.Equal(t, tc.wantNotStarted, clusterstate.IsClusterHealthy())
 				clusterstate.config.UnreadyNodesScope = config.UnreadyNodesScopeAutoscaled
-				assert.Equal(t, tc.wantHealthy, clusterstate.IsClusterHealthy())
+				assert.Equal(t, tc.wantNotStarted || tc.external, clusterstate.IsClusterHealthy())
 			})
 		}
 	}
