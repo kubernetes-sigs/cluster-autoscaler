@@ -46,6 +46,12 @@ type PodInfo struct {
 	NeededResourceClaims []*resourceapi.ResourceClaim
 }
 
+type NodeInfoConfig struct {
+	Slices  []*resourceapi.ResourceSlice
+	CSINode *storagev1.CSINode
+	Pods    []*PodInfo
+}
+
 // NewPodInfo returns a new internal PodInfo from the provided data.
 func NewPodInfo(pod *apiv1.Pod, claims []*resourceapi.ResourceClaim) *PodInfo {
 	pi, _ := schedulerimpl.NewPodInfo(pod)
@@ -117,12 +123,8 @@ func (n *NodeInfo) DeepCopy() *NodeInfo {
 	for _, slice := range n.LocalResourceSlices {
 		newSlices = append(newSlices, slice.DeepCopy())
 	}
-	// Node() can be nil, but DeepCopy() handles nil receivers gracefully.
-	ni := NewNodeInfo(n.Node().DeepCopy(), newSlices, newPods...)
-	if n.CSINode != nil {
-		ni.SetCSINode(n.CSINode.DeepCopy())
-	}
-	return ni
+	// Node() and CSINode.DeepCopy() handle nil receivers gracefully.
+	return NewNodeInfo(n.Node().DeepCopy(), NodeInfoConfig{Slices: newSlices, CSINode: n.CSINode.DeepCopy(), Pods: newPods})
 }
 
 // Snapshot returns a shallow copy of NodeInfo that is efficient to create.
@@ -164,16 +166,16 @@ func (n *NodeInfo) SetCSINode(csiNode *storagev1.CSINode) *NodeInfo {
 	return n
 }
 
-// NewNodeInfo returns a new internal NodeInfo from the provided data.
-func NewNodeInfo(node *apiv1.Node, slices []*resourceapi.ResourceSlice, pods ...*PodInfo) *NodeInfo {
+func NewNodeInfo(node *apiv1.Node, cfg NodeInfoConfig) *NodeInfo {
 	result := &NodeInfo{
 		NodeInfo:            schedulerimpl.NewNodeInfo(),
-		LocalResourceSlices: slices,
+		LocalResourceSlices: cfg.Slices,
+		CSINode:             cfg.CSINode,
 	}
 	if node != nil {
 		result.SetNode(node)
 	}
-	for _, pod := range pods {
+	for _, pod := range cfg.Pods {
 		result.AddPod(pod)
 	}
 	return result
