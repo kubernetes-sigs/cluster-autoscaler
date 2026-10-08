@@ -223,10 +223,8 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 	taintedNodes := make(chan *apiv1.Node, len(nodesToTaint))
 	workqueue.ParallelizeUntil(context.Background(), maxConcurrentNodesTainting, len(nodesToTaint), func(piece int) {
 		node := nodesToTaint[piece]
-		if updateLatencyTracker != nil {
-			// Record the start time here rather than when the node is queued, so time spent waiting for a free worker doesn't inflate the latency.
-			updateLatencyTracker.RecordStartTime(node.Name)
-		}
+		// Capture the start time here rather than when the node is queued, so time spent waiting for a free worker doesn't inflate the latency.
+		startTime := time.Now()
 		err := a.taintNode(ctx, node)
 		if err != nil {
 			failedTaintedNodes <- struct {
@@ -234,6 +232,7 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 				err  error
 			}{node: node, err: err}
 		} else {
+			updateLatencyTracker.RecordStartTime(node.Name, startTime)
 			taintedNodes <- node
 		}
 	})
@@ -243,10 +242,8 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 		for nodeWithError := range failedTaintedNodes {
 			a.autoscalingCtx.Recorder.Eventf(nodeWithError.node, apiv1.EventTypeWarning, "ScaleDownFailed", "failed to mark the node as toBeDeleted/unschedulable: %v", nodeWithError.err)
 		}
-		if updateLatencyTracker != nil {
-			// All applied taints are cleaned up below, so none of the nodes should be awaited or measured.
-			updateLatencyTracker.DropNodes(nodeNames...)
-		}
+		// All applied taints are cleaned up below, so none of the nodes should be awaited or measured.
+		updateLatencyTracker.DropNodes(nodeNames...)
 		// Clean up already applied taints in case of issues.
 		for taintedNode := range taintedNodes {
 			_, _ = taints.CleanToBeDeleted(ctx, taintedNode, a.autoscalingCtx.ClientSet, a.autoscalingCtx.CordonNodeBeforeTerminate)
@@ -254,7 +251,7 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 		return nodeDeleteDelayAfterTaint, errors.NewAutoscalerErrorf(errors.ApiCallError, "couldn't taint %d nodes with ToBeDeleted", len(failedTaintedNodes))
 	}
 
-	if updateLatencyTracker != nil {
+	if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
 		latency, err := updateLatencyTracker.WaitForLatency()
 		if err != nil {
 			klog.FromContext(ctx).Error(err, "Failed to measure taint latency, using the static node delete delay after taint")

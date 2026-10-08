@@ -154,8 +154,9 @@ func TestUpdateLatencyCalculation(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				nodeLister := NewTestCustomNodeLister(tc.nodes, tc.nodeTaintAfterDuration)
 				tracker := NewUpdateLatencyTrackerForTesting(nodeLister, tc.nodes)
+				startTime := time.Now()
 				for _, name := range tc.nodes {
-					tracker.RecordStartTime(name)
+					tracker.RecordStartTime(name, startTime)
 				}
 				tracker.DropNodes(tc.droppedNodes...)
 				go tracker.Start(t.Context())
@@ -185,7 +186,11 @@ func TestUpdateLatencyTrackerContextCancellation(t *testing.T) {
 
 			// Cancel ctx without ever starting or dropping "n1". Start() must return.
 			cancel()
-			<-tracker.done
+			select {
+			case <-tracker.done:
+			case <-time.After(time.Second):
+				t.Fatal("tracker did not finish after context cancellation")
+			}
 		})
 	})
 
@@ -197,7 +202,7 @@ func TestUpdateLatencyTrackerContextCancellation(t *testing.T) {
 			// "n1" never gets tainted.
 			nodeLister := NewTestCustomNodeLister([]string{"n1"}, nil)
 			tracker := NewUpdateLatencyTrackerForTesting(nodeLister, []string{"n1"})
-			tracker.RecordStartTime("n1")
+			tracker.RecordStartTime("n1", time.Now())
 
 			go tracker.Start(ctx)
 			cancel()
@@ -214,14 +219,18 @@ func TestUpdateLatencyTrackerWaitForLatencyWithNotStartedNodes(t *testing.T) {
 			nodes := []string{"n1", "n2", "n3"}
 			nodeLister := NewTestCustomNodeLister(nodes, map[string]time.Duration{"n1": 0, "n2": 0, "n3": 0})
 			tracker := NewUpdateLatencyTrackerForTesting(nodeLister, nodes)
-			tracker.RecordStartTime("n1")
+			tracker.RecordStartTime("n1", time.Now())
 			go tracker.Start(t.Context())
 
 			_, err := tracker.WaitForLatency()
 			assert.EqualError(t, err, "2 nodes were neither started nor dropped")
 
 			// Start must return, even though ctx is never cancelled.
-			<-tracker.done
+			select {
+			case <-tracker.done:
+			case <-time.After(time.Second):
+				t.Fatal("tracker did not finish after WaitForLatency returned")
+			}
 		})
 	})
 
@@ -229,7 +238,7 @@ func TestUpdateLatencyTrackerWaitForLatencyWithNotStartedNodes(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			nodeLister := NewTestCustomNodeLister([]string{"n1"}, map[string]time.Duration{"n1": 0})
 			tracker := NewUpdateLatencyTrackerForTesting(nodeLister, []string{"n1", "n2"})
-			tracker.RecordStartTime("n1")
+			tracker.RecordStartTime("n1", time.Now())
 			tracker.DropNodes("n2")
 			go tracker.Start(t.Context())
 
@@ -247,11 +256,11 @@ func TestUpdateLatencyTrackerTimeoutStartsWhenAllNodesStarted(t *testing.T) {
 		nodes := []string{"n1", "n2"}
 		nodeLister := NewTestCustomNodeLister(nodes, map[string]time.Duration{"n1": 0, "n2": 350 * time.Millisecond})
 		tracker := NewUpdateLatencyTrackerForTesting(nodeLister, nodes)
-		tracker.RecordStartTime("n1")
+		tracker.RecordStartTime("n1", time.Now())
 		go tracker.Start(t.Context())
 
 		time.Sleep(300 * time.Millisecond)
-		tracker.RecordStartTime("n2")
+		tracker.RecordStartTime("n2", time.Now())
 
 		latency, err := tracker.WaitForLatency()
 		assert.NoError(t, err)
@@ -268,8 +277,9 @@ func TestUpdateLatencyTrackerDropNodesWhilePolling(t *testing.T) {
 		// n2 never gets tainted.
 		nodeLister := NewTestCustomNodeLister(nodes, map[string]time.Duration{"n1": 10 * time.Millisecond})
 		tracker := NewUpdateLatencyTrackerForTesting(nodeLister, nodes)
-		tracker.RecordStartTime("n1")
-		tracker.RecordStartTime("n2")
+		startTime := time.Now()
+		tracker.RecordStartTime("n1", startTime)
+		tracker.RecordStartTime("n2", startTime)
 		go tracker.Start(t.Context())
 
 		// Drop n2 well after n1's taint was seen at 10ms and before the 200ms timeout.
