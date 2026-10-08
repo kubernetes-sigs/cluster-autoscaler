@@ -132,9 +132,18 @@ func (p *provReqProcessor) CleanUp() {}
 // reserve capacity from ScaleDown.
 func (p *provReqProcessor) Process(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, unschedulablePods []*apiv1.Pod) ([]*apiv1.Pod, error) {
 	logger := klog.FromContext(ctx)
-	err := p.bookCapacity(ctx, autoscalingCtx)
-	if err != nil {
-		logger.Info("Failed to book capacity for ProvisioningRequests", "err", err)
+	if err := p.bookCapacity(ctx, autoscalingCtx); err != nil {
+		// ProvisioningRequests admitted now could take the capacity booked for earlier ones, so
+		// their pods wait for the next iteration. Holding back other pods too would stop every
+		// scale-up in the cluster.
+		remaining := make([]*apiv1.Pod, 0, len(unschedulablePods))
+		for _, pod := range unschedulablePods {
+			if _, found := provisioningRequestName(pod); !found {
+				remaining = append(remaining, pod)
+			}
+		}
+		logger.Info("Failed to book capacity for ProvisioningRequests; their pods wait for the next iteration", "err", err, "heldBackPods", len(unschedulablePods)-len(remaining))
+		return remaining, nil
 	}
 	return unschedulablePods, nil
 }

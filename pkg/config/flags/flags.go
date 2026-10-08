@@ -196,8 +196,12 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&p.o.CheckCapacityBatchProcessing, "check-capacity-batch-processing", false, "Whether to enable batch processing for check capacity requests.")
 	fs.IntVar(&p.o.CheckCapacityProvisioningRequestMaxBatchSize, "check-capacity-provisioning-request-max-batch-size", 10, "Maximum number of provisioning requests to process in a single batch.")
 	fs.DurationVar(&p.o.CheckCapacityProvisioningRequestBatchTimebox, "check-capacity-provisioning-request-batch-timebox", 10*time.Second, "Maximum time to process a batch of provisioning requests.")
-	fs.BoolVar(&p.o.BestEffortAtomicBatchProcessing, "best-effort-atomic-batch-processing", false, "Whether to flatten a batch of best-effort-atomic ProvisioningRequests into one all-or-nothing scale-up calculation.")
+	fs.BoolVar(&p.o.BestEffortAtomicBatchProcessing, "best-effort-atomic-batch-processing", false, "Whether to combine compatible best-effort-atomic ProvisioningRequests into one all-or-nothing scale-up, retrying smaller sets of whole requests if it doesn't fit.")
 	fs.IntVar(&p.o.BestEffortAtomicProvisioningRequestMaxBatchSize, "best-effort-atomic-provisioning-request-max-batch-size", 10, "Maximum number of best-effort-atomic provisioning requests to process in a single batch.")
+	fs.IntVar(&p.o.BestEffortAtomicProvisioningRequestMaxBatchAttempts, "best-effort-atomic-provisioning-request-max-batch-attempts", config.DefaultBestEffortAtomicProvisioningRequestMaxBatchAttempts, "Maximum number of scale-up attempts, each with fewer requests than the last, for one batch of best-effort-atomic provisioning requests in a single iteration.")
+	fs.IntVar(&p.o.BestEffortAtomicProvisioningRequestMaxResizeAttempts, "best-effort-atomic-provisioning-request-max-resize-attempts", config.DefaultBestEffortAtomicProvisioningRequestMaxResizeAttempts, "Maximum number of scale-up attempts for one batch of best-effort-atomic provisioning requests in a single iteration that may end in a resize the cloud provider rejected.")
+	fs.DurationVar(&p.o.BestEffortAtomicProvisioningRequestBatchTimebox, "best-effort-atomic-provisioning-request-batch-timebox", config.DefaultBestEffortAtomicProvisioningRequestBatchTimebox, "Time after which no new scale-up attempt starts for a batch of best-effort-atomic provisioning requests in an iteration.")
+	fs.DurationVar(&p.o.BestEffortAtomicProvisioningRequestBatchSizeTTL, "best-effort-atomic-provisioning-request-batch-size-ttl", config.DefaultBestEffortAtomicProvisioningRequestBatchSizeTTL, "How long a reduced size of best-effort-atomic batches is remembered after the batch that last reduced it.")
 	fs.BoolVar(&p.o.ForceDeleteLongUnregisteredNodes, "force-delete-unregistered-nodes", false, "Whether to enable force deletion of long unregistered nodes, regardless of the min size of the node group the belong to.")
 	fs.BoolVar(&p.o.ForceDeleteFailedNodes, "force-delete-failed-nodes", false, "Whether to enable force deletion of failed nodes, regardless of the min size of the node group the belong to.")
 	fs.BoolVar(&p.o.CSINodeAwareSchedulingEnabled, "enable-csi-node-aware-scheduling", true, "Whether logic for handling CSINode objects is enabled.")
@@ -296,6 +300,18 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 	}
 	if p.o.BestEffortAtomicBatchProcessing && p.o.BestEffortAtomicProvisioningRequestMaxBatchSize < 2 {
 		return config.AutoscalingOptions{}, fmt.Errorf("--best-effort-atomic-provisioning-request-max-batch-size must be at least 2 when --best-effort-atomic-batch-processing is enabled")
+	}
+	if p.o.BestEffortAtomicProvisioningRequestMaxBatchAttempts < 1 {
+		return config.AutoscalingOptions{}, fmt.Errorf("--best-effort-atomic-provisioning-request-max-batch-attempts must be at least 1")
+	}
+	if p.o.BestEffortAtomicProvisioningRequestMaxResizeAttempts < 1 {
+		return config.AutoscalingOptions{}, fmt.Errorf("--best-effort-atomic-provisioning-request-max-resize-attempts must be at least 1")
+	}
+	if p.o.BestEffortAtomicProvisioningRequestBatchTimebox <= 0 {
+		return config.AutoscalingOptions{}, fmt.Errorf("--best-effort-atomic-provisioning-request-batch-timebox must be positive")
+	}
+	if p.o.BestEffortAtomicProvisioningRequestBatchSizeTTL <= 0 {
+		return config.AutoscalingOptions{}, fmt.Errorf("--best-effort-atomic-provisioning-request-batch-size-ttl must be positive")
 	}
 
 	if p.o.DynamicResourceAllocationEnabled == false {

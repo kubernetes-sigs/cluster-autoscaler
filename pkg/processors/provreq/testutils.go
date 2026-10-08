@@ -26,5 +26,5 @@ import (
 
 // NewFakePodsInjector creates a new instance of ProvisioningRequestPodsInjector with the given client and clock for testing.
 func NewFakePodsInjector(client *provreqclient.ProvisioningRequestClient, clock *testing.FakePassiveClock) *ProvisioningRequestPodsInjector {
-	return &ProvisioningRequestPodsInjector{initialRetryTime: 1 * time.Minute, maxBackoffTime: 10 * time.Minute, backoffDuration: lru.New(1000), client: client, clock: clock}
+	return &ProvisioningRequestPodsInjector{initialRetryTime: 1 * time.Minute, maxBackoffTime: 10 * time.Minute, backoffDuration: lru.New(1000), awaitedConditions: lru.New(1000), client: client, clock: clock}
 }

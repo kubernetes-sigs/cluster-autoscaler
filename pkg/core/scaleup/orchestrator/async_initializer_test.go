@@ -90,6 +90,7 @@ func TestNodePoolAsyncInitialization(t *testing.T) {
 					{MainCreatedNodeGroup: failingNodeGroup},
 				},
 				FailedResizeNodeGroups: []cloudprovider.NodeGroup{failingNodeGroup},
+				FailedResizeErrors:     map[string]errors.AutoscalerError{failingNodeGroupName: failedScaleUpErr},
 				PodsTriggeredScaleUp:   []*apiv1.Pod{pod},
 			},
 		},

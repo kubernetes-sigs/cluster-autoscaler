@@ -54,6 +54,15 @@ const (
 	NoRetryParameterKey = "noRetry"
 )
 
+type combinedStatusSet = combinedstatus.Set
+
+// NewCombinedStatusSet creates an empty set of scale-up statuses.
+//
+// Deprecated: Use combinedstatus.New instead.
+func NewCombinedStatusSet() combinedStatusSet {
+	return combinedstatus.New()
+}
+
 type checkCapacityProvClass struct {
 	autoscalingCtx                               *ca_context.AutoscalingContext
 	client                                       *provreqclient.ProvisioningRequestClient

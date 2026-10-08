@@ -182,6 +182,16 @@ func TestCreateAutoscalingOptions(t *testing.T) {
 			},
 		},
 		{
+			testName: "best-effort-atomic batch retry settings default to the documented values",
+			flags:    []string{},
+			wantOptionsAsserter: func(t *testing.T, gotOptions config.AutoscalingOptions) {
+				assert.Equal(t, 8, gotOptions.BestEffortAtomicProvisioningRequestMaxBatchAttempts)
+				assert.Equal(t, 4, gotOptions.BestEffortAtomicProvisioningRequestMaxResizeAttempts)
+				assert.Equal(t, 10*time.Second, gotOptions.BestEffortAtomicProvisioningRequestBatchTimebox)
+				assert.Equal(t, time.Hour, gotOptions.BestEffortAtomicProvisioningRequestBatchSizeTTL)
+			},
+		},
+		{
 			testName: "DrainPriorityConfig is parsed correctly when the flag passed",
 			flags:    []string{"--drain-priority-config", "5000:60,3000:50,0:40"},
 			wantOptionsAsserter: func(t *testing.T, gotOptions config.AutoscalingOptions) {
@@ -373,6 +383,10 @@ func TestAutoscalingFlagsAllPossible(t *testing.T) {
 				"--check-capacity-provisioning-request-batch-timebox=5s",
 				"--best-effort-atomic-batch-processing=true",
 				"--best-effort-atomic-provisioning-request-max-batch-size=100",
+				"--best-effort-atomic-provisioning-request-max-batch-attempts=3",
+				"--best-effort-atomic-provisioning-request-max-resize-attempts=2",
+				"--best-effort-atomic-provisioning-request-batch-timebox=30s",
+				"--best-effort-atomic-provisioning-request-batch-size-ttl=20m",
 				"--force-delete-unregistered-nodes=true",
 				"--force-delete-failed-nodes=true",
 				"--enable-csi-node-aware-scheduling=false",
@@ -496,6 +510,10 @@ func TestAutoscalingFlagsAllPossible(t *testing.T) {
 				assert.Equal(t, 5*time.Second, opts.CheckCapacityProvisioningRequestBatchTimebox)
 				assert.True(t, opts.BestEffortAtomicBatchProcessing)
 				assert.Equal(t, 100, opts.BestEffortAtomicProvisioningRequestMaxBatchSize)
+				assert.Equal(t, 3, opts.BestEffortAtomicProvisioningRequestMaxBatchAttempts)
+				assert.Equal(t, 2, opts.BestEffortAtomicProvisioningRequestMaxResizeAttempts)
+				assert.Equal(t, 30*time.Second, opts.BestEffortAtomicProvisioningRequestBatchTimebox)
+				assert.Equal(t, 20*time.Minute, opts.BestEffortAtomicProvisioningRequestBatchSizeTTL)
 				assert.True(t, opts.ForceDeleteLongUnregisteredNodes)
 				assert.True(t, opts.ForceDeleteFailedNodes)
 				assert.False(t, opts.CSINodeAwareSchedulingEnabled)
@@ -660,6 +678,32 @@ func TestAutoscalingFlagsValidationEdgeCases(t *testing.T) {
 		},
 		"ValidDormantBestEffortAtomicBatchSize": {
 			Flags:   []string{"--best-effort-atomic-provisioning-request-max-batch-size=1"},
+			WantErr: false,
+		},
+		"BestEffortAtomicMaxBatchAttemptsZero": {
+			Flags:   []string{"--best-effort-atomic-provisioning-request-max-batch-attempts=0"},
+			WantErr: true,
+		},
+		"BestEffortAtomicMaxResizeAttemptsZero": {
+			Flags:   []string{"--best-effort-atomic-provisioning-request-max-resize-attempts=0"},
+			WantErr: true,
+		},
+		"BestEffortAtomicBatchTimeboxZero": {
+			Flags:   []string{"--best-effort-atomic-provisioning-request-batch-timebox=0s"},
+			WantErr: true,
+		},
+		"BestEffortAtomicBatchSizeTTLNegative": {
+			Flags:   []string{"--best-effort-atomic-provisioning-request-batch-size-ttl=-1m"},
+			WantErr: true,
+		},
+		"MinimalBestEffortAtomicBatchRetrySettings": {
+			Flags: []string{
+				"--best-effort-atomic-batch-processing=true",
+				"--best-effort-atomic-provisioning-request-max-batch-attempts=1",
+				"--best-effort-atomic-provisioning-request-max-resize-attempts=1",
+				"--best-effort-atomic-provisioning-request-batch-timebox=1ms",
+				"--best-effort-atomic-provisioning-request-batch-size-ttl=1s",
+			},
 			WantErr: false,
 		},
 		"InvalidDRA": {
