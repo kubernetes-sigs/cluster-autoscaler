@@ -159,6 +159,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&p.o.NodeGroupBackoffResetTimeout, "node-group-backoff-reset-timeout", 3*time.Hour, "nodeGroupBackoffResetTimeout is the time after last failed scale-up when the backoff duration is reset.")
 	fs.IntVar(&p.o.MaxScaleDownParallelism, "max-scale-down-parallelism", 10, "Maximum number of nodes (both empty and needing drain) that can be deleted in parallel.")
 	fs.IntVar(&p.o.MaxDrainParallelism, "max-drain-parallelism", 1, "Maximum number of nodes needing drain, that can be drained and deleted in parallel.")
+	fs.IntVar(&p.o.MaxConcurrentNodesTainting, "max-concurrent-nodes-tainting", 5, "Maximum number of nodes that can be tainted/untainted as ToBeDeleted at the same time.")
 	fs.BoolVar(&p.o.RecordDuplicatedEvents, "record-duplicated-events", false, "enable duplication of similar events within a 5 minute window.")
 	fs.IntVar(&p.o.MaxNodesPerScaleUp, "max-nodes-per-scaleup", 1000, "Max nodes added in a single scale-up. This is intended strictly for optimizing CA algorithm latency and not a tool to rate-limit scale-up throughput.")
 	fs.DurationVar(&p.o.MaxNodeGroupBinpackingDuration, "max-nodegroup-binpacking-duration", 10*time.Second, "Maximum time that will be spent in binpacking simulation for each NodeGroup.")
@@ -288,6 +289,10 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 
 	if p.o.PredicateParallelism < 1 {
 		return config.AutoscalingOptions{}, fmt.Errorf("Invalid value for --predicate-parallelism flag: %d", p.o.PredicateParallelism)
+	}
+
+	if p.o.MaxConcurrentNodesTainting < 1 {
+		return config.AutoscalingOptions{}, fmt.Errorf("Invalid value for --max-concurrent-nodes-tainting flag: %d", p.o.MaxConcurrentNodesTainting)
 	}
 
 	if p.o.DynamicResourceAllocationEnabled == false {

@@ -273,6 +273,8 @@ type AutoscalingOptions struct {
 	MaxScaleDownParallelism int
 	// MaxDrainParallelism is the maximum number of nodes needing drain, that can be drained and deleted in parallel.
 	MaxDrainParallelism int
+	// MaxConcurrentNodesTainting is the maximum number of nodes that can be tainted/untainted as ToBeDeleted at the same time.
+	MaxConcurrentNodesTainting int
 	// RecordDuplicatedEvents controls whether events should be duplicated within a 5 minute window.
 	RecordDuplicatedEvents bool
 	// MaxNodesPerScaleUp controls how many nodes can be added in a single scale-up.
