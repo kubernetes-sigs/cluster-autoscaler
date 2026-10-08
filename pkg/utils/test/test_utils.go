@@ -17,10 +17,12 @@ limitations under the License.
 package test
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -31,6 +33,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
+	"k8s.io/klog/v2/ktesting"
 	kube_types "k8s.io/kubernetes/pkg/kubelet/types"
 )
 
@@ -657,4 +661,29 @@ func IgnoreObjectOrder[T interface{ GetName() string }]() cmp.Option {
 	return cmpopts.SortSlices(func(c1, c2 T) bool {
 		return c1.GetName() < c2.GetName()
 	})
+}
+
+// DefaultLoggingConfig is the default logging configuration for tests.
+var DefaultLoggingConfig = ktesting.NewConfig(ktesting.Verbosity(4))
+
+// GetTestContext returns a context with a logger attached, suitable for use in tests.
+// The logger routes logs through t.Log() instead of os.Stderr:
+//   - go test (without -v) suppresses t.Log output for passing tests and only prints logs for failing tests.
+//   - For parallel tests (t.Parallel()), t.Log buffers output per test and groups it under that test's --- FAIL / === RUN block.
+//
+// testing.T does not support logging after the test that
+// it was created for has completed. If a test leaks goroutines
+// and those goroutines log something after test completion,
+// that output will be printed via the global klog logger with
+// `<test name> leaked goroutine` as prefix.
+func GetTestContext(t testing.TB) context.Context {
+	t.Helper()
+	logger := ktesting.NewLogger(t, DefaultLoggingConfig).WithValues("test", t.Name())
+	return klog.NewContext(t.Context(), logger)
+}
+
+// GetTestContextWithCancel returns a cancellable context with a logger attached, suitable for use in tests, and the cancellation function.
+func GetTestContextWithCancel(t testing.TB) (context.Context, context.CancelFunc) {
+	t.Helper()
+	return context.WithCancel(GetTestContext(t))
 }

@@ -17,7 +17,6 @@ limitations under the License.
 package inmemory
 
 import (
-	"context"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -44,7 +43,7 @@ func TestProvReqFullLifecycle(t *testing.T) {
 	fakes := infra.Fakes
 
 	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithCancel(t.Context())
+		ctx, cancel := test.GetTestContextWithCancel(t)
 		defer synctestutils.TearDown(cancel)
 
 		autoscaler, _, err := integration.DefaultAutoscalingBuilder(options, infra).Build(ctx)
@@ -67,13 +66,13 @@ func TestProvReqFullLifecycle(t *testing.T) {
 		_, err = fakes.PRClient.AutoscalingV1().ProvisioningRequests(wrapper.ProvisioningRequest.Namespace).Create(ctx, wrapper.ProvisioningRequest, metav1.CreateOptions{})
 		assert.NoError(t, err)
 
-		tg1, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(context.Background())
+		tg1, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(ctx)
 		assert.Equal(t, 1, tg1)
 
-		synctestutils.MustRunOnceAfter(t, autoscaler, 10*time.Second)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, 10*time.Second)
 
 		// The NodeGroup should have scaled up by 1 due to the PR
-		tg1After, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(context.Background())
+		tg1After, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(ctx)
 		assert.Equal(t, 2, tg1After)
 
 		// Scale-Down
@@ -84,12 +83,12 @@ func TestProvReqFullLifecycle(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Run CA once to trigger the unneeded evaluation
-		synctestutils.MustRunOnceAfter(t, autoscaler, 10*time.Second)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, 10*time.Second)
 
 		// Step time forward by the ScaleDownUnneededTime (10 mins) + buffer (5 mins)
-		synctestutils.MustRunOnceAfter(t, autoscaler, 15*time.Minute)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, 15*time.Minute)
 
-		tg1Final, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(context.Background())
+		tg1Final, _ := fakes.CloudProvider.GetNodeGroup("ng1").TargetSize(ctx)
 		assert.Equal(t, 1, tg1Final)
 	})
 }
