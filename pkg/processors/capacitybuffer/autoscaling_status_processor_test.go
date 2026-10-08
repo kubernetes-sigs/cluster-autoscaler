@@ -18,9 +18,7 @@ package capacitybufferpodlister
 
 import (
 	"context"
-	"fmt"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -28,9 +26,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	v1beta1ac "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/applyconfiguration/autoscaling.x-k8s.io/v1beta1"
+	"k8s.io/client-go/rest"
+	cbctrl "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/controller"
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/fakepods"
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/testutil"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
@@ -40,6 +39,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/config"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
@@ -60,7 +62,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 		buffers     []*v1beta1.CapacityBuffer
 		processed   []string
 		fakePods    []fakePodSpec
-		wantApplied map[string]int32
+		wantUpdated map[string]int32
 	}{
 		{
 			name: "empty registry, no updates",
@@ -71,7 +73,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 					testutil.WithStatusReadyReplicas(3),
 				),
 			},
-			wantApplied: map[string]int32{},
+			wantUpdated: map[string]int32{},
 		},
 		{
 			name: "fake pods on existing node are counted",
@@ -86,7 +88,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 				{name: "p1", nodeName: "existing", buffer: "b1"},
 				{name: "p2", nodeName: "existing", buffer: "b1"},
 			},
-			wantApplied: map[string]int32{"b1": 2},
+			wantUpdated: map[string]int32{"b1": 2},
 		},
 		{
 			name: "fake pods on upcoming node are not counted",
@@ -100,7 +102,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 				{name: "p1", nodeName: "existing", buffer: "b1"},
 				{name: "p2", nodeName: "upcoming", buffer: "b1"},
 			},
-			wantApplied: map[string]int32{"b1": 1},
+			wantUpdated: map[string]int32{"b1": 1},
 		},
 		{
 			name: "processed buffer without fake pods gets 0",
@@ -112,7 +114,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 				),
 			},
 			processed:   []string{"b1"},
-			wantApplied: map[string]int32{"b1": 0},
+			wantUpdated: map[string]int32{"b1": 0},
 		},
 		{
 			name: "processed buffer with fake pods only on upcoming nodes gets 0",
@@ -126,7 +128,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 			fakePods: []fakePodSpec{
 				{name: "p1", nodeName: "upcoming", buffer: "b1"},
 			},
-			wantApplied: map[string]int32{"b1": 0},
+			wantUpdated: map[string]int32{"b1": 0},
 		},
 		{
 			name: "unprocessed buffer is left unchanged",
@@ -145,10 +147,10 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 			fakePods: []fakePodSpec{
 				{name: "p1", nodeName: "existing", buffer: "b1"},
 			},
-			wantApplied: map[string]int32{"b1": 1},
+			wantUpdated: map[string]int32{"b1": 1},
 		},
 		{
-			name: "unchanged ready replicas are not applied",
+			name: "unchanged ready replicas are not enqueued",
 			buffers: []*v1beta1.CapacityBuffer{
 				testutil.NewBuffer(
 					testutil.WithName("b1"),
@@ -160,10 +162,10 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 			fakePods: []fakePodSpec{
 				{name: "p1", nodeName: "existing", buffer: "b1"},
 			},
-			wantApplied: map[string]int32{},
+			wantUpdated: map[string]int32{},
 		},
 		{
-			name: "unchanged zero ready replicas are not applied",
+			name: "unchanged zero ready replicas are not enqueued",
 			buffers: []*v1beta1.CapacityBuffer{
 				testutil.NewBuffer(
 					testutil.WithName("b1"),
@@ -172,7 +174,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 				),
 			},
 			processed:   []string{"b1"},
-			wantApplied: map[string]int32{},
+			wantUpdated: map[string]int32{},
 		},
 		{
 			name: "multiple buffers",
@@ -199,7 +201,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 				{name: "p3", nodeName: "existing", buffer: "b2"},
 				{name: "p4", nodeName: "upcoming", buffer: "b2"},
 			},
-			wantApplied: map[string]int32{"b1": 1, "b2": 2, "b3": 0},
+			wantUpdated: map[string]int32{"b1": 1, "b2": 2, "b3": 0},
 		},
 	}
 
@@ -225,100 +227,56 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 			err := snapshot.SetClusterState(context.Background(), []*apiv1.Node{existingNode, upcomingNode}, pods, nil, nil)
 			assert.NoError(t, err)
 
-			// Applies are executed concurrently, so access to the map must be synchronized.
 			var mu sync.Mutex
-			applied := map[string]int32{}
+			gotUpdated := make(map[string]int32)
 			kubeClient := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
-				SubResourceApply: func(_ context.Context, _ client.Client, subResourceName string, obj runtime.ApplyConfiguration, _ ...client.SubResourceApplyOption) error {
-					assert.Equal(t, "status", subResourceName)
-					applyCfg, ok := obj.(*v1beta1ac.CapacityBufferApplyConfiguration)
-					assert.True(t, ok, "unexpected apply configuration type %T", obj)
-					assert.NotNil(t, applyCfg.Status)
-					assert.NotNil(t, applyCfg.Status.ReadyReplicas)
+				SubResourceApply: func(_ context.Context, _ client.Client, _ string, obj runtime.ApplyConfiguration, _ ...client.SubResourceApplyOption) error {
+					applyCfg := obj.(*v1beta1ac.CapacityBufferApplyConfiguration)
 					mu.Lock()
-					defer mu.Unlock()
-					applied[*applyCfg.GetName()] = *applyCfg.Status.ReadyReplicas
+					gotUpdated[*applyCfg.Name] = *applyCfg.Status.ReadyReplicas
+					mu.Unlock()
 					return nil
 				},
 			}).Build()
 
-			processor := NewCapacityBufferAutoscalingStatusProcessor(kubeClient, registry)
-			autoscalingCtx := &ca_context.AutoscalingContext{ClusterSnapshot: snapshot}
-			err = processor.Process(t.Context(), autoscalingCtx, nil, time.Now())
-			assert.NoError(t, err)
-
-			assert.Equal(t, tc.wantApplied, applied)
-		})
-	}
-}
-
-func TestCapacityBufferAutoscalingStatusProcessorTimeout(t *testing.T) {
-	// Applies are executed in rounds of maxConcurrentStatusUpdates concurrent calls,
-	// and the whole phase is bounded by statusUpdatesTimeout.
-	testCases := []struct {
-		name         string
-		buffersCount int
-		applyLatency time.Duration
-		wantCalls    int32
-		wantApplied  int32
-	}{
-		{
-			name:         "all buffers updated within the timeout",
-			buffersCount: 3 * maxConcurrentStatusUpdates,
-			// 3 rounds complete after 3/4 of the timeout.
-			applyLatency: statusUpdatesTimeout / 4,
-			wantCalls:    3 * maxConcurrentStatusUpdates,
-			wantApplied:  3 * maxConcurrentStatusUpdates,
-		},
-		{
-			name:         "slow API server, in-flight calls are canceled and remaining buffers are skipped",
-			buffersCount: 4 * maxConcurrentStatusUpdates,
-			// 2 rounds complete, the 3rd one is in flight when the timeout expires.
-			applyLatency: statusUpdatesTimeout * 2 / 5,
-			wantCalls:    3 * maxConcurrentStatusUpdates,
-			wantApplied:  2 * maxConcurrentStatusUpdates,
-		},
-		{
-			name:         "unresponsive API server, only the first round of calls is attempted",
-			buffersCount: 2 * maxConcurrentStatusUpdates,
-			applyLatency: 2 * statusUpdatesTimeout,
-			wantCalls:    maxConcurrentStatusUpdates,
-			wantApplied:  0,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			registry := fakepods.NewRegistry(nil)
-			for i := range tc.buffersCount {
-				name := fmt.Sprintf("b%d", i)
-				registry.MarkProcessed(testutil.NewBuffer(testutil.WithName(name), testutil.WithUID[*v1beta1.CapacityBuffer](types.UID(name+"-uid"))))
-			}
-
-			var calls, applied atomic.Int32
-			kubeClient := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
-				SubResourceApply: func(ctx context.Context, _ client.Client, _ string, _ runtime.ApplyConfiguration, _ ...client.SubResourceApplyOption) error {
-					calls.Add(1)
-					select {
-					case <-time.After(tc.applyLatency):
-						applied.Add(1)
-						return nil
-					case <-ctx.Done():
-						return ctx.Err()
-					}
-				},
-			}).Build()
-
-			processor := NewCapacityBufferAutoscalingStatusProcessor(kubeClient, registry)
-			// The snapshot has to be created outside of the bubble, as it starts background goroutines that never exit.
-			autoscalingCtx := &ca_context.AutoscalingContext{ClusterSnapshot: testsnapshot.NewTestSnapshotOrDie(t)}
-
 			synctest.Test(t, func(t *testing.T) {
-				err := processor.Process(t.Context(), autoscalingCtx, nil, time.Now())
+				controller := cbctrl.NewReadyReplicasController(kubeClient)
+				// Start a controller-runtime manager so ReadyReplicasController's background
+				// worker is running and reconciles events enqueued by processor.Process.
+				mgr, err := manager.New(&rest.Config{}, manager.Options{
+					Metrics: metricsserver.Options{BindAddress: "0"},
+					Controller: config.Controller{
+						// SkipNameValidation allows registering the same controller name across multiple test cases.
+						SkipNameValidation: new(true),
+						// UsePriorityQueue is disabled in synctest unit tests so priorityqueue's background
+						// handleReadyItems goroutine does not remain blocked inside the synctest bubble on shutdown.
+						UsePriorityQueue: new(false),
+					},
+				})
+				assert.NoError(t, err)
+				assert.NoError(t, controller.SetupWithManager(mgr))
+
+				ctx, cancel := context.WithCancel(t.Context())
+				var wg sync.WaitGroup
+				wg.Go(func() {
+					assert.NoError(t, mgr.Start(ctx))
+				})
+				// Wait until the manager and controller workers have started and are parked waiting for events.
+				synctest.Wait()
+
+				processor := NewCapacityBufferAutoscalingStatusProcessor(controller, registry)
+				autoscalingCtx := &ca_context.AutoscalingContext{ClusterSnapshot: snapshot}
+				err = processor.Process(t.Context(), autoscalingCtx, nil, time.Now())
 				assert.NoError(t, err)
 
-				assert.Equal(t, tc.wantCalls, calls.Load())
-				assert.Equal(t, tc.wantApplied, applied.Load())
+				// Wait for the controller workers to drain all enqueued events and finish calling SubResourceApply.
+				synctest.Wait()
+				// Stop the manager and wait for all controller-runtime goroutines in the synctest bubble to exit.
+				cancel()
+				wg.Wait()
+				synctest.Wait()
+
+				assert.Equal(t, tc.wantUpdated, gotUpdated)
 			})
 		})
 	}
