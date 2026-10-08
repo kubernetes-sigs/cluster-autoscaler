@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -215,7 +216,7 @@ func TestProvisioningRequestPodsInjector(t *testing.T) {
 	for _, tc := range testCases {
 		client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, tc.provReqs...)
 		backoffTime := lru.New(100)
-		backoffTime.Add(key(notProvisionedRecentlyProvReqB), 2*time.Minute)
+		backoffTime.Add(key(notProvisionedRecentlyProvReqB), retryBackoff{delay: 2 * time.Minute, failedAt: minAgo})
 		injector := ProvisioningRequestPodsInjector{
 			initialRetryTime:                   1 * time.Minute,
 			maxBackoffTime:                     10 * time.Minute,
@@ -270,10 +271,10 @@ func testProvisioningRequestWithCondition(name string, podCount int, class strin
 }
 
 // TestBestEffortAtomicBatchRetryBackoff checks that requests which are being retried are included
-// in the batch they qualify for, and that their retry backoff is advanced exactly once per
-// iteration. Selecting a batch involves inspecting the queue before picking the requests, and an
-// inspection with side effects would both drop the request from its own batch and make the
-// backoff grow twice as fast as configured.
+// in the batch they qualify for, and that their retry backoff advances exactly once per failure.
+// Selecting a batch involves inspecting the queue before picking the requests, and neither the
+// inspection nor the selection may delay a request: one that is left out of the attempt that is
+// finally made must be retried as soon as before.
 func TestBestEffortAtomicBatchRetryBackoff(t *testing.T) {
 	now := time.Now()
 	initialRetryTime := time.Minute
@@ -317,14 +318,155 @@ func TestBestEffortAtomicBatchRetryBackoff(t *testing.T) {
 		t.Errorf("injector.Process injected %d pods, want %d", len(unschedulablePods), want)
 	}
 	for _, pr := range provReqs {
-		val, found := injector.backoffDuration.Get(key(pr))
-		if !found {
-			t.Errorf("no backoff recorded for ProvisioningRequest %s", pr.Name)
-			continue
+		if got := injector.retryTime(pr); got != initialRetryTime {
+			t.Errorf("retry backoff for ProvisioningRequest %s is %v after selection, want %v", pr.Name, got, initialRetryTime)
 		}
-		if got, want := val.(time.Duration), 2*initialRetryTime; got != want {
-			t.Errorf("backoff for ProvisioningRequest %s is %v, want %v", pr.Name, got, want)
+		if !injector.IsAvailableForProvisioning(pr) {
+			t.Errorf("ProvisioningRequest %s is no longer eligible, although it hasn't failed again", pr.Name)
 		}
+	}
+
+	// Another failure moves the condition's transition time, which doubles the backoff once,
+	// however often it's checked.
+	failedAgain := provReqs[0]
+	apimeta.FindStatusCondition(failedAgain.Status.Conditions, v1.Provisioned).LastTransitionTime = metav1.NewTime(now)
+	for i := 0; i < 3; i++ {
+		if got, want := injector.retryTime(failedAgain), 2*initialRetryTime; got != want {
+			t.Errorf("retry backoff after another failure is %v, want %v", got, want)
+		}
+	}
+}
+
+// TestRetryBackoffSurvivesScans checks that scanning requests which wait for a retry doesn't evict
+// the retry backoff of other requests from the bounded cache, which would reset their delay.
+func TestRetryBackoffSurvivesScans(t *testing.T) {
+	now := time.Now()
+	waiting := metav1.Condition{Type: v1.Provisioned, Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(now.Add(-30 * time.Second))}
+	var requests []*provreqwrapper.ProvisioningRequest
+	for i := 0; i < 4; i++ {
+		pr := testProvisioningRequestWithCondition(fmt.Sprintf("waiting-%d", i), 1, v1.ProvisioningClassBestEffortAtomicScaleUp, waiting)
+		pr.UID = types.UID(pr.Name)
+		requests = append(requests, pr)
+	}
+	client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, requests...)
+	injector := NewProvisioningRequestPodsInjectorWithOptions(client, PodsInjectorOptions{
+		InitialBackoffTime:              time.Minute,
+		MaxBackoffTime:                  10 * time.Minute,
+		MaxBackoffCacheSize:             2,
+		BestEffortAtomicBatchProcessing: true,
+		BestEffortAtomicMaxBatchSize:    10,
+		KubeClientBurst:                 1,
+	})
+	injector.clock = clock.NewFakePassiveClock(now)
+	// The cache only has room for the backoff of the two requests that already failed repeatedly.
+	for _, pr := range requests[:2] {
+		injector.backoffDuration.Add(key(pr), retryBackoff{delay: 4 * time.Minute, failedAt: waiting.LastTransitionTime.Time})
+	}
+	for i := 0; i < 3; i++ {
+		if pods, err := injector.Process(context.Background(), nil, nil); err != nil || len(pods) != 0 {
+			t.Fatalf("injector.Process injected %d pods (err %v), want none while every request waits for a retry", len(pods), err)
+		}
+	}
+	for _, pr := range requests[:2] {
+		if got := injector.retryTime(pr); got != 4*time.Minute {
+			t.Errorf("retry backoff for %s = %v after scans, want %v", pr.Name, got, 4*time.Minute)
+		}
+	}
+}
+
+// TestAwaitProvisionedCondition checks that a best-effort-atomic request whose Provisioned
+// condition was just written isn't picked again before the informer cache shows the new condition,
+// and that it becomes eligible again after its retry delay if the write never shows.
+func TestAwaitProvisionedCondition(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	fakeClock := clock.NewFakePassiveClock(now)
+	injector := NewProvisioningRequestPodsInjectorWithOptions(nil, PodsInjectorOptions{
+		InitialBackoffTime:              time.Minute,
+		MaxBackoffTime:                  10 * time.Minute,
+		MaxBackoffCacheSize:             100,
+		BestEffortAtomicBatchProcessing: true,
+		BestEffortAtomicMaxBatchSize:    10,
+		KubeClientBurst:                 1,
+	})
+	injector.clock = fakeClock
+	request := func(name string, conditions ...metav1.Condition) *provreqwrapper.ProvisioningRequest {
+		pr := testProvisioningRequestWithCondition(name, 1, v1.ProvisioningClassBestEffortAtomicScaleUp, conditions...)
+		pr.UID = types.UID(name)
+		return pr
+	}
+	failedAt := func(at time.Time) metav1.Condition {
+		return metav1.Condition{Type: v1.Provisioned, Status: metav1.ConditionFalse, Reason: "CapacityIsNotFound", LastTransitionTime: metav1.NewTime(at)}
+	}
+
+	stale := request("failed", failedAt(now.Add(-time.Hour)))
+	if !injector.IsAvailableForProvisioning(stale) {
+		t.Fatal("a request that failed an hour ago isn't eligible")
+	}
+	injector.AwaitProvisionedCondition(stale)
+	if injector.IsAvailableForProvisioning(stale) {
+		t.Error("request is eligible before the cache shows the condition written for it")
+	}
+	failedAgain := request("failed", failedAt(now))
+	if injector.IsAvailableForProvisioning(failedAgain) {
+		t.Error("request is eligible right after failing again")
+	}
+	fakeClock.SetTime(now.Add(time.Minute + time.Second))
+	if !injector.IsAvailableForProvisioning(failedAgain) {
+		t.Error("request isn't eligible once its retry delay passed")
+	}
+
+	// A write that never shows, for example because it failed, only delays the request.
+	injector.AwaitProvisionedCondition(stale)
+	if injector.IsAvailableForProvisioning(stale) {
+		t.Error("request is eligible before the cache shows the condition written for it")
+	}
+	fakeClock.SetTime(fakeClock.Now().Add(time.Minute))
+	if !injector.IsAvailableForProvisioning(stale) {
+		t.Error("request isn't eligible after its retry delay, although the written condition never showed")
+	}
+
+	// A request without a Provisioned condition waits for its first one.
+	fresh := request("fresh")
+	injector.AwaitProvisionedCondition(fresh)
+	if injector.IsAvailableForProvisioning(fresh) {
+		t.Error("request is eligible before the cache shows its first Provisioned condition")
+	}
+	admitted := request("fresh", metav1.Condition{Type: v1.Provisioned, Status: metav1.ConditionTrue, LastTransitionTime: metav1.NewTime(fakeClock.Now())})
+	if injector.IsAvailableForProvisioning(admitted) {
+		t.Error("an admitted request is eligible")
+	}
+	if _, found := injector.awaitedConditions.Get(awaitKey(fresh)); found {
+		t.Error("the awaited condition wasn't forgotten once it showed")
+	}
+}
+
+// TestCheckCapacityRetryDelayDoublesWhenPicked checks that check capacity requests, which are
+// attempted whenever they're picked, double their retry delay when they're picked, unlike
+// best-effort-atomic requests, which batches can pick and then leave out.
+func TestCheckCapacityRetryDelayDoublesWhenPicked(t *testing.T) {
+	now := time.Now()
+	failed := metav1.Condition{Type: v1.Provisioned, Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(now.Add(-90 * time.Second))}
+	checkCapacity := testProvisioningRequestWithCondition("check-capacity", 1, v1.ProvisioningClassCheckCapacity, failed)
+	checkCapacity.UID = types.UID(checkCapacity.Name)
+	client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, checkCapacity)
+	injector := NewProvisioningRequestPodsInjectorWithOptions(client, PodsInjectorOptions{
+		InitialBackoffTime:           time.Minute,
+		MaxBackoffTime:               10 * time.Minute,
+		MaxBackoffCacheSize:          100,
+		CheckCapacityBatchProcessing: true,
+		BestEffortAtomicMaxBatchSize: 1,
+		KubeClientBurst:              1,
+	})
+	injector.clock = clock.NewFakePassiveClock(now)
+	batch, err := injector.GetCheckCapacityBatch(context.Background(), 10)
+	if err != nil || len(batch) != 1 {
+		t.Fatalf("GetCheckCapacityBatch returned %d requests (err %v), want 1", len(batch), err)
+	}
+	if got, want := injector.retryTime(checkCapacity), 2*time.Minute; got != want {
+		t.Errorf("retry delay after picking = %v, want %v", got, want)
+	}
+	if injector.IsAvailableForProvisioning(checkCapacity) {
+		t.Error("picking the request didn't delay its next attempt")
 	}
 }
 
@@ -429,18 +571,6 @@ func TestBestEffortAtomicBatchSchedulingRequirements(t *testing.T) {
 				template.Spec.SchedulerName = "custom-scheduler"
 			},
 		},
-		{
-			name: "pod labels",
-			mutate: func(template *apiv1.PodTemplateSpec) {
-				template.Labels["app"] = "other-app"
-			},
-		},
-		{
-			name: "pod annotations",
-			mutate: func(template *apiv1.PodTemplateSpec) {
-				template.Annotations = map[string]string{"example.com/scheduling-policy": "gpu"}
-			},
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -462,7 +592,14 @@ func TestBestEffortAtomicBatchSchedulingRequirements(t *testing.T) {
 			test.mutate(&incompatible.PodTemplates[0].Template)
 
 			client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, compatible, incompatible, oldest)
-			injector := NewProvisioningRequestPodsInjector(client, initialRetryTime, 10*time.Minute, 100, false, "", true, 2, 1)
+			injector := NewProvisioningRequestPodsInjectorWithOptions(client, PodsInjectorOptions{
+				InitialBackoffTime:              initialRetryTime,
+				MaxBackoffTime:                  10 * time.Minute,
+				MaxBackoffCacheSize:             100,
+				BestEffortAtomicBatchProcessing: true,
+				BestEffortAtomicMaxBatchSize:    2,
+				KubeClientBurst:                 1,
+			})
 			injector.clock = clock.NewFakePassiveClock(now)
 
 			pods, err := injector.Process(context.Background(), nil, nil)
@@ -489,16 +626,41 @@ func TestBestEffortAtomicBatchSchedulingRequirements(t *testing.T) {
 				if !wantAccepted && !reflect.DeepEqual(updated.Status.Conditions, request.Status.Conditions) {
 					t.Errorf("conditions changed for deferred request %s", request.Name)
 				}
-				wantRetryTime := initialRetryTime
-				if wantAccepted {
-					wantRetryTime *= 2
-				}
-				if retryTime := injector.retryTime(request); retryTime != wantRetryTime {
-					t.Errorf("retry backoff for %s = %v, want %v", request.Name, retryTime, wantRetryTime)
+				if retryTime := injector.retryTime(request); retryTime != initialRetryTime {
+					t.Errorf("retry backoff for %s = %v, want %v", request.Name, retryTime, initialRetryTime)
 				}
 			}
 			if !injector.IsAvailableForProvisioning(incompatible) {
 				t.Error("incompatible request is no longer eligible for provisioning")
+			}
+
+			// The first batch is admitted, so the next iteration can only pick the incompatible request.
+			for _, request := range []*provreqwrapper.ProvisioningRequest{oldest, compatible} {
+				updated, err := client.ProvisioningRequestNoCache(request.Namespace, request.Name)
+				if err != nil {
+					t.Fatalf("failed to get ProvisioningRequest %s: %v", request.Name, err)
+				}
+				apimeta.SetStatusCondition(&updated.Status.Conditions, metav1.Condition{
+					Type: v1.Provisioned, Status: metav1.ConditionTrue, Reason: "CapacityIsProvisioned", LastTransitionTime: metav1.NewTime(now),
+				})
+				if _, err := client.UpdateProvisioningRequest(context.Background(), updated.ProvisioningRequest); err != nil {
+					t.Fatalf("failed to admit ProvisioningRequest %s: %v", request.Name, err)
+				}
+			}
+			for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+				cached, err := client.ProvisioningRequests(context.Background())
+				admitted := 0
+				for _, request := range cached {
+					if apimeta.IsStatusConditionTrue(request.Status.Conditions, v1.Provisioned) {
+						admitted++
+					}
+				}
+				if err == nil && admitted == 2 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the informer cache didn't observe the admitted batch")
+				}
 			}
 
 			nextPods, err := injector.Process(context.Background(), nil, nil)
@@ -569,7 +731,14 @@ func TestBestEffortAtomicBatchMultiplePodSets(t *testing.T) {
 			}
 			test.mutate(next)
 			client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, next, oldest)
-			injector := NewProvisioningRequestPodsInjector(client, time.Minute, 10*time.Minute, 100, false, "", true, 10, 1)
+			injector := NewProvisioningRequestPodsInjectorWithOptions(client, PodsInjectorOptions{
+				InitialBackoffTime:              time.Minute,
+				MaxBackoffTime:                  10 * time.Minute,
+				MaxBackoffCacheSize:             100,
+				BestEffortAtomicBatchProcessing: true,
+				BestEffortAtomicMaxBatchSize:    10,
+				KubeClientBurst:                 1,
+			})
 			batch, err := injector.GetBestEffortAtomicBatch(context.Background(), 10)
 			if err != nil {
 				t.Fatalf("GetBestEffortAtomicBatch returned error: %v", err)
@@ -624,12 +793,56 @@ func TestSameSchedulingRequirementsPreservesTemplates(t *testing.T) {
 	}
 }
 
+func TestBestEffortAtomicBatchIgnoresWorkloadIdentity(t *testing.T) {
+	// Kueue copies each Job's pod template, including its per-Job labels, into the
+	// ProvisioningRequest's PodTemplate. Requests for identical Jobs must still share a batch.
+	var requests []*provreqwrapper.ProvisioningRequest
+	for i, job := range []string{"train-a", "train-b", "train-c"} {
+		request := testProvisioningRequestWithCondition(job, i+1, v1.ProvisioningClassBestEffortAtomicScaleUp)
+		request.UID = types.UID(job)
+		request.PodTemplates[0].Template.Labels = map[string]string{"batch.kubernetes.io/job-name": job}
+		request.PodTemplates[0].Template.Annotations = map[string]string{"example.com/workload": job}
+		requests = append(requests, request)
+	}
+	client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, requests...)
+	injector := NewProvisioningRequestPodsInjectorWithOptions(client, PodsInjectorOptions{
+		InitialBackoffTime:              time.Minute,
+		MaxBackoffTime:                  10 * time.Minute,
+		MaxBackoffCacheSize:             100,
+		BestEffortAtomicBatchProcessing: true,
+		BestEffortAtomicMaxBatchSize:    10,
+		KubeClientBurst:                 1,
+	})
+	batch, err := injector.GetBestEffortAtomicBatch(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("GetBestEffortAtomicBatch returned error: %v", err)
+	}
+	if len(batch) != len(requests) {
+		t.Fatalf("batch contains %d requests, want %d", len(batch), len(requests))
+	}
+	for _, request := range batch {
+		for _, pod := range request.Pods {
+			if pod.Labels["batch.kubernetes.io/job-name"] != request.PrWrapper.Name {
+				t.Errorf("pod %s lost its own job-name label", pod.Name)
+			}
+		}
+	}
+}
+
 func TestCheckCapacityBatchDifferentSchedulingRequirements(t *testing.T) {
 	first := testProvisioningRequestWithCondition("first", 1, v1.ProvisioningClassCheckCapacity)
 	second := testProvisioningRequestWithCondition("second", 2, v1.ProvisioningClassCheckCapacity)
 	second.PodTemplates[0].Template.Spec.NodeSelector = map[string]string{"hardware": "gpu"}
 	client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, first, second)
-	injector := NewProvisioningRequestPodsInjector(client, time.Minute, 10*time.Minute, 100, true, "", true, 10, 1)
+	injector := NewProvisioningRequestPodsInjectorWithOptions(client, PodsInjectorOptions{
+		InitialBackoffTime:              time.Minute,
+		MaxBackoffTime:                  10 * time.Minute,
+		MaxBackoffCacheSize:             100,
+		CheckCapacityBatchProcessing:    true,
+		BestEffortAtomicBatchProcessing: true,
+		BestEffortAtomicMaxBatchSize:    10,
+		KubeClientBurst:                 1,
+	})
 	batch, err := injector.GetCheckCapacityBatch(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("GetCheckCapacityBatch returned error: %v", err)
@@ -649,7 +862,14 @@ func TestBestEffortAtomicLargeBatchInjection(t *testing.T) {
 	}
 
 	client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, provReqs...)
-	injector := NewProvisioningRequestPodsInjector(client, time.Minute, 10*time.Minute, 1000, false, "", true, requestCount, 10)
+	injector := NewProvisioningRequestPodsInjectorWithOptions(client, PodsInjectorOptions{
+		InitialBackoffTime:              time.Minute,
+		MaxBackoffTime:                  10 * time.Minute,
+		MaxBackoffCacheSize:             1000,
+		BestEffortAtomicBatchProcessing: true,
+		BestEffortAtomicMaxBatchSize:    requestCount,
+		KubeClientBurst:                 10,
+	})
 
 	unschedulablePods, err := injector.Process(context.Background(), nil, nil)
 	if err != nil {
@@ -687,7 +907,14 @@ func TestProvisioningRequestUpdateConcurrency(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			injector := NewProvisioningRequestPodsInjector(nil, time.Minute, 10*time.Minute, 1000, false, "", true, 10, tc.kubeClientBurst)
+			injector := NewProvisioningRequestPodsInjectorWithOptions(nil, PodsInjectorOptions{
+				InitialBackoffTime:              time.Minute,
+				MaxBackoffTime:                  10 * time.Minute,
+				MaxBackoffCacheSize:             1000,
+				BestEffortAtomicBatchProcessing: true,
+				BestEffortAtomicMaxBatchSize:    10,
+				KubeClientBurst:                 tc.kubeClientBurst,
+			})
 			if injector.maxConcurrentUpdates != tc.want {
 				t.Errorf("maxConcurrentUpdates = %d, want %d", injector.maxConcurrentUpdates, tc.want)
 			}
@@ -695,8 +922,28 @@ func TestProvisioningRequestUpdateConcurrency(t *testing.T) {
 	}
 }
 
+func TestOriginalPodsInjectorConstructor(t *testing.T) {
+	constructor := NewProvisioningRequestPodsInjector
+	var original func(*provreqclient.ProvisioningRequestClient, time.Duration, time.Duration, int, bool, string) *ProvisioningRequestPodsInjector = constructor
+	injector := original(nil, time.Minute, 10*time.Minute, 100, true, "processor")
+	assert.Equal(t, time.Minute, injector.initialRetryTime)
+	assert.Equal(t, 10*time.Minute, injector.maxBackoffTime)
+	assert.True(t, injector.checkCapacityBatchProcessing)
+	assert.Equal(t, "processor", injector.checkCapacityProcessorInstance)
+	assert.False(t, injector.bestEffortAtomicBatchProcessing)
+	assert.Equal(t, 1, injector.bestEffortAtomicMaxBatchSize)
+	assert.Equal(t, 1, injector.maxConcurrentUpdates)
+}
+
 func TestBestEffortAtomicBatchSizeOneDisablesBatching(t *testing.T) {
-	injector := NewProvisioningRequestPodsInjector(nil, time.Minute, 10*time.Minute, 1000, false, "", true, 1, 10)
+	injector := NewProvisioningRequestPodsInjectorWithOptions(nil, PodsInjectorOptions{
+		InitialBackoffTime:              time.Minute,
+		MaxBackoffTime:                  10 * time.Minute,
+		MaxBackoffCacheSize:             1000,
+		BestEffortAtomicBatchProcessing: true,
+		BestEffortAtomicMaxBatchSize:    1,
+		KubeClientBurst:                 10,
+	})
 	if injector.bestEffortAtomicBatchProcessing {
 		t.Error("best-effort-atomic batching enabled with a maximum batch size of one")
 	}

@@ -42,12 +42,14 @@ import (
 	processorstest "sigs.k8s.io/cluster-autoscaler/pkg/processors/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/besteffortatomic"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/checkcapacity"
+	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/conditions"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/pods"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqclient"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqwrapper"
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/backoff"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
@@ -471,6 +473,9 @@ type batchTestOptions struct {
 	nodeGroups        []batchTestNodeGroup
 	balanceNodeGroups bool
 	parallelScaleUp   bool
+	backoff           backoff.Backoff
+	// estimatorThresholds limit binpacking estimates; nil leaves them unlimited.
+	estimatorThresholds []estimator.Threshold
 }
 
 type batchTestNodeGroup struct {
@@ -486,6 +491,7 @@ type batchTestEnvironment struct {
 	provider        *testprovider.TestCloudProvider
 	clusterSnapshot clustersnapshot.ClusterSnapshot
 	clusterState    *clusterstate.ClusterStateRegistry
+	podsInjector    *provreq.ProvisioningRequestPodsInjector
 }
 
 // TestBestEffortAtomicBatchScaleUp verifies that several best-effort-atomic ProvisioningRequests
@@ -700,7 +706,10 @@ func TestBestEffortAtomicBatchCoalescesInfrastructureScaleUp(t *testing.T) {
 	assert.Equal(t, []int{requestCount}, scaleUpDeltas, "the flattened batch should produce one combined infrastructure resize")
 }
 
-func TestBestEffortAtomicFlattenedBatchFailsTogether(t *testing.T) {
+// TestBestEffortAtomicFlattenedBatchAdmitsWhatFitsExistingCapacity checks that a request that fits
+// existing nodes is admitted, as it would be on its own, even though another request in its batch
+// can't be provisioned at all.
+func TestBestEffortAtomicFlattenedBatchAdmitsWhatFitsExistingCapacity(t *testing.T) {
 	now := time.Now()
 	allNodes := make([]*apiv1.Node, 0, 200)
 	for i := 0; i < 100; i++ {
@@ -742,8 +751,16 @@ func TestBestEffortAtomicFlattenedBatchFailsTogether(t *testing.T) {
 
 	updatedProvReqs, err := client.ProvisioningRequestsNoCache()
 	assert.NoError(t, err)
-	assert.Equal(t, len(provReqs), NumProvisioningRequestsWithCondition(updatedProvReqs, v1.Provisioned, metav1.ConditionFalse))
-	assert.Equal(t, 0, NumProvisioningRequestsWithCondition(updatedProvReqs, v1.Provisioned, metav1.ConditionTrue))
+	reasons := map[string]string{}
+	for _, pr := range updatedProvReqs {
+		if condition := apimeta.FindStatusCondition(pr.Status.Conditions, v1.Provisioned); condition != nil {
+			reasons[pr.Name] = string(condition.Status) + "/" + condition.Reason
+		}
+	}
+	assert.Equal(t, map[string]string{
+		possible.Name:   "True/" + conditions.CapacityIsFoundReason,
+		impossible.Name: "False/" + conditions.CapacityIsNotFoundReason,
+	}, reasons)
 }
 
 // TestBestEffortAtomicFlattenedBatchScalesMultipleNodeGroups verifies that the generic scale-up
@@ -1221,19 +1238,40 @@ func setupTestEnvironment(t *testing.T, client *provreqclient.ProvisioningReques
 
 	estimatorBuilder, _ := estimator.NewEstimatorBuilder(
 		estimator.BinpackingEstimatorName,
-		estimator.NewThresholdBasedEstimationLimiter(nil),
+		estimator.NewThresholdBasedEstimationLimiter(batch.estimatorThresholds),
 		estimator.NewDecreasingPodOrderer(),
 		nil,
 		false,
 	)
 
-	clusterState := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.NodeGroupDefaults), templateNodeInfoRegistry)
+	groupBackoff := batch.backoff
+	var clusterStateOptions []clusterstate.Option
+	if groupBackoff == nil {
+		groupBackoff = NewBackoff()
+	} else {
+		// Like production, report every scale-up failure to the shared observers, including those
+		// that cluster state only detects later, such as timeouts.
+		clusterStateOptions = append(clusterStateOptions, clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier))
+	}
+	clusterState := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, groupBackoff, nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.NodeGroupDefaults), templateNodeInfoRegistry, clusterStateOptions...)
+	if batch.backoff != nil {
+		processors.ScaleStateNotifier.Register(clusterState)
+	}
 	clusterState.UpdateNodes(context.Background(), nodes, now)
 
 	var injector *provreq.ProvisioningRequestPodsInjector
 	if batch.checkCapacity {
 		injector = provreq.NewFakePodsInjector(client, clocktesting.NewFakePassiveClock(now))
 	}
+	podsInjector := provreq.NewProvisioningRequestPodsInjectorWithOptions(client, provreq.PodsInjectorOptions{
+		InitialBackoffTime:              time.Minute,
+		MaxBackoffTime:                  10 * time.Minute,
+		MaxBackoffCacheSize:             1000,
+		CheckCapacityBatchProcessing:    batch.checkCapacity,
+		BestEffortAtomicBatchProcessing: batch.bestEffortAtomic,
+		BestEffortAtomicMaxBatchSize:    batch.maxBatchSize,
+		KubeClientBurst:                 1,
+	})
 
 	quotasTrackerFactory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{
 		QuotaProvider:            resourcequotas.NewFakeProvider(nil),
@@ -1241,7 +1279,7 @@ func setupTestEnvironment(t *testing.T, client *provreqclient.ProvisioningReques
 	})
 	orchestrator := &provReqOrchestrator{
 		client:              client,
-		provisioningClasses: []ProvisioningClass{checkcapacity.New(client, injector), besteffortatomic.New(client)},
+		provisioningClasses: []ProvisioningClass{checkcapacity.New(client, injector), besteffortatomic.NewWithPodsInjector(client, podsInjector)},
 	}
 	orchestrator.Initialize(&autoscalingCtx, processors, clusterState, estimatorBuilder, taints.TaintConfig{}, quotasTrackerFactory)
 	return &batchTestEnvironment{
@@ -1250,6 +1288,7 @@ func setupTestEnvironment(t *testing.T, client *provreqclient.ProvisioningReques
 		provider:        provider,
 		clusterSnapshot: autoscalingCtx.ClusterSnapshot,
 		clusterState:    clusterState,
+		podsInjector:    podsInjector,
 	}
 }
 

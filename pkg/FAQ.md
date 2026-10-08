@@ -769,11 +769,15 @@ iterations. When a workload orchestrator such as Kueue creates one
 ProvisioningRequest per workload, this serializes scale-up across the whole queue
 and can produce one infrastructure resize per workload.
 
-Batch processing lets Cluster Autoscaler process several BestEffortAtomicScaleUp
-ProvisioningRequests as one all-or-nothing unit. Cluster
-Autoscaler can spread the resulting scale-up across similar node groups when
-similar-node-group balancing is enabled, but it does not split incompatible pod
-sets across unrelated node groups within one flattened batch.
+Batch processing lets Cluster Autoscaler combine compatible BestEffortAtomicScaleUp
+ProvisioningRequests into one all-or-nothing scale-up calculation. Requests are
+compatible when they are in the same namespace and their pod sets have the same pod
+specs. Pod labels and annotations are ignored, so the requests that a workload
+orchestrator creates for identical workloads can share a batch even when it labels
+each of them with its workload's name. Individual ProvisioningRequests remain
+indivisible. Cluster Autoscaler can spread the resulting scale-up across similar node
+groups when similar-node-group balancing is enabled, but it does not split
+incompatible pod sets across unrelated node groups within one flattened batch.
 
 Batch processing is disabled by default and can be enabled with:
 
@@ -781,6 +785,107 @@ Batch processing is disabled by default and can be enabled with:
 
 2. `--best-effort-atomic-provisioning-request-max-batch-size=<batch-size>` to cap the
 number of ProvisioningRequests processed in a single iteration. The default value is 10.
+
+If a batch doesn't fit, Cluster Autoscaler retries the oldest requests that make up at
+most half of its pods within the same iteration, keeping every ProvisioningRequest
+whole, until a subset succeeds. This
+applies when the scale-up can't be planned, for example because of node group size
+limits, and when the cloud provider reports that it rejected a resize without changing
+the node group, for example because it lacks capacity for the whole batch. Cloud
+providers report such a rejection by returning an error that wraps
+`cloudprovider.ErrAtomicIncreaseRejected` from `AtomicIncreaseSize`, or, if they don't
+implement `AtomicIncreaseSize`, from `IncreaseSize`, which CA calls instead. Any other resize
+error, such as a timeout with an unknown outcome, is never followed by a smaller resize
+in the same iteration; instead, later iterations request half of the batch, as described
+below. While a smaller resize of the same node group might still succeed, a rejected
+resize doesn't back off the node group; if none succeeds, the node group is backed off
+as usual. Either way, every rejected resize counts in the failed scale-up metrics. If the
+oldest ProvisioningRequest can't be provisioned even on its own, the requests after it
+are tried without it. After the cloud provider rejected the oldest request's resize, that
+only happens if a request after it needs fewer pods in some pod set; any other request
+would need at least as many nodes, so it waits for the next iteration.
+
+Each iteration makes at most eight attempts per batch, at most four of which may end
+in a rejected resize, and starts no new attempt after ten seconds, though it doesn't
+interrupt an attempt in progress. These limits are set with
+`--best-effort-atomic-provisioning-request-max-batch-attempts`,
+`--best-effort-atomic-provisioning-request-max-resize-attempts`, and
+`--best-effort-atomic-provisioning-request-batch-timebox`.
+
+So that later iterations don't restart the search at the configured maximum, CA
+remembers a batch size, counted in pods, for requests with the same scheduling
+requirements. A batch always includes the oldest eligible request, even if that request
+alone has more pods, and stays oldest first, so it ends at the first request that
+doesn't fit. A batch counts as successful once CA finds capacity for it, whether it fits
+existing capacity or needs a scale-up:
+
+- When a batch had to shrink before it succeeded, CA remembers the size that worked.
+- When a search runs out of attempts or time, CA remembers the next smaller size it
+  would have tried. For example, if a batch of ten single-pod requests exhausts its
+  resize budget at 10, 5, 3, and 2 pods, the next eligible iteration starts with one.
+- When a resize fails with any other error and no other resize of the attempt succeeds,
+  CA remembers half the size it tried. Cloud providers that can't report clean
+  rejections therefore still converge on a batch that fits, one iteration at a time.
+- When a node group that CA resized for a batch later reports that the scale-up timed
+  out or that instances couldn't be created, CA remembers half the size of that batch.
+  CA can't tell which scale-up of a node group such a failure belongs to, so it counts
+  against every batch still waiting for nodes that the node group can no longer
+  provide. For example, if a node group's target size is 11 and 6 of its instances
+  can't be created, a batch that needed it to reach 5 nodes keeps waiting for them,
+  while a batch that needed all 11 counts as failed. A scale-up that times out counts
+  against every batch it included.
+- When a batch at least as large as the remembered size succeeds right away, the
+  remembered size doubles, and it's dropped once it would cover a batch of the
+  configured maximum number of such requests, so batches grow back as capacity
+  recovers. A batch that needed a scale-up only does so once its nodes have arrived.
+  CA checks for arrived nodes before it selects each batch, so a larger size already
+  applies to the batch selected in the iteration in which the nodes are seen. While a
+  node group is backed off, for example after another of its resizes failed, CA can't
+  tell its upcoming nodes from those that arrived, so batches waiting for its nodes
+  only grow the remembered size once the backoff ends.
+
+Remembered sizes also apply to new matching requests and are still subject to request
+retry delays and node-group backoff. A failed batch of a single request doesn't change
+the remembered size, however many pods it has. A remembered size expires one hour after
+the last batch that had to shrink, ran out of attempts, or failed to resize, even after
+the resize was accepted; `--best-effort-atomic-provisioning-request-batch-size-ttl`
+changes how long. Regardless of that setting, CA follows a batch whose resize was
+accepted for up to an hour, so that a scale-up that later times out still reduces the
+remembered size. CA keeps remembered sizes for up to 100 groups of matching requests and
+follows up to 100 batches at a time, in memory only, so both are lost when CA restarts.
+
+A ProvisioningRequest's retry delay only grows when it fails again, so requests left out
+of the last attempt keep their conditions and are picked up again by the next
+iteration. A request whose Provisioned condition was just written isn't picked again
+until the informer cache shows that condition, or until its retry delay has passed if
+the write failed. Until the cache shows a successful admission, CA uses the admission
+it wrote, so the capacity booked for the request isn't given to the next batch. If the
+cache still doesn't show it after ten minutes, CA checks the request with the API
+server about once a minute until the cache catches up, and keeps using the newest state
+it knows while the API server can't be reached. If CA can't book capacity for admitted
+requests, ProvisioningRequests wait for the next iteration rather than risk taking that
+capacity; other pods aren't held back. CheckCapacity requests, which are attempted
+whenever they're picked, keep doubling their retry delay each time they're picked.
+
+When only some node-group resizes of an attempt succeed, Cluster Autoscaler admits whole
+ProvisioningRequests, oldest first, against the successfully requested and existing
+capacity. When none succeeds, for example while the node group is backed off, it still
+admits whole requests that fit existing nodes, so they don't wait for the rest of the
+batch. Because a partial success is a mixed signal about capacity, it leaves the
+remembered batch size unchanged, unless the requested nodes then fail to arrive.
+
+When several node groups are resized in parallel, CA only retries a smaller batch if
+every failed resize reported `ErrAtomicIncreaseRejected`: a clean rejection from one
+node group doesn't justify another attempt while another group's resize has an unknown
+outcome.
+
+Splitting a batch that can't be planned works with every cloud provider. Retrying right
+after a rejected resize requires a cloud provider that reports clean rejections as
+described above. With other cloud providers, a failed resize backs off the
+node group as usual, and later iterations retry half of the batch. Cloud providers that
+don't implement `AtomicIncreaseSize` usually accept a resize right away and only report
+a shortfall later. The ProvisioningRequests of such a batch are admitted when the resize
+is accepted and stay admitted; only later batches shrink once the shortfall is reported.
 
 As with check capacity batch processing, longer iterations delay scale-ups for
 incoming pods and for other ProvisioningRequest classes, so the batch size should
@@ -1029,8 +1134,12 @@ The following startup parameters are supported for cluster autoscaler:
 | `balance-similar-node-groups` | Detect similar node groups and balance the number of nodes between them |  |
 | `balancing-ignore-label` | Specifies a label to ignore in addition to the basic and cloud-provider set of labels when comparing if two node groups are similar | [] |
 | `balancing-label` | Specifies a label to use for comparing if two node groups are similar, rather than the built in heuristics. Setting this flag disables all other comparison logic, and cannot be combined with --balancing-ignore-label. | [] |
-| `best-effort-atomic-batch-processing` | Whether to flatten a batch of best-effort-atomic ProvisioningRequests into one all-or-nothing scale-up calculation. |  |
+| `best-effort-atomic-batch-processing` | Whether to combine compatible best-effort-atomic ProvisioningRequests into one all-or-nothing scale-up, retrying smaller sets of whole requests if it doesn't fit. |  |
+| `best-effort-atomic-provisioning-request-batch-size-ttl` | How long a reduced size of best-effort-atomic batches is remembered after the batch that last reduced it. | 1h0m0s |
+| `best-effort-atomic-provisioning-request-batch-timebox` | Time after which no new scale-up attempt starts for a batch of best-effort-atomic provisioning requests in an iteration. | 10s |
+| `best-effort-atomic-provisioning-request-max-batch-attempts` | Maximum number of scale-up attempts, each with fewer requests than the last, for one batch of best-effort-atomic provisioning requests in a single iteration. | 8 |
 | `best-effort-atomic-provisioning-request-max-batch-size` | Maximum number of best-effort-atomic provisioning requests to process in a single batch. | 10 |
+| `best-effort-atomic-provisioning-request-max-resize-attempts` | Maximum number of scale-up attempts for one batch of best-effort-atomic provisioning requests in a single iteration that may end in a resize the cloud provider rejected. | 4 |
 | `blocking-system-pod-distruption-timeout` | The timeout after which CA will evict non-pdb-assigned blocking system pods, applicable only when --skip-nodes-with-system-pods is set to true | 1h0m0s |
 | `bulk-mig-instances-listing-enabled` | Fetch GCE mig instances in bulk instead of per mig |  |
 | `bypassed-scheduler-names` | Names of schedulers to bypass. If set to non-empty value, CA will not wait for pods to reach a certain age before triggering a scale-up. |  |
