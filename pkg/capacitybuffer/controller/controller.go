@@ -150,7 +150,9 @@ func (c *bufferController) configureEventHandlers() {
 			oldBuf := oldObj.(*v1.CapacityBuffer)
 			newBuf := newObj.(*v1.CapacityBuffer)
 
-			// 1. Resync (periodic refresh): reconcile.
+			// 1. Resync (periodic refresh): reconcile. We want to periodically reconcile
+			// all the buffers in case we missed watching a resource that could influence
+			// the buffer state.
 			if oldBuf.ResourceVersion == newBuf.ResourceVersion {
 				c.enqueueNamespace(newObj)
 				return

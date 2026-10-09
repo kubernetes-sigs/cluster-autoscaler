@@ -49,7 +49,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 	upcomingNode := BuildTestNode("upcoming", 1000, 1000)
 	upcomingNode.Annotations = map[string]string{annotations.NodeUpcomingAnnotation: "true"}
 
-	type fakePodSpec struct {
+	type podSpec struct {
 		name     string
 		nodeName string
 		buffer   string
@@ -59,7 +59,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 		name        string
 		buffers     []*v1beta1.CapacityBuffer
 		processed   []string
-		fakePods    []fakePodSpec
+		pods        []podSpec
 		wantApplied map[string]int32
 	}{
 		{
@@ -82,7 +82,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 				),
 			},
 			processed: []string{"b1"},
-			fakePods: []fakePodSpec{
+			pods: []podSpec{
 				{name: "p1", nodeName: "existing", buffer: "b1"},
 				{name: "p2", nodeName: "existing", buffer: "b1"},
 			},
@@ -96,7 +96,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 					testutil.WithUID[*v1beta1.CapacityBuffer]("b1-uid"),
 				),
 			},
-			fakePods: []fakePodSpec{
+			pods: []podSpec{
 				{name: "p1", nodeName: "existing", buffer: "b1"},
 				{name: "p2", nodeName: "upcoming", buffer: "b1"},
 			},
@@ -123,7 +123,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 					testutil.WithStatusReadyReplicas(2),
 				),
 			},
-			fakePods: []fakePodSpec{
+			pods: []podSpec{
 				{name: "p1", nodeName: "upcoming", buffer: "b1"},
 			},
 			wantApplied: map[string]int32{"b1": 0},
@@ -142,7 +142,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 				),
 			},
 			processed: []string{"b1"},
-			fakePods: []fakePodSpec{
+			pods: []podSpec{
 				{name: "p1", nodeName: "existing", buffer: "b1"},
 			},
 			wantApplied: map[string]int32{"b1": 1},
@@ -157,7 +157,7 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 				),
 			},
 			processed: []string{"b1"},
-			fakePods: []fakePodSpec{
+			pods: []podSpec{
 				{name: "p1", nodeName: "existing", buffer: "b1"},
 			},
 			wantApplied: map[string]int32{},
@@ -193,13 +193,29 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 				),
 			},
 			processed: []string{"b3"},
-			fakePods: []fakePodSpec{
+			pods: []podSpec{
 				{name: "p1", nodeName: "existing", buffer: "b1"},
 				{name: "p2", nodeName: "existing", buffer: "b2"},
 				{name: "p3", nodeName: "existing", buffer: "b2"},
 				{name: "p4", nodeName: "upcoming", buffer: "b2"},
 			},
 			wantApplied: map[string]int32{"b1": 1, "b2": 2, "b3": 0},
+		},
+		{
+			name: "real non-buffer pods do not get taken into account",
+			buffers: []*v1beta1.CapacityBuffer{
+				testutil.NewBuffer(
+					testutil.WithName("b1"),
+					testutil.WithUID[*v1beta1.CapacityBuffer]("b1-uid"),
+				),
+			},
+			processed: []string{"b1"},
+			pods: []podSpec{
+				{name: "p1", nodeName: "existing", buffer: "b1"},
+				{name: "p2", nodeName: "existing", buffer: "b1"},
+				{name: "p3", nodeName: "existing"},
+			},
+			wantApplied: map[string]int32{"b1": 2},
 		},
 	}
 
@@ -215,9 +231,11 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 				registry.MarkProcessed(buffersByName[name])
 			}
 			var pods []*apiv1.Pod
-			for _, fp := range tc.fakePods {
+			for _, fp := range tc.pods {
 				pod := BuildTestPod(fp.name, 100, 100, WithNamespace(namespace), WithNodeName(fp.nodeName))
-				registry.SetCapacityBuffer(pod.UID, buffersByName[fp.buffer])
+				if fp.buffer != "" {
+					registry.SetCapacityBuffer(pod.UID, buffersByName[fp.buffer])
+				}
 				pods = append(pods, pod)
 			}
 

@@ -118,6 +118,14 @@ func NewCapacityBufferClientFromManager(mgr ctrl.Manager) (*CapacityBufferClient
 	if err != nil {
 		return nil, fmt.Errorf("Failed to create kubernetes client for capacity buffer: %v", err)
 	}
+	// We want to use RESTMapper of the c-r Manager. By default, it uses a DynamicRESTMapper,
+	// which retries the GVK discovery if no match has been found. That allows the dynamic watcher
+	// self-heal when a scalable CRD didn't exist at the time of discovery and has been added
+	// later. DeferredDiscoveryRESTMapper used before does not reattempt to discover
+	// a Kind that was missing before. In such case, a scalable CRD added after the RESTMapper
+	// tried to resolve it for the first time and failed, will remain missing from the
+	// RESTMapper point of view. In such case, the dynamic watch won't be established until
+	// the CA restarts.
 	scaleGetter, scaleMapper, err := createScaleSubresourceClientGetter(kubeConfig, mgr.GetRESTMapper())
 	if err != nil {
 		return nil, fmt.Errorf("Failed to create scale getter for capacity buffer: %v", err)
