@@ -83,6 +83,18 @@ func TestReadyReplicasControllerSkipsIntermediateUpdates(t *testing.T) {
 		wantApplied    []int32
 	}{
 		{
+			name:          "skips enqueue when target equals current non-zero status",
+			initial:       new(int32(1)),
+			queuedUpdates: []int32{1},
+			wantApplied:   nil,
+		},
+		{
+			name:          "skips enqueue when target equals current zero status",
+			initial:       new(int32(0)),
+			queuedUpdates: []int32{0},
+			wantApplied:   nil,
+		},
+		{
 			name:          "skips pending intermediate updates while waiting in queue",
 			queuedUpdates: []int32{1, 2, 3, 4},
 			wantApplied:   []int32{4},

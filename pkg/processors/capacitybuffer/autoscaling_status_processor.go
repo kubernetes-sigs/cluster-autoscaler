@@ -23,18 +23,23 @@ import (
 
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	cbctrl "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/controller"
+	"k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/fakepods"
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/annotations"
 )
 
+// ReadyReplicasUpdater updates the desired ReadyReplicas count for a CapacityBuffer.
+type ReadyReplicasUpdater interface {
+	Update(buffer *v1beta1.CapacityBuffer, readyReplicas int32)
+}
+
 // NewCapacityBufferAutoscalingStatusProcessor returns a new CapacityBufferAutoscalingStatusProcessor.
-func NewCapacityBufferAutoscalingStatusProcessor(readyReplicasController *cbctrl.ReadyReplicasController, buffersRegistry *fakepods.Registry) *CapacityBufferAutoscalingStatusProcessor {
+func NewCapacityBufferAutoscalingStatusProcessor(readyReplicasUpdater ReadyReplicasUpdater, buffersRegistry *fakepods.Registry) *CapacityBufferAutoscalingStatusProcessor {
 	return &CapacityBufferAutoscalingStatusProcessor{
-		readyReplicasController: readyReplicasController,
-		buffersRegistry:         buffersRegistry,
+		readyReplicasUpdater: readyReplicasUpdater,
+		buffersRegistry:      buffersRegistry,
 	}
 }
 
@@ -42,8 +47,8 @@ func NewCapacityBufferAutoscalingStatusProcessor(readyReplicasController *cbctrl
 // on the existing nodes and enqueues .status.readyReplicas updates for each
 // buffer processed in the current autoscaler loop.
 type CapacityBufferAutoscalingStatusProcessor struct {
-	readyReplicasController *cbctrl.ReadyReplicasController
-	buffersRegistry         *fakepods.Registry
+	readyReplicasUpdater ReadyReplicasUpdater
+	buffersRegistry      *fakepods.Registry
 }
 
 // Process processes the status of the cluster after an autoscaling iteration.
@@ -71,7 +76,7 @@ func (p *CapacityBufferAutoscalingStatusProcessor) Process(_ context.Context, au
 		}
 	}
 	for _, buffer := range processedBuffers {
-		p.readyReplicasController.Update(buffer, readyReplicasMap[buffer.UID])
+		p.readyReplicasUpdater.Update(buffer, readyReplicasMap[buffer.UID])
 	}
 	return nil
 }
