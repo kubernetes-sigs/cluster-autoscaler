@@ -135,7 +135,7 @@ type onScaleUpMock struct {
 }
 
 func (m *onScaleUpMock) ScaleUp(id string, delta int) error {
-	klog.Infof("Scale up: %v %v", id, delta)
+	klog.InfoS("Scale up", "nodeGroup", id, "delta", delta)
 	args := m.Called(id, delta)
 	return args.Error(0)
 }
@@ -145,7 +145,7 @@ type onScaleDownMock struct {
 }
 
 func (m *onScaleDownMock) ScaleDown(id string, name string) error {
-	klog.Infof("Scale down: %v %v", id, name)
+	klog.InfoS("Scale down", "nodeGroup", id, "node", name)
 	args := m.Called(id, name)
 	return args.Error(0)
 }
@@ -155,7 +155,7 @@ type onNodeGroupCreateMock struct {
 }
 
 func (m *onNodeGroupCreateMock) Create(id string) error {
-	klog.Infof("Create group: %v", id)
+	klog.InfoS("Create group", "nodeGroup", id)
 	args := m.Called(id)
 	return args.Error(0)
 }
@@ -165,7 +165,7 @@ type onNodeGroupDeleteMock struct {
 }
 
 func (m *onNodeGroupDeleteMock) Delete(id string) error {
-	klog.Infof("Delete group: %v", id)
+	klog.InfoS("Delete group", "nodeGroup", id)
 	args := m.Called(id)
 	return args.Error(0)
 }

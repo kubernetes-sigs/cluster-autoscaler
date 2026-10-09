@@ -85,7 +85,7 @@ func (c *reconciliationTimestampCollector) Collect(ch chan<- prometheus.Metric) 
 	// List all capacity buffers
 	buffers, err := c.client.ListCapacityBuffers("")
 	if err != nil {
-		klog.Errorf("Failed to list capacity buffers with error: %v", err.Error())
+		klog.ErrorS(err, "Failed to list capacity buffers")
 		return
 	}
 

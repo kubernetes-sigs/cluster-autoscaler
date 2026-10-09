@@ -70,21 +70,21 @@ func (b *AutoscalerBuilder) buildProvisioningRequest(
 	client := provreqclient.NewProvisioningRequestClient(prClient, provReqLister, podTemplLister)
 
 	prFactory.Start(ctx.Done())
-	klog.Info("Waiting for Provisioning Request cache to sync...")
+	klog.InfoS("Waiting for Provisioning Request cache to sync...")
 	synced := prFactory.WaitForCacheSync(ctx.Done())
 	for _, ok := range synced {
 		if !ok {
 			return nil, nil, fmt.Errorf("failed to sync Provisioning Request informers")
 		}
 	}
-	klog.V(2).Info("Successful initial Provisioning Request sync")
+	klog.V(2).InfoS("Successful initial Provisioning Request sync")
 
 	injector := provreq.NewProvisioningRequestPodsInjector(client, opts.ProvisioningRequestInitialBackoffTime, opts.ProvisioningRequestMaxBackoffTime, opts.ProvisioningRequestMaxBackoffCacheSize, opts.CheckCapacityBatchProcessing, opts.CheckCapacityProcessorInstance)
 	podListProcessor.AddProcessor(injector)
 
 	var provisioningRequestPodsInjector *provreq.ProvisioningRequestPodsInjector
 	if autoscalingOptions.CheckCapacityBatchProcessing {
-		klog.Infof("Batch processing for check capacity requests is enabled. Passing provisioning request injector to check capacity processor.")
+		klog.InfoS("Batch processing for check capacity requests is enabled. Passing provisioning request injector to check capacity processor.")
 		provisioningRequestPodsInjector = injector
 	}
 

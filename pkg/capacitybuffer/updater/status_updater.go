@@ -67,7 +67,7 @@ func (u *StatusUpdater) Update(buffers []*v1.CapacityBuffer) ([]*v1.CapacityBuff
 func (u *StatusUpdater) statusChanged(buffer *v1.CapacityBuffer) bool {
 	observed, err := u.client.GetCapacityBuffer(buffer.Namespace, buffer.Name)
 	if err != nil {
-		klog.V(4).Infof("capacity buffer status updater: failed to read the cached buffer %s/%s, updating unconditionally: %v", buffer.Namespace, buffer.Name, err)
+		klog.V(4).InfoS("capacity buffer status updater: failed to read the cached buffer, updating unconditionally", "buffer", klog.KObj(buffer), "err", err)
 		return true
 	}
 	return !apiequality.Semantic.DeepEqual(observed.Status, buffer.Status)

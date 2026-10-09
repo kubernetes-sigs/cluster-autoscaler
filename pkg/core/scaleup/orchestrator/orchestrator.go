@@ -907,7 +907,7 @@ func findSkippedNodeGroupsSatisfyingPodPredicates(eg *equivalence.PodGroup, skip
 		// if a node group is in skipped and for this eg it is not in scheduling errors, it means that it will stay in skipped, because it satisfies the pod predicates.
 		if _, hasPredicateError := eg.SchedulingErrors[skippedNodeGroupId]; !hasPredicateError {
 			matchingNodeGroups[skippedNodeGroupId] = skipReason
-			klog.V(4).Infof("Skipped node group %s satisfies pod predicates of %s pod's equivalence group", skippedNodeGroupId, eg.Pods[0].Name)
+			klog.V(4).InfoS("Skipped node group satisfies pod predicates of pod's equivalence group", "nodeGroupId", skippedNodeGroupId, "pod", klog.KObj(eg.Pods[0]))
 		}
 	}
 	return matchingNodeGroups

@@ -137,7 +137,7 @@ func TestSoftTaintTimeLimit(t *testing.T) {
 	// Move time forward when updating
 	fakeClient.Fake.PrependReactor("update", "nodes", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		currentTime = currentTime.Add(updateTime)
-		klog.Infof("currentTime after update by %v is %v", updateTime, currentTime)
+		klog.InfoS("currentTime after update", "updateTime", updateTime, "currentTime", currentTime)
 		return false, nil, nil
 	})
 

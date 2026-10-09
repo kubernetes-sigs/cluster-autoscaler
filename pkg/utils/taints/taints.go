@@ -108,20 +108,20 @@ type TaintConfig struct {
 func NewTaintConfig(opts config.AutoscalingOptions) TaintConfig {
 	startupTaints := make(TaintKeySet)
 	for _, taintKey := range opts.StartupTaints {
-		klog.V(4).Infof("Startup taint %s on all NodeGroups", taintKey)
+		klog.V(4).InfoS("Startup taint on all NodeGroups", "taintKey", taintKey)
 		startupTaints[taintKey] = true
 	}
 
 	var startupTaintPrefixes []string
 	startupTaintPrefixes = append(startupTaintPrefixes, IgnoreTaintPrefix, StartupTaintPrefix)
 	for _, prefix := range opts.StartupTaintPrefixes {
-		klog.V(4).Infof("Adding custom startup taint prefix %s on all NodeGroups", prefix)
+		klog.V(4).InfoS("Adding custom startup taint prefix on all NodeGroups", "prefix", prefix)
 		startupTaintPrefixes = append(startupTaintPrefixes, prefix)
 	}
 
 	statusTaints := make(TaintKeySet)
 	for _, taintKey := range opts.StatusTaints {
-		klog.V(4).Infof("Status taint %s on all NodeGroups", taintKey)
+		klog.V(4).InfoS("Status taint on all NodeGroups", "taintKey", taintKey)
 		statusTaints[taintKey] = true
 	}
 

@@ -121,7 +121,7 @@ func (t *ScalableObjectsTranslator) resolveSpecAndReplicas(ctx context.Context, 
 	// succeeds, error from fetching the live pod is hidden from the user. We should
 	// record an event here.
 	if livePodErr != nil {
-		klog.Errorf("capacity buffer scalable objects translator: failed to resolve live pod: %v", livePodErr)
+		klog.ErrorS(livePodErr, "capacity buffer scalable objects translator: failed to resolve live pod", "buffer", klog.KObj(buffer))
 	}
 	if spec != nil {
 		return spec, replicas, nil

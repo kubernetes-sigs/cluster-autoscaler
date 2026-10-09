@@ -76,25 +76,25 @@ func (n *Nodes) LoadFromExistingTaints(autoscalingCtx *ca_context.AutoscalingCon
 	for _, node := range allNodes {
 		since, err := taints.GetDeletionCandidateTime(node)
 		if err != nil {
-			klog.Errorf("Failed to get pods to move for node %s: %v", node.Name, err)
+			klog.ErrorS(err, "Failed to get pods to move for node", "node", klog.KObj(node))
 			continue
 		}
 		if since == nil {
 			continue
 		}
 		if since.Add(deletionCandidateStalenessTTL).Before(ts) {
-			klog.V(4).Infof("Skipping node %s with deletion candidate taint from %s, since it is older than TTL %s", node.Name, since.String(), deletionCandidateStalenessTTL.String())
+			klog.V(4).InfoS("Skipping node with deletion candidate taint, since it is older than TTL", "node", klog.KObj(node), "since", since, "ttl", deletionCandidateStalenessTTL)
 			continue
 		}
 		nodeToBeRemoved := simulator.NodeToBeRemoved{
 			Node: node,
 		}
 		nodesWithTaints = append(nodesWithTaints, nodeToBeRemoved)
-		klog.V(4).Infof("Found node %s with deletion candidate taint from %s", node.Name, since.String())
+		klog.V(4).InfoS("Found node with deletion candidate taint", "node", klog.KObj(node), "since", since)
 	}
 
 	if len(nodesWithTaints) > 0 {
-		klog.V(1).Infof("Initializing unneeded nodes with %d nodes that have deletion candidate taints", len(nodesWithTaints))
+		klog.V(1).InfoS("Initializing unneeded nodes with nodes that have deletion candidate taints", "count", len(nodesWithTaints))
 		n.initialize(autoscalingCtx, nodesWithTaints, ts)
 	}
 
@@ -106,15 +106,14 @@ func (n *Nodes) LoadFromExistingTaints(autoscalingCtx *ca_context.AutoscalingCon
 // This is in order the avoid state loss between deployment restarts.
 func (n *Nodes) initialize(autoscalingCtx *ca_context.AutoscalingContext, nodes []simulator.NodeToBeRemoved, ts time.Time) {
 	n.updateInternalState(context.TODO(), autoscalingCtx, nodes, ts, func(nn simulator.NodeToBeRemoved) *time.Time {
-		name := nn.Node.Name
 		if since, err := taints.GetDeletionCandidateTime(nn.Node); err == nil {
-			klog.V(4).Infof("Found node %s with deletion candidate taint from %s", name, since.String())
+			klog.V(4).InfoS("Found node with deletion candidate taint", "node", klog.KObj(nn.Node), "since", since)
 			return since
 		} else if since == nil {
-			klog.Errorf("Failed to get deletion candidate taint time for node %s: %v", name, err)
+			klog.ErrorS(err, "Failed to get deletion candidate taint time for node", "node", klog.KObj(nn.Node))
 			return nil
 		}
-		klog.V(4).Infof("Found node %s with deletion candidate taint from now", name)
+		klog.V(4).InfoS("Found node with deletion candidate taint from now", "node", klog.KObj(nn.Node))
 		return nil
 	})
 }
@@ -147,9 +146,9 @@ func (n *Nodes) updateInternalState(ctx context.Context, autoscalingCtx *ca_cont
 	}
 	n.byName = updated
 	n.cachedList = nil
-	if klog.V(4).Enabled() {
+	if loggerV := logger.V(4); loggerV.Enabled() {
 		for k, v := range n.byName {
-			logger.Info("Node is unneeded", "nodeName", k, "since", v.since, "duration", ts.Sub(v.since).String())
+			loggerV.Info("Node is unneeded", "nodeName", k, "since", v.since, "duration", ts.Sub(v.since).String())
 		}
 	}
 }

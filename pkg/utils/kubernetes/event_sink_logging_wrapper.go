@@ -45,7 +45,7 @@ func (s eventSinkLoggingWrapper) Patch(oldEvent *clientv1.Event, data []byte) (*
 }
 
 func logEvent(e *clientv1.Event) {
-	klog.V(4).Infof("Event(%#v): type: '%v' reason: '%v' %v", e.InvolvedObject, e.Type, e.Reason, e.Message)
+	klog.V(4).InfoS("Event", "involvedObject", e.InvolvedObject, "type", e.Type, "reason", e.Reason, "message", e.Message)
 }
 
 // WrapEventSinkWithLogging adds logging each event via klog to an existing event sink.

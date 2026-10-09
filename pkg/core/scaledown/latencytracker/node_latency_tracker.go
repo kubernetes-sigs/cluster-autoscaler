@@ -101,9 +101,9 @@ func (t *NodeLatencyTracker) Process(ctx context.Context, autoscalingCtx *ca_con
 		t.recordAndCleanup(ctx, node.Node.Name, true)
 	}
 
-	if klog.V(6).Enabled() {
+	if loggerV := logger.V(6); loggerV.Enabled() {
 		for nodeName := range t.unneededNodes {
-			logger.V(6).Info("Node remains in unneeded list (not scaled down). Continuing to track latency.", "nodeName", nodeName)
+			loggerV.Info("Node remains in unneeded list (not scaled down). Continuing to track latency.", "nodeName", nodeName)
 		}
 	}
 }
