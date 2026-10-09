@@ -247,6 +247,39 @@ func WithPodAntiAffinity(labels map[string]string, topologyKey string) func(*api
 	}
 }
 
+// WithPodAffinity sets pod's required affinity for pods matching the given labels at the given topology level.
+func WithPodAffinity(labels map[string]string, topologyKey string) func(*apiv1.Pod) {
+	return func(pod *apiv1.Pod) {
+		if pod.Spec.Affinity == nil {
+			pod.Spec.Affinity = &apiv1.Affinity{}
+		}
+		pod.Spec.Affinity.PodAffinity = &apiv1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []apiv1.PodAffinityTerm{
+				{
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: labels,
+					},
+					TopologyKey: topologyKey,
+				},
+			},
+		}
+	}
+}
+
+// WithPVC adds a volume backed by the given PersistentVolumeClaim (in the pod's namespace) to the pod.
+func WithPVC(claimName string) func(*apiv1.Pod) {
+	return func(pod *apiv1.Pod) {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, apiv1.Volume{
+			Name: fmt.Sprintf("pvc-%s", claimName),
+			VolumeSource: apiv1.VolumeSource{
+				PersistentVolumeClaim: &apiv1.PersistentVolumeClaimVolumeSource{
+					ClaimName: claimName,
+				},
+			},
+		})
+	}
+}
+
 // WithPodPriority sets the priority of the pod.
 func WithPodPriority(priority int32) func(*apiv1.Pod) {
 	return func(pod *apiv1.Pod) {
