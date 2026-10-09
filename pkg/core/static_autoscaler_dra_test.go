@@ -413,6 +413,7 @@ func TestStaticAutoscalerDynamicResources(t *testing.T) {
 					ScaleDownEnabled:                 true,
 					MaxScaleDownParallelism:          10,
 					MaxDrainParallelism:              10,
+					MaxConcurrentNodesTainting:       5,
 					NodeDeletionBatcherInterval:      0 * time.Second,
 					NodeDeleteDelayAfterTaint:        1 * time.Millisecond,
 					MaxNodesTotal:                    1000,

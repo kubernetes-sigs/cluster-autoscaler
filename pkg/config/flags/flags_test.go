@@ -335,6 +335,7 @@ func TestAutoscalingFlagsAllPossible(t *testing.T) {
 				"--node-group-backoff-reset-timeout=1h",
 				"--max-scale-down-parallelism=5",
 				"--max-drain-parallelism=2",
+				"--max-concurrent-nodes-tainting=10",
 				"--record-duplicated-events=true",
 				"--max-nodes-per-scaleup=500",
 				"--max-nodegroup-binpacking-duration=5s",
@@ -456,6 +457,7 @@ func TestAutoscalingFlagsAllPossible(t *testing.T) {
 				assert.Equal(t, 1*time.Hour, opts.NodeGroupBackoffResetTimeout)
 				assert.Equal(t, 5, opts.MaxScaleDownParallelism)
 				assert.Equal(t, 2, opts.MaxDrainParallelism)
+				assert.Equal(t, 10, opts.MaxConcurrentNodesTainting)
 				assert.True(t, opts.RecordDuplicatedEvents)
 				assert.Equal(t, 500, opts.MaxNodesPerScaleUp)
 				assert.Equal(t, 5*time.Second, opts.MaxNodeGroupBinpackingDuration)
@@ -636,6 +638,10 @@ func TestAutoscalingFlagsValidationEdgeCases(t *testing.T) {
 		},
 		"InvalidPredicateParallelism": {
 			Flags:   []string{"--predicate-parallelism=0"},
+			WantErr: true,
+		},
+		"InvalidMaxConcurrentNodesTainting": {
+			Flags:   []string{"--max-concurrent-nodes-tainting=0"},
 			WantErr: true,
 		},
 		"InvalidDRA": {
