@@ -31,6 +31,10 @@ import (
 // Use NewPodInfo to create new objects. The fields are exported for convenience, but should be treated as read-only.
 // Manual initialization may result in errors.
 type PodInfo struct {
+	// PlacementNode records the original real binding independently of mutable Pod metadata.
+	PlacementNode string
+	// SimulatedPlacement marks a hypothetical placement whose device assignment must be recomputed.
+	SimulatedPlacement bool
 	// This type embeds *apiv1.Pod to make the accesses easier - most of the code just needs to access the Pod.
 	*apiv1.Pod
 	// Embed *schedulerimpl.PodInfo to implement the interface.
@@ -49,7 +53,7 @@ type PodInfo struct {
 // NewPodInfo returns a new internal PodInfo from the provided data.
 func NewPodInfo(pod *apiv1.Pod, claims []*resourceapi.ResourceClaim) *PodInfo {
 	pi, _ := schedulerimpl.NewPodInfo(pod)
-	return &PodInfo{Pod: pod, PodInfo: pi, NeededResourceClaims: claims}
+	return &PodInfo{Pod: pod, PodInfo: pi, NeededResourceClaims: claims, PlacementNode: pod.Spec.NodeName}
 }
 
 // NodeInfo contains all necessary information about a Node that Cluster Autoscaler needs to track.
@@ -111,7 +115,9 @@ func (n *NodeInfo) DeepCopy() *NodeInfo {
 		for _, claim := range podInfo.NeededResourceClaims {
 			newClaims = append(newClaims, claim.DeepCopy())
 		}
-		newPods = append(newPods, NewPodInfo(podInfo.Pod.DeepCopy(), newClaims))
+		copy := NewPodInfo(podInfo.Pod.DeepCopy(), newClaims)
+		copy.PlacementNode, copy.SimulatedPlacement = podInfo.PlacementNode, podInfo.SimulatedPlacement
+		newPods = append(newPods, copy)
 	}
 	var newSlices []*resourceapi.ResourceSlice
 	for _, slice := range n.LocalResourceSlices {
@@ -178,3 +184,6 @@ func NewNodeInfo(node *apiv1.Node, slices []*resourceapi.ResourceSlice, pods ...
 	}
 	return result
 }
+
+// DevicePlacement returns immutable provenance consumed at the extender boundary.
+func (p *PodInfo) DevicePlacement() (string, bool) { return p.PlacementNode, p.SimulatedPlacement }

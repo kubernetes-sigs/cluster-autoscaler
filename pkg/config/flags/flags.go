@@ -229,6 +229,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 		"Can be used multiple times.")
 
 	// Flags which require post-processing
+	fs.StringSliceVar(&p.o.ExtenderOccupancyURLs, "extender-occupancy-urls", nil, "Extender URL prefixes opting into the experimental complete node-local occupancy protocol; each selected Filter must support the protocol and must not be ignorable")
 	fs.StringVar(&p.schedulerConfigFile, config.SchedulerConfigFileFlag, "", "scheduler-config allows changing configuration of in-tree scheduler plugins acting on PreFilter and Filter extension points")
 	fs.StringVar(&p.coresTotal, "cores-total", minMaxFlagString(0, config.DefaultMaxClusterCores), "Minimum and maximum number of cores in cluster, in the format <min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers.")
 	fs.StringVar(&p.memoryTotal, "memory-total", minMaxFlagString(0, config.DefaultMaxClusterMemory), "Minimum and maximum number of gigabytes of memory in cluster, in the format <min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers.")

@@ -22,14 +22,18 @@ import (
 	"sync"
 
 	"k8s.io/client-go/informers"
+	schedulerinterface "k8s.io/kube-scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler"
 	schedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
 	schedulerconfiglatest "k8s.io/kubernetes/pkg/scheduler/apis/config/latest"
 	schedulerimpl "k8s.io/kubernetes/pkg/scheduler/framework"
 	schedulerplugins "k8s.io/kubernetes/pkg/scheduler/framework/plugins"
+	noderesources "k8s.io/kubernetes/pkg/scheduler/framework/plugins/noderesources"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodevolumelimits"
 	schedulerframeworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 	schedulermetrics "k8s.io/kubernetes/pkg/scheduler/metrics"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/dynamicresources"
+	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/extender/occupancy"
 )
 
 var (
@@ -40,6 +44,7 @@ var (
 type Handle struct {
 	Framework        schedulerimpl.Framework
 	DelegatingLister *DelegatingSchedulerSharedLister
+	Extenders        []schedulerinterface.Extender
 }
 
 // NewHandle builds a framework Handle based on the provided informers and scheduler config.
@@ -53,6 +58,9 @@ func NewHandle(ctx context.Context, informerFactory informers.SharedInformerFact
 	}
 	if len(schedConfig.Profiles) != 1 {
 		return nil, fmt.Errorf("unexpected scheduler config: expected one scheduler profile only (found %d profiles)", len(schedConfig.Profiles))
+	}
+	if err := configureIgnoredExtenderResources(schedConfig); err != nil {
+		return nil, fmt.Errorf("couldn't configure extender-managed resources: %v", err)
 	}
 
 	sharedLister := NewDelegatingSchedulerSharedLister()
@@ -92,8 +100,85 @@ func NewHandle(ctx context.Context, informerFactory informers.SharedInformerFact
 		return nil, fmt.Errorf("couldn't create scheduler framework; %v", err)
 	}
 
+	var extenders []schedulerinterface.Extender
+	for i := range schedConfig.Extenders {
+		extender, err := scheduler.NewHTTPExtender(&schedConfig.Extenders[i])
+		if err != nil {
+			return nil, fmt.Errorf("couldn't create HTTP extender for %q: %v", schedConfig.Extenders[i].URLPrefix, err)
+		}
+		extenders = append(extenders, extender)
+	}
+
 	return &Handle{
 		Framework:        framework,
 		DelegatingLister: sharedLister,
+		Extenders:        extenders,
 	}, nil
+}
+
+// configureIgnoredExtenderResources configures NodeResourcesFit to leave resources
+// marked IgnoredByScheduler to the corresponding scheduler extenders. This mirrors
+// kube-scheduler's extender setup and allows extenders to evaluate resources that
+// are not present in a node group's template node.
+func configureIgnoredExtenderResources(schedConfig *schedulerconfig.KubeSchedulerConfiguration) error {
+	var ignoredResources []string
+	for _, extender := range schedConfig.Extenders {
+		for _, managedResource := range extender.ManagedResources {
+			if managedResource.IgnoredByScheduler {
+				ignoredResources = append(ignoredResources, managedResource.Name)
+			}
+		}
+	}
+	if len(ignoredResources) == 0 {
+		return nil
+	}
+
+	for i := range schedConfig.Profiles {
+		profile := &schedConfig.Profiles[i]
+		found := false
+		for j := range profile.PluginConfig {
+			if profile.PluginConfig[j].Name != noderesources.Name {
+				continue
+			}
+
+			args, ok := profile.PluginConfig[j].Args.(*schedulerconfig.NodeResourcesFitArgs)
+			if !ok {
+				return fmt.Errorf("want args to be of type NodeResourcesFitArgs, got %T", profile.PluginConfig[j].Args)
+			}
+			args.IgnoredResources = ignoredResources
+			found = true
+			break
+		}
+		if !found {
+			return fmt.Errorf("can't find NodeResourcesFitArgs in plugin config")
+		}
+	}
+	return nil
+}
+
+// ConfigureExtenderOccupancy opts selected extender URLs into complete occupancy filtering.
+func (h *Handle) ConfigureExtenderOccupancy(cfg *schedulerconfig.KubeSchedulerConfiguration, urls []string) error {
+	for _, url := range urls {
+		found := false
+		if cfg != nil {
+			for i, c := range cfg.Extenders {
+				if c.URLPrefix == url {
+					if _, ok := h.Extenders[i].(*occupancy.Extender); ok {
+						found = true
+						continue
+					}
+					adapter, err := occupancy.New(h.Extenders[i], &c)
+					if err != nil {
+						return err
+					}
+					h.Extenders[i] = adapter
+					found = true
+				}
+			}
+		}
+		if !found {
+			return fmt.Errorf("occupancy URL %q is not a configured extender", url)
+		}
+	}
+	return nil
 }
