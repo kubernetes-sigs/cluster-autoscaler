@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/debuggingsnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/expander"
+	"sigs.k8s.io/cluster-autoscaler/pkg/observability/perf"
 	"sigs.k8s.io/cluster-autoscaler/pkg/observers/loopstart"
 	ca_processors "sigs.k8s.io/cluster-autoscaler/pkg/processors"
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
@@ -70,4 +71,7 @@ type AutoscalerOptions struct {
 	KubeClientNew              client.Client
 	KubeCache                  cache.Cache
 	CapacityBufferPodsRegistry *fakepods.Registry
+	// PerfCollector is an optional, test-only performance measurement sink.
+	// It is nil in production. See the observability/perf package.
+	PerfCollector perf.Collector
 }
