@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/pdb"
+	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/strategy"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaleup"
 	"sigs.k8s.io/cluster-autoscaler/pkg/debuggingsnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
@@ -70,4 +71,5 @@ type AutoscalerOptions struct {
 	KubeClientNew              client.Client
 	KubeCache                  cache.Cache
 	CapacityBufferPodsRegistry *fakepods.Registry
+	ScaleDownStrategy          *strategy.Strategy
 }

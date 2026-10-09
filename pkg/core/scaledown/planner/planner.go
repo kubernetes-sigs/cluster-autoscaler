@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/eligibility"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/nodeevaltracker"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/pdb"
+	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/strategy"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/unneeded"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/unremovable"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors"
@@ -79,10 +80,11 @@ type Planner struct {
 	scaleDownSetProcessor nodes.ScaleDownSetProcessor
 	scaleDownContext      *nodes.ScaleDownContext
 	maxNodeSkipEvalTime   *nodeevaltracker.MaxNodeSkipEvalTime
+	scaleDownStrategy     *strategy.Strategy
 }
 
 // New creates a new Planner object.
-func New(autoscalingCtx *ca_context.AutoscalingContext, processors *processors.AutoscalingProcessors, deleteOptions options.NodeDeleteOptions, drainabilityRules rules.Rules, quotasTrackerFactory *resourcequotas.TrackerFactory) *Planner {
+func New(autoscalingCtx *ca_context.AutoscalingContext, processors *processors.AutoscalingProcessors, deleteOptions options.NodeDeleteOptions, drainabilityRules rules.Rules, quotasTrackerFactory *resourcequotas.TrackerFactory, sdStrategy *strategy.Strategy) *Planner {
 	minUpdateInterval := autoscalingCtx.AutoscalingOptions.NodeGroupDefaults.ScaleDownUnneededTime
 	if minUpdateInterval == 0*time.Nanosecond {
 		minUpdateInterval = 1 * time.Nanosecond
@@ -112,6 +114,7 @@ func New(autoscalingCtx *ca_context.AutoscalingContext, processors *processors.A
 		scaleDownContext:      nodes.NewDefaultScaleDownContext(),
 		minUpdateInterval:     minUpdateInterval,
 		maxNodeSkipEvalTime:   maxNodeSkipEvalTime,
+		scaleDownStrategy:     sdStrategy,
 	}
 }
 
@@ -286,6 +289,36 @@ func (p *Planner) injectPods(pods []*apiv1.Pod) error {
 	return nil
 }
 
+// rankNodes scores, normalizes, weights, totals and sorts candidates based on provided Strategy
+// If any error occurs, original unsorted unneededNodes slice is returned.
+func (p *Planner) rankNodes(unneededNodes []string) []string {
+	rs := strategy.NewRankingSession(p.scaleDownStrategy)
+	for _, nodeName := range unneededNodes {
+		nodeInfo, err := p.autoscalingCtx.ClusterSnapshot.GetNodeInfo(nodeName)
+		if err != nil {
+			klog.Errorf("error getting node info for scoring, returning original unneededNodes slice; err: %s", err.Error())
+			return unneededNodes
+		}
+		err = rs.ScoreNode(nodeInfo)
+		if err != nil {
+			klog.Errorf("error scoring nodes, returning original unneededNodes slice; err: %s", err.Error())
+			return unneededNodes
+		}
+	}
+	err := rs.Normalize()
+	if err != nil {
+		klog.Errorf("error normalizing scores, returning original unneededNodes slice; err: %s", err.Error())
+		return unneededNodes
+	}
+	err = rs.WeightTotal()
+	if err != nil {
+		klog.Errorf("error weighting and totaling scores, returning original unneededNodes slice; err: %s", err.Error())
+		return unneededNodes
+	}
+	unneededNodes = rs.Sort(unneededNodes)
+	return unneededNodes
+}
+
 // categorizeNodes determines, for each node, whether it can be eventually
 // removed or if there are reasons preventing that.
 func (p *Planner) categorizeNodes(ctx context.Context, podDestinations map[string]bool, scaleDownCandidates []*apiv1.Node) {
@@ -303,6 +336,9 @@ func (p *Planner) categorizeNodes(ctx context.Context, podDestinations map[strin
 	timer := time.NewTimer(p.autoscalingCtx.ScaleDownSimulationTimeout)
 	var skippedNodes []string
 
+	if len(p.scaleDownStrategy.Dimensions) > 0 {
+		currentlyUnneededNodeNames = p.rankNodes(currentlyUnneededNodeNames)
+	}
 	for i, node := range currentlyUnneededNodeNames {
 		if timedOut(timer) {
 			skippedNodes = currentlyUnneededNodeNames[i:]
