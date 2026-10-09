@@ -36,7 +36,8 @@ var (
 // RegisterCloudProvider registers a cloud provider builder.
 func RegisterCloudProvider(name string, builder CloudProviderBuilder) {
 	if _, ok := cloudProviderBuilders[name]; ok {
-		klog.Fatalf("Cloud provider %s already registered", name)
+		klog.ErrorS(nil, "Cloud provider already registered", "cloudProvider", name)
+		klog.FlushAndExit(klog.ExitFlushTimeout, 255)
 	}
 	cloudProviderBuilders[name] = builder
 }

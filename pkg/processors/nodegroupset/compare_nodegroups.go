@@ -163,5 +163,5 @@ func IsCloudProviderNodeInfoSimilar(
 }
 
 func dissimilarNodesLog(node1, node2, message string) {
-	klog.V(5).Infof("nodes %q and %q are not similar, %s", node1, node2, message)
+	klog.V(5).InfoS("nodes are not similar", "node1", node1, "node2", node2, "reason", message)
 }

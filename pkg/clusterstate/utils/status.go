@@ -157,7 +157,7 @@ func DeleteStatusConfigMap(kubeClient kube_client.Interface, namespace string, s
 	maps := kubeClient.CoreV1().ConfigMaps(namespace)
 	err := maps.Delete(context.TODO(), statusConfigMapName, metav1.DeleteOptions{})
 	if err != nil {
-		klog.Error("Failed to delete status configmap")
+		klog.ErrorS(err, "Failed to delete status configmap")
 	}
 	return err
 }
@@ -247,7 +247,7 @@ func marshalAndTruncateStatus(status api.ClusterAutoscalerStatus, maxStatusSize 
 
 	if failedLength <= len(originalNodeGroups) {
 		finalLength := max(failedLength-1, 0)
-		klog.Infof("Status configmap size limit exceeded. Truncated from %d to %d NodeGroups", len(originalNodeGroups), finalLength)
+		klog.InfoS("Status configmap size limit exceeded. Truncated NodeGroups", "originalCount", len(originalNodeGroups), "truncatedCount", finalLength)
 	}
 
 	// bestYaml holds the yaml for failedLength - 1.

@@ -51,7 +51,7 @@ func (r *DryRunResolver) Resolve(ctx context.Context, namespace string, template
 		DryRun: []string{metav1.DryRunAll},
 	})
 	if err != nil {
-		klog.Errorf("Failed to create dry-run pod for template %s/%s: %v", template.Namespace, template.Name, err)
+		klog.ErrorS(err, "Failed to create dry-run pod for template", "podTemplate", klog.KObj(template))
 		return nil, err
 	}
 

@@ -141,7 +141,7 @@ func WithForkedSnapshot(snapshot ClusterSnapshot, f func() (bool, error)) (error
 		if commit {
 			cleanupErr = snapshot.Commit()
 			if cleanupErr != nil {
-				klog.Errorf("Got error when calling ClusterSnapshot.Commit(), will try to revert; %v", cleanupErr)
+				klog.ErrorS(cleanupErr, "Got error when calling ClusterSnapshot.Commit(), will try to revert")
 			}
 		}
 		if !commit || cleanupErr != nil {

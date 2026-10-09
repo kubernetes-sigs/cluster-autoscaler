@@ -95,9 +95,9 @@ func (t *LoopTrigger) Wait(lastRun time.Time) {
 	// Unschedulable pod triggers autoscaling immediately.
 	select {
 	case <-time.After(t.scanInterval):
-		klog.Infof("Autoscaler loop triggered by a %v timer", t.scanInterval)
+		klog.InfoS("Autoscaler loop triggered by a timer", "scanInterval", t.scanInterval)
 	case <-t.podObserver.unschedulablePodChan:
-		klog.Info("Autoscaler loop triggered by unschedulable pod appearing")
+		klog.InfoS("Autoscaler loop triggered by unschedulable pod appearing")
 	}
 }
 
@@ -115,7 +115,7 @@ func StartPodObserver(ctx context.Context, kubeClient kube_client.Interface) *Un
 	informer := cache.NewSharedInformer(listWatch, &apiv1.Pod{}, time.Hour)
 	addEventHandlerFunc := func(obj any) {
 		if isRecentUnschedulablePod(obj) {
-			klog.V(5).Infof(" filterPodChanUntilClose emits signal")
+			klog.V(5).InfoS("filterPodChanUntilClose emits signal")
 			select {
 			case podChan <- struct{}{}:
 			default:
@@ -137,9 +137,9 @@ func StartPodObserver(ctx context.Context, kubeClient kube_client.Interface) *Un
 func (t *LoopTrigger) logTriggerReason(message string) {
 	select {
 	case <-t.podObserver.unschedulablePodChan:
-		klog.Info("Autoscaler loop triggered by unschedulable pod appearing")
+		klog.InfoS("Autoscaler loop triggered by unschedulable pod appearing")
 	default:
-		klog.Info(message)
+		klog.InfoS(message)
 	}
 }
 
@@ -148,7 +148,7 @@ func (t *LoopTrigger) provisioningRequestWasProcessed(lastRun time.Time) bool {
 		return !t.provisioningRequestProcessTimeGetter.LastProvisioningRequestProcessTime().Before(lastRun)
 	}
 
-	klog.V(5).Infof("provisioningRequestProcessTimeGetter is unset")
+	klog.V(5).InfoS("provisioningRequestProcessTimeGetter is unset")
 	return false
 }
 

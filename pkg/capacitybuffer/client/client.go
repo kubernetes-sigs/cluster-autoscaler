@@ -185,7 +185,7 @@ func NewCapacityBufferClientFromClients(buffersClient capacitybuffer.Interface, 
 			return nil, fmt.Errorf("can't create buffers lister")
 		}
 	}
-	klog.V(2).Info("Successful initial buffers sync")
+	klog.V(2).InfoS("Successful initial buffers sync")
 
 	factory := informers.NewSharedInformerFactory(kubernetesClient, defaultResyncPeriod)
 	bufferClient := &CapacityBufferClient{

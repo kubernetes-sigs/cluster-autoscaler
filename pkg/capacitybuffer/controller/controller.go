@@ -196,12 +196,12 @@ func (c *bufferController) configureEventHandlers() {
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			oldMeta, err := meta.Accessor(oldObj)
 			if err != nil {
-				klog.Errorf("CapacityBuffer controller: failed to get meta for object, err: %v", err)
+				klog.ErrorS(err, "CapacityBuffer controller: failed to get meta for object")
 				return
 			}
 			newMeta, err := meta.Accessor(newObj)
 			if err != nil {
-				klog.Errorf("CapacityBuffer controller: failed to get meta for object, err: %v", err)
+				klog.ErrorS(err, "CapacityBuffer controller: failed to get meta for object")
 				return
 			}
 			if oldMeta.GetGeneration() == newMeta.GetGeneration() {
@@ -238,12 +238,12 @@ func (c *bufferController) scalableObjectHandlerFuncs(apiGroup, kind string) cac
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			oldMeta, err := meta.Accessor(oldObj)
 			if err != nil {
-				klog.Errorf("CapacityBuffer controller: failed to get meta for %s/%s object, err: %v", apiGroup, kind, err)
+				klog.ErrorS(err, "CapacityBuffer controller: failed to get meta for object", "apiGroup", apiGroup, "kind", kind)
 				return
 			}
 			newMeta, err := meta.Accessor(newObj)
 			if err != nil {
-				klog.Errorf("CapacityBuffer controller: failed to get meta for %s/%s object, err: %v", apiGroup, kind, err)
+				klog.ErrorS(err, "CapacityBuffer controller: failed to get meta for object", "apiGroup", apiGroup, "kind", kind)
 				return
 			}
 			if oldMeta.GetGeneration() == newMeta.GetGeneration() {
@@ -358,7 +358,7 @@ func (c *bufferController) SetupWithManager(ctx context.Context, mgr ctrl.Manage
 func (c *bufferController) Start(ctx context.Context) error {
 	defer runtime.HandleCrashWithContext(ctx)
 
-	klog.Info("Starting CapacityBuffer controller workers")
+	klog.InfoS("Starting CapacityBuffer controller workers")
 
 	// Note: We assume the client passed to us has informers that are running and synced.
 	// CapacityBufferClient.NewCapacityBufferClientFromClients waits for sync before returning.
@@ -367,10 +367,10 @@ func (c *bufferController) Start(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Go(func() { c.runWorker(ctx) })
 	<-ctx.Done()
-	klog.Info("Stopping CapacityBuffer controller")
+	klog.InfoS("Stopping CapacityBuffer controller")
 	c.queue.ShutDown()
 	wg.Wait()
-	klog.Info("Stopped CapacityBuffer controller")
+	klog.InfoS("Stopped CapacityBuffer controller")
 	return nil
 }
 
@@ -404,7 +404,7 @@ func (c *bufferController) processNextItem(ctx context.Context) bool {
 // If one buffer in a namespace changes, e.g. it requests more resources,
 // it may impact other buffers in the namespace.
 func (c *bufferController) reconcileNamespace(namespace string) error {
-	klog.V(5).Infof("CapacityBuffer controller: reconciling namespace: %s", namespace)
+	klog.V(5).InfoS("CapacityBuffer controller: reconciling namespace", "namespace", namespace)
 	// List all capacity buffers in the target namespace
 	buffers, err := c.client.ListCapacityBuffers(namespace)
 	if err != nil {

@@ -174,7 +174,7 @@ func (a *Actuator) deleteAsyncEmpty(ctx context.Context, NodeGroupViews []*budge
 	logger := klog.FromContext(ctx)
 	for _, bucket := range NodeGroupViews {
 		for _, node := range bucket.Nodes {
-			logger.V(0).Info("Scale-down: removing empty node", "node", klog.KObj(node))
+			logger.Info("Scale-down: removing empty node", "node", klog.KObj(node))
 			a.autoscalingCtx.LogRecorder.Eventf(apiv1.EventTypeNormal, "ScaleDownEmpty", "Scale-down: removing empty node %q", node.Name)
 
 			if sdNode, err := a.scaleDownNodeToReport(ctx, node, false); err == nil {
@@ -268,7 +268,7 @@ func (a *Actuator) deleteAsyncDrain(ctx context.Context, NodeGroupViews []*budge
 	for _, bucket := range NodeGroupViews {
 		for _, drainNode := range bucket.Nodes {
 			if sdNode, err := a.scaleDownNodeToReport(ctx, drainNode, true); err == nil {
-				logger.V(0).Info("Scale-down: removing node", "node", klog.KObj(drainNode), "utilization", sdNode.UtilInfo, "podsToReschedule", joinPodNames(sdNode.EvictedPods))
+				logger.Info("Scale-down: removing node", "node", klog.KObj(drainNode), "utilization", sdNode.UtilInfo, "podsToReschedule", joinPodNames(sdNode.EvictedPods))
 				a.autoscalingCtx.LogRecorder.Eventf(apiv1.EventTypeNormal, "ScaleDown", "Scale-down: removing node %s, utilization: %v, pods to reschedule: %s", drainNode.Name, sdNode.UtilInfo, joinPodNames(sdNode.EvictedPods))
 				reportedSDNodes = append(reportedSDNodes, sdNode)
 			} else {
@@ -296,7 +296,7 @@ func (a *Actuator) deleteNodesAsync(ctx context.Context, nodes []*apiv1.Node, no
 	}
 
 	if nodeDeleteDelayAfterTaint > time.Duration(0) {
-		logger.V(0).Info("Scale-down: waiting before trying to delete nodes", "delay", nodeDeleteDelayAfterTaint)
+		logger.Info("Scale-down: waiting before trying to delete nodes", "delay", nodeDeleteDelayAfterTaint)
 		time.Sleep(nodeDeleteDelayAfterTaint)
 	}
 

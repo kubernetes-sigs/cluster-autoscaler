@@ -63,7 +63,7 @@ func createGRPCClient(expanderCert string, expanderUrl string) protos.ExpanderCl
 		grpc.WithTransportCredentials(creds),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(gRPCMaxRecvMsgSize)),
 	}
-	klog.V(2).Infof("Dialing: %s with dialopt: %v", expanderUrl, dialOpts)
+	klog.V(2).InfoS("Dialing gRPC expander", "url", expanderUrl)
 	conn, err := grpc.Dial(expanderUrl, dialOpts...)
 	if err != nil {
 		log.Fatalf("Fail to dial server: %v", err)

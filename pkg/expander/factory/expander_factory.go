@@ -88,7 +88,8 @@ func (f *Factory) RegisterDefaultExpanders(cloudProvider cloudprovider.CloudProv
 	f.RegisterFilter(expander.LeastNodesExpanderName, leastnodes.NewFilter)
 	f.RegisterFilter(expander.PriceBasedExpanderName, func() expander.Filter {
 		if _, err := cloudProvider.Pricing(context.TODO()); err != nil {
-			klog.Fatalf("Couldn't access cloud provider pricing for %s expander: %v", expander.PriceBasedExpanderName, err)
+			klog.ErrorS(err, "Couldn't access cloud provider pricing for expander", "expander", expander.PriceBasedExpanderName)
+			klog.FlushAndExit(klog.ExitFlushTimeout, 255)
 		}
 		return price.NewFilter(cloudProvider, price.NewSimplePreferredNodeProvider(autoscalingKubeClients.AllNodeLister()), price.SimpleNodeUnfitness)
 	})
