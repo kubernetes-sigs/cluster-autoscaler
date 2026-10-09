@@ -112,6 +112,7 @@ type testDevice struct {
 	name       string
 	attributes map[string]string
 	capacity   map[string]string
+	mappings   map[apiv1.ResourceName]resourceapi.NodeAllocatableResource
 }
 
 type testAllocation struct {
@@ -160,6 +161,7 @@ func TestStaticAutoscalerDynamicResources(t *testing.T) {
 	//assert.NoError(t, fs.Set("v", "10"))
 
 	featuretesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.DynamicResourceAllocation, true)
+	featuretesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.DRANodeAllocatableResources, true)
 
 	now := time.Now()
 
@@ -173,14 +175,69 @@ func TestStaticAutoscalerDynamicResources(t *testing.T) {
 		{name: nicDevice + "-0", attributes: map[string]string{nicAttribute: nicTypeA}},
 	})}
 
+	cpuQuantity2 := resource.MustParse("2")
+	node1CpuA1slice := &testNodeGroupDef{
+		name: "node1CpuA1slice",
+		cpu:  3000,
+		mem:  4000,
+		slicesTemplateFunc: nodeTemplateResourceSlices(exampleDriver, 1, 0, []testDevice{
+			{
+				name:       "cpuDev-0",
+				attributes: map[string]string{gpuAttribute: gpuTypeA},
+				mappings: map[apiv1.ResourceName]resourceapi.NodeAllocatableResource{
+					apiv1.ResourceCPU: {
+						Mapping: &resourceapi.NodeAllocatableMapping{
+							DeviceMultiplier: &cpuQuantity2,
+						},
+					},
+				},
+			},
+			{
+				name:       "cpuDev-1",
+				attributes: map[string]string{gpuAttribute: gpuTypeA},
+				mappings: map[apiv1.ResourceName]resourceapi.NodeAllocatableResource{
+					apiv1.ResourceCPU: {
+						Mapping: &resourceapi.NodeAllocatableMapping{
+							DeviceMultiplier: &cpuQuantity2,
+						},
+					},
+				},
+			},
+			{
+				name:       "cpuDev-2",
+				attributes: map[string]string{gpuAttribute: gpuTypeA},
+				mappings: map[apiv1.ResourceName]resourceapi.NodeAllocatableResource{
+					apiv1.ResourceCPU: {
+						Mapping: &resourceapi.NodeAllocatableMapping{
+							DeviceMultiplier: &cpuQuantity2,
+						},
+					},
+				},
+			},
+			{
+				name:       "cpuDev-3",
+				attributes: map[string]string{gpuAttribute: gpuTypeA},
+				mappings: map[apiv1.ResourceName]resourceapi.NodeAllocatableResource{
+					apiv1.ResourceCPU: {
+						Mapping: &resourceapi.NodeAllocatableMapping{
+							DeviceMultiplier: &cpuQuantity2,
+						},
+					},
+				},
+			},
+		}),
+	}
+
 	baseBigPod := BuildTestPod("", 600, 100)
 	baseSmallPod := BuildTestPod("", 100, 100)
+	basePod500Cpu := BuildTestPod("base-pod-500cpu", 500, 100)
 
 	req1GpuA := testDeviceRequest{name: "req1GpuA", count: 1, selectors: singleAttrSelector(exampleDriver, gpuAttribute, gpuTypeA)}
 	req2GpuA := testDeviceRequest{name: "req2GpuA", count: 2, selectors: singleAttrSelector(exampleDriver, gpuAttribute, gpuTypeA)}
 	req1GpuB := testDeviceRequest{name: "req1GpuB", count: 1, selectors: singleAttrSelector(exampleDriver, gpuAttribute, gpuTypeB)}
 	req1Nic := testDeviceRequest{name: "req1Nic", count: 1, selectors: singleAttrSelector(exampleDriver, nicAttribute, nicTypeA)}
 	req1Global := testDeviceRequest{name: "req1Global", count: 1, selectors: singleAttrSelector(exampleDriver, globalDevAttribute, globalDevTypeA)}
+	req1CpuA := testDeviceRequest{name: "req-cpu-a", count: 1, selectors: singleAttrSelector(exampleDriver, gpuAttribute, gpuTypeA)}
 
 	sharedGpuBClaim := testResourceClaim("sharedGpuBClaim", nil, "", []testDeviceRequest{req1GpuB}, nil)
 	sharedAllocatedGlobalClaim := testResourceClaim("sharedGlobalClaim", nil, "", []testDeviceRequest{req1Global}, []testAllocation{{request: req1Global.name, driver: exampleDriver, pool: "global-pool", device: globalDevice + "-0"}})
@@ -254,6 +311,15 @@ func TestStaticAutoscalerDynamicResources(t *testing.T) {
 			nodeGroups:       map[*testNodeGroupDef]int{node1Gpu1Nic1slice: 0},
 			pods:             unscheduledPods(baseSmallPod, "unschedulable", 3, []testDeviceRequest{req1GpuA, req1Nic}),
 			expectedScaleUps: map[string]int{node1Gpu1Nic1slice.name: 3},
+		},
+		"scale-up: DRA node allocatable resources account for node capacity": {
+			// Node has 3000m CPU and 4 devices.
+			// Each pod requests 500m CPU + 1 device (= 2000m CPU), totaling 2500m CPU per pod.
+			// Fitting 2 pods requires 5000m CPU, which exceeds a single node's 3000m capacity.
+			// Therefore, 2 nodes are needed to schedule the 2 pods.
+			nodeGroups:       map[*testNodeGroupDef]int{node1CpuA1slice: 0},
+			pods:             unscheduledPods(basePod500Cpu, "unschedulable", 2, []testDeviceRequest{req1CpuA}),
+			expectedScaleUps: map[string]int{node1CpuA1slice.name: 2},
 		},
 		"scale-up: scale from 0 nodes in a node group, with pods on the template nodes consuming DRA resources": {
 			nodeGroups: map[*testNodeGroupDef]int{node3GpuA1slice: 0},
@@ -732,9 +798,10 @@ func testResourceSlices(driver, poolName string, poolSliceCount, poolGen int64, 
 	var devices []resourceapi.Device
 	for _, deviceDef := range deviceDefs {
 		device := resourceapi.Device{
-			Name:       deviceDef.name,
-			Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{},
-			Capacity:   map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{},
+			Name:                     deviceDef.name,
+			Attributes:               map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{},
+			Capacity:                 map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{},
+			NodeAllocatableResources: deviceDef.mappings,
 		}
 		for name, val := range deviceDef.attributes {
 			val := val
