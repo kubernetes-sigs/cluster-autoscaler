@@ -161,7 +161,7 @@ func (w *dynamicWatcher) Reconcile(ctx context.Context, groupKind schema.GroupKi
 
 	// Early exit if no buffers are referencing the kind. This can happen for example
 	// after a deletion of the last buffer referencing the kind.
-	// TODO: tear down the informer if no more buffers are referencing the kind
+	// TODO(https://github.com/kubernetes-sigs/cluster-autoscaler/issues/158): tear down the informer if no more buffers are referencing the kind
 	if len(buffers) == 0 {
 		return reconcile.Result{}, nil
 	}
