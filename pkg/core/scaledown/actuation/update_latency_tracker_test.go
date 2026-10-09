@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -29,171 +30,266 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 )
 
-// mockClock is used to mock time.Now() when testing UpdateLatencyTracker
-// For the n th call to Now() it will return a timestamp after duration[n] to
-// the startTime if n < the length of durations. Otherwise, it will return current time.
-type mockClock struct {
-	startTime time.Time
-	durations []time.Duration
-	index     int
-	mutex     sync.Mutex
-}
-
-// Returns a new NewMockClock object
-func NewMockClock(startTime time.Time, durations []time.Duration) mockClock {
-	return mockClock{
-		startTime: startTime,
-		durations: durations,
-		index:     0,
-	}
-}
-
-// Returns a time after Nth duration from the start time if N < length of durations.
-// Otherwise, returns the current time
-func (m *mockClock) Now() time.Time {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	var timeToSend time.Time
-	if m.index < len(m.durations) {
-		timeToSend = m.startTime.Add(m.durations[m.index])
-	} else {
-		timeToSend = time.Now()
-	}
-	m.index += 1
-	return timeToSend
-}
-
-// Returns the number of times that the Now function was called
-func (m *mockClock) getIndex() int {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	return m.index
-}
-
-// TestCustomNodeLister can be used to mock nodeLister Get call when testing delayed tainting
+// TestCustomNodeLister adds ToBeDeletedTaint to a node once nodeTaintAfterDuration[node] has
+// elapsed since the lister was created. The tests run inside synctest bubbles, so time is fake
+// and deterministic.
 type TestCustomNodeLister struct {
-	nodes                    map[string]*apiv1.Node
-	getCallCount             map[string]int
-	nodeTaintAfterNthGetCall map[string]int
+	nodes                  map[string]*apiv1.Node
+	nodeTaintAfterDuration map[string]time.Duration
+	startTime              time.Time
+	mutex                  sync.Mutex
 }
 
 // List returns all nodes in test lister.
 func (l *TestCustomNodeLister) List() ([]*apiv1.Node, error) {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
 	var nodes []*apiv1.Node
 	for _, node := range l.nodes {
-		nodes = append(nodes, node)
+		nodes = append(nodes, node.DeepCopy())
 	}
 	return nodes, nil
 }
 
-// Get returns node from test lister. Add ToBeDeletedTaint to the node
-// during the N th call specified in the nodeTaintAfterNthGetCall
 func (l *TestCustomNodeLister) Get(name string) (*apiv1.Node, error) {
-	for _, node := range l.nodes {
-		if node.Name == name {
-			l.getCallCount[node.Name] += 1
-			if _, ok := l.nodeTaintAfterNthGetCall[node.Name]; ok && l.getCallCount[node.Name] == l.nodeTaintAfterNthGetCall[node.Name] {
-				toBeDeletedTaint := apiv1.Taint{Key: taints.ToBeDeletedTaint, Effect: apiv1.TaintEffectNoSchedule}
-				node.Spec.Taints = append(node.Spec.Taints, toBeDeletedTaint)
-			}
-			return node, nil
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+	node, ok := l.nodes[name]
+	if !ok {
+		return nil, fmt.Errorf("Node %s not found", name)
+	}
+	if expectedDuration, ok := l.nodeTaintAfterDuration[name]; ok {
+		if time.Since(l.startTime) >= expectedDuration && !taints.HasToBeDeletedTaint(node) {
+			toBeDeletedTaint := apiv1.Taint{Key: taints.ToBeDeletedTaint, Effect: apiv1.TaintEffectNoSchedule}
+			node.Spec.Taints = append(node.Spec.Taints, toBeDeletedTaint)
 		}
 	}
-	return nil, fmt.Errorf("Node %s not found", name)
+	return node.DeepCopy(), nil
 }
 
-// Return new TestCustomNodeLister object
-func NewTestCustomNodeLister(nodes map[string]*apiv1.Node, nodeTaintAfterNthGetCall map[string]int) *TestCustomNodeLister {
-	getCallCounts := map[string]int{}
-	for name := range nodes {
-		getCallCounts[name] = 0
+// NewTestCustomNodeLister returns a new TestCustomNodeLister. If a node has no entry in
+// nodeTaintAfterDuration, it never gets tainted.
+func NewTestCustomNodeLister(nodeNames []string, nodeTaintAfterDuration map[string]time.Duration) *TestCustomNodeLister {
+	nodes := make(map[string]*apiv1.Node, len(nodeNames))
+	for _, name := range nodeNames {
+		nodes[name] = test.BuildTestNode(name, 100, 100)
 	}
 	return &TestCustomNodeLister{
-		nodes:                    nodes,
-		getCallCount:             getCallCounts,
-		nodeTaintAfterNthGetCall: nodeTaintAfterNthGetCall,
+		nodes:                  nodes,
+		nodeTaintAfterDuration: nodeTaintAfterDuration,
+		startTime:              time.Now(),
 	}
 }
 
 func TestUpdateLatencyCalculation(t *testing.T) {
-
 	testCases := []struct {
 		description string
-		startTime   time.Time
 		nodes       []string
 		// If an entry is not added for a node, that node will never get tainted
-		nodeTaintAfterNthGetCall map[string]int
-		durations                []time.Duration
-		wantLatency              time.Duration
-		wantResultChanOpen       bool
+		nodeTaintAfterDuration map[string]time.Duration
+		// Nodes dropped from the tracker before it starts.
+		droppedNodes []string
+		wantLatency  time.Duration
+		wantErr      bool
 	}{
 		{
-			description:              "latency when tainting a single node - node is tainted in the first call to the lister",
-			startTime:                time.Now(),
-			nodes:                    []string{"n1"},
-			nodeTaintAfterNthGetCall: map[string]int{"n1": 1},
-			durations:                []time.Duration{100 * time.Millisecond},
-			wantLatency:              100 * time.Millisecond,
-			wantResultChanOpen:       true,
+			description:            "latency when tainting a single node - node is tainted in the first call to the lister",
+			nodes:                  []string{"n1"},
+			nodeTaintAfterDuration: map[string]time.Duration{"n1": 0},
+			wantLatency:            0,
 		},
 		{
-			description:              "latency when tainting a single node - node is not tainted in the first call to the lister",
-			startTime:                time.Now(),
-			nodes:                    []string{"n1"},
-			nodeTaintAfterNthGetCall: map[string]int{"n1": 3},
-			durations:                []time.Duration{100 * time.Millisecond},
-			wantLatency:              100 * time.Millisecond,
-			wantResultChanOpen:       true,
+			description:            "latency when tainting a single node - node is not tainted in the first call to the lister",
+			nodes:                  []string{"n1"},
+			nodeTaintAfterDuration: map[string]time.Duration{"n1": 100 * time.Millisecond},
+			wantLatency:            100 * time.Millisecond,
 		},
 		{
-			description:              "latency when tainting multiple nodes - nodes are tainted in the first calls to the lister",
-			startTime:                time.Now(),
-			nodes:                    []string{"n1", "n2"},
-			nodeTaintAfterNthGetCall: map[string]int{"n1": 1, "n2": 1},
-			durations:                []time.Duration{100 * time.Millisecond, 150 * time.Millisecond},
-			wantLatency:              150 * time.Millisecond,
-			wantResultChanOpen:       true,
+			description:            "latency when tainting multiple nodes - nodes are tainted in the first calls to the lister",
+			nodes:                  []string{"n1", "n2"},
+			nodeTaintAfterDuration: map[string]time.Duration{"n1": 0, "n2": 0},
+			wantLatency:            0,
 		},
 		{
-			description:              "latency when tainting multiple nodes - nodes are not tainted in the first calls to the lister",
-			startTime:                time.Now(),
-			nodes:                    []string{"n1", "n2"},
-			nodeTaintAfterNthGetCall: map[string]int{"n1": 3, "n2": 5},
-			durations:                []time.Duration{100 * time.Millisecond, 150 * time.Millisecond},
-			wantLatency:              150 * time.Millisecond,
-			wantResultChanOpen:       true,
+			description:            "latency when tainting multiple nodes - nodes are not tainted in the first calls to the lister",
+			nodes:                  []string{"n1", "n2"},
+			nodeTaintAfterDuration: map[string]time.Duration{"n1": 100 * time.Millisecond, "n2": 150 * time.Millisecond},
+			wantLatency:            150 * time.Millisecond,
 		},
 		{
-			description:              "Some nodes fails to taint before timeout",
-			startTime:                time.Now(),
-			nodes:                    []string{"n1", "n3"},
-			nodeTaintAfterNthGetCall: map[string]int{"n1": 1},
-			durations:                []time.Duration{100 * time.Millisecond, 150 * time.Millisecond},
-			wantResultChanOpen:       false,
+			description:            "dropped node that never gets tainted is not awaited",
+			nodes:                  []string{"n1", "n2", "n3"},
+			nodeTaintAfterDuration: map[string]time.Duration{"n1": 50 * time.Millisecond, "n2": 100 * time.Millisecond},
+			droppedNodes:           []string{"n3"},
+			wantLatency:            100 * time.Millisecond,
+		},
+		{
+			description:            "dropped node's latency is not included in the result",
+			nodes:                  []string{"n1", "n2", "n3"},
+			nodeTaintAfterDuration: map[string]time.Duration{"n1": 50 * time.Millisecond, "n2": 100 * time.Millisecond, "n3": 150 * time.Millisecond},
+			droppedNodes:           []string{"n3"},
+			wantLatency:            100 * time.Millisecond,
+		},
+		{
+			description:            "Some nodes fails to taint before timeout",
+			nodes:                  []string{"n1", "n3"},
+			nodeTaintAfterDuration: map[string]time.Duration{"n1": 100 * time.Millisecond, "n3": 250 * time.Millisecond},
+			wantErr:                true,
+		},
+		{
+			description:            "all nodes dropped",
+			nodes:                  []string{"n1", "n2"},
+			nodeTaintAfterDuration: map[string]time.Duration{"n1": 0, "n2": 0},
+			droppedNodes:           []string{"n1", "n2"},
+			wantErr:                true,
+		},
+		{
+			description: "no nodes",
+			wantErr:     true,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			mc := NewMockClock(tc.startTime, tc.durations)
-			nodes := map[string]*apiv1.Node{}
-			for _, name := range tc.nodes {
-				node := test.BuildTestNode(name, 100, 100)
-				nodes[name] = node
-			}
-			nodeLister := NewTestCustomNodeLister(nodes, tc.nodeTaintAfterNthGetCall)
-			updateLatencyTracker := NewUpdateLatencyTrackerForTesting(nodeLister, mc.Now)
-			go updateLatencyTracker.Start(context.Background())
-			for _, node := range nodes {
-				updateLatencyTracker.StartTimeChan <- nodeTaintStartTime{node.Name, tc.startTime}
-			}
-			updateLatencyTracker.AwaitOrStopChan <- true
-			latency, ok := <-updateLatencyTracker.ResultChan
-			assert.Equal(t, tc.wantResultChanOpen, ok)
-			if ok {
+			synctest.Test(t, func(t *testing.T) {
+				nodeLister := NewTestCustomNodeLister(tc.nodes, tc.nodeTaintAfterDuration)
+				tracker := NewUpdateLatencyTrackerForTesting(nodeLister, tc.nodes)
+				startTime := time.Now()
+				for _, name := range tc.nodes {
+					tracker.RecordStartTime(name, startTime)
+				}
+				tracker.DropNodes(tc.droppedNodes...)
+				go tracker.Start(t.Context())
+
+				latency, err := tracker.WaitForLatency()
+				if tc.wantErr {
+					assert.Error(t, err)
+					return
+				}
+				assert.NoError(t, err)
 				assert.Equal(t, tc.wantLatency, latency)
-				assert.Equal(t, len(tc.durations), mc.getIndex())
-			}
+			})
 		})
 	}
+}
+
+func TestUpdateLatencyTrackerContextCancellation(t *testing.T) {
+	t.Run("context cancelled while waiting for nodes to start", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			nodeLister := NewTestCustomNodeLister(nil, nil)
+			tracker := NewUpdateLatencyTrackerForTesting(nodeLister, []string{"n1"})
+
+			go tracker.Start(ctx)
+
+			// Cancel ctx without ever starting or dropping "n1". Start() must return.
+			cancel()
+			select {
+			case <-tracker.done:
+			case <-time.After(time.Second):
+				t.Fatal("tracker did not finish after context cancellation")
+			}
+		})
+	})
+
+	t.Run("context cancelled while waiting for nodes to be tainted", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			// "n1" never gets tainted.
+			nodeLister := NewTestCustomNodeLister([]string{"n1"}, nil)
+			tracker := NewUpdateLatencyTrackerForTesting(nodeLister, []string{"n1"})
+			tracker.RecordStartTime("n1", time.Now())
+
+			go tracker.Start(ctx)
+			cancel()
+
+			_, err := tracker.WaitForLatency()
+			assert.EqualError(t, err, "taint wasn't observed for 1 nodes")
+		})
+	})
+}
+
+func TestUpdateLatencyTrackerWaitForLatencyWithNotStartedNodes(t *testing.T) {
+	t.Run("nodes neither started nor dropped return an error", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			nodes := []string{"n1", "n2", "n3"}
+			nodeLister := NewTestCustomNodeLister(nodes, map[string]time.Duration{"n1": 0, "n2": 0, "n3": 0})
+			tracker := NewUpdateLatencyTrackerForTesting(nodeLister, nodes)
+			tracker.RecordStartTime("n1", time.Now())
+			go tracker.Start(t.Context())
+
+			_, err := tracker.WaitForLatency()
+			assert.EqualError(t, err, "2 nodes were neither started nor dropped")
+
+			// Start must return, even though ctx is never cancelled.
+			select {
+			case <-tracker.done:
+			case <-time.After(time.Second):
+				t.Fatal("tracker did not finish after WaitForLatency returned")
+			}
+		})
+	})
+
+	t.Run("dropped nodes that never started are fine", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			nodeLister := NewTestCustomNodeLister([]string{"n1"}, map[string]time.Duration{"n1": 0})
+			tracker := NewUpdateLatencyTrackerForTesting(nodeLister, []string{"n1", "n2"})
+			tracker.RecordStartTime("n1", time.Now())
+			tracker.DropNodes("n2")
+			go tracker.Start(t.Context())
+
+			latency, err := tracker.WaitForLatency()
+			assert.NoError(t, err)
+			assert.Equal(t, time.Duration(0), latency)
+		})
+	})
+}
+
+func TestUpdateLatencyTrackerTimeoutStartsWhenAllNodesStarted(t *testing.T) {
+	// n2 starts tainting 300ms after n1, which is longer than the 200ms timeout. The timeout must
+	// only start once n2 has started, and n2's latency must be measured from its own start time.
+	synctest.Test(t, func(t *testing.T) {
+		nodes := []string{"n1", "n2"}
+		nodeLister := NewTestCustomNodeLister(nodes, map[string]time.Duration{"n1": 0, "n2": 350 * time.Millisecond})
+		tracker := NewUpdateLatencyTrackerForTesting(nodeLister, nodes)
+		tracker.RecordStartTime("n1", time.Now())
+		go tracker.Start(t.Context())
+
+		time.Sleep(300 * time.Millisecond)
+		tracker.RecordStartTime("n2", time.Now())
+
+		latency, err := tracker.WaitForLatency()
+		assert.NoError(t, err)
+		// n1: 0ms. n2: started at 300ms, taint seen at 350ms.
+		assert.Equal(t, 50*time.Millisecond, latency)
+	})
+}
+
+func TestUpdateLatencyTrackerDropNodesWhilePolling(t *testing.T) {
+	// In production the tracker polls while CA is still tainting nodes, so most taints are seen
+	// before failed nodes are dropped. The latencies recorded then must be kept.
+	synctest.Test(t, func(t *testing.T) {
+		nodes := []string{"n1", "n2"}
+		// n2 never gets tainted.
+		nodeLister := NewTestCustomNodeLister(nodes, map[string]time.Duration{"n1": 10 * time.Millisecond})
+		tracker := NewUpdateLatencyTrackerForTesting(nodeLister, nodes)
+		startTime := time.Now()
+		tracker.RecordStartTime("n1", startTime)
+		tracker.RecordStartTime("n2", startTime)
+		go tracker.Start(t.Context())
+
+		// Drop n2 well after n1's taint was seen at 10ms and before the 200ms timeout.
+		time.Sleep(100 * time.Millisecond)
+		tracker.DropNodes("n2")
+
+		latency, err := tracker.WaitForLatency()
+		assert.NoError(t, err)
+		// n1's taint was first seen at 10ms. Recording latencies only after n2 was dropped
+		// would give more than 100ms.
+		assert.Equal(t, 10*time.Millisecond, latency)
+	})
 }

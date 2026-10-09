@@ -198,20 +198,23 @@ func (a *Actuator) deleteAsyncEmpty(ctx context.Context, NodeGroupViews []*budge
 // applied taints are cleaned up.
 func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets.NodeGroupView) (time.Duration, errors.AutoscalerError) {
 	nodesToTaint := make([]*apiv1.Node, 0)
-	var updateLatencyTracker *UpdateLatencyTracker
-	nodeDeleteDelayAfterTaint := a.nodeDeleteDelayAfterTaint
-	if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
-		updateLatencyTracker = NewUpdateLatencyTracker(a.autoscalingCtx.AutoscalingKubeClients.ListerRegistry.AllNodeLister())
-		go updateLatencyTracker.Start(ctx)
-	}
 
 	for _, bucket := range NodeGroupViews {
 		for _, node := range bucket.Nodes {
-			if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
-				updateLatencyTracker.StartTimeChan <- nodeTaintStartTime{node.Name, time.Now()}
-			}
 			nodesToTaint = append(nodesToTaint, node)
 		}
+	}
+
+	nodeNames := make([]string, 0, len(nodesToTaint))
+	for _, node := range nodesToTaint {
+		nodeNames = append(nodeNames, node.Name)
+	}
+
+	var updateLatencyTracker *UpdateLatencyTracker
+	nodeDeleteDelayAfterTaint := a.nodeDeleteDelayAfterTaint
+	if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
+		updateLatencyTracker = NewUpdateLatencyTracker(a.autoscalingCtx.AutoscalingKubeClients.ListerRegistry.AllNodeLister(), nodeNames)
+		go updateLatencyTracker.Start(ctx)
 	}
 	failedTaintedNodes := make(chan struct {
 		node *apiv1.Node
@@ -220,6 +223,8 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 	taintedNodes := make(chan *apiv1.Node, len(nodesToTaint))
 	workqueue.ParallelizeUntil(context.Background(), maxConcurrentNodesTainting, len(nodesToTaint), func(piece int) {
 		node := nodesToTaint[piece]
+		// Capture the start time here rather than when the node is queued, so time spent waiting for a free worker doesn't inflate the latency.
+		startTime := time.Now()
 		err := a.taintNode(ctx, node)
 		if err != nil {
 			failedTaintedNodes <- struct {
@@ -227,6 +232,7 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 				err  error
 			}{node: node, err: err}
 		} else {
+			updateLatencyTracker.RecordStartTime(node.Name, startTime)
 			taintedNodes <- node
 		}
 	})
@@ -236,20 +242,20 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 		for nodeWithError := range failedTaintedNodes {
 			a.autoscalingCtx.Recorder.Eventf(nodeWithError.node, apiv1.EventTypeWarning, "ScaleDownFailed", "failed to mark the node as toBeDeleted/unschedulable: %v", nodeWithError.err)
 		}
+		// All applied taints are cleaned up below, so none of the nodes should be awaited or measured.
+		updateLatencyTracker.DropNodes(nodeNames...)
 		// Clean up already applied taints in case of issues.
 		for taintedNode := range taintedNodes {
 			_, _ = taints.CleanToBeDeleted(ctx, taintedNode, a.autoscalingCtx.ClientSet, a.autoscalingCtx.CordonNodeBeforeTerminate)
-		}
-		if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
-			close(updateLatencyTracker.AwaitOrStopChan)
 		}
 		return nodeDeleteDelayAfterTaint, errors.NewAutoscalerErrorf(errors.ApiCallError, "couldn't taint %d nodes with ToBeDeleted", len(failedTaintedNodes))
 	}
 
 	if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
-		updateLatencyTracker.AwaitOrStopChan <- true
-		latency, ok := <-updateLatencyTracker.ResultChan
-		if ok {
+		latency, err := updateLatencyTracker.WaitForLatency()
+		if err != nil {
+			klog.FromContext(ctx).Error(err, "Failed to measure taint latency, using the static node delete delay after taint")
+		} else {
 			a.pastLatencies.RegisterElement(latency)
 			a.pastLatencies.DropNotNewerThan(time.Now().Add(-1 * pastLatencyExpireDuration))
 			// CA is expected to wait 3 times the round-trip time between CA and the api-server.

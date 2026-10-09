@@ -48,6 +48,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupconfig"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/utilization"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/expiring"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
@@ -72,21 +73,23 @@ type scaleDownStatusInfo struct {
 }
 
 type startDeletionTestCase struct {
-	defaultOnly           bool // Set to true to only run default deletion logic tests.
-	forcedOnly            bool // Set to true to only run forced deletion logic tests.
-	nodeGroups            map[string]*testprovider.TestNodeGroup
-	emptyNodes            []nodeGroupViewInfo
-	drainNodes            []nodeGroupViewInfo
-	pods                  map[string][]*apiv1.Pod
-	failedPodDrain        map[string]bool
-	failedNodeDeletion    map[string]bool
-	failedNodeTaint       map[string]bool
-	wantStatus            scaleDownStatusInfo
-	wantErr               error
-	wantDeletedPods       []string
-	wantDeletedNodes      []string
-	wantTaintUpdates      map[string][][]apiv1.Taint
-	wantNodeDeleteResults map[string]status.NodeDeleteResult
+	defaultOnly               bool // Set to true to only run default deletion logic tests.
+	forcedOnly                bool // Set to true to only run forced deletion logic tests.
+	nodeGroups                map[string]*testprovider.TestNodeGroup
+	emptyNodes                []nodeGroupViewInfo
+	drainNodes                []nodeGroupViewInfo
+	pods                      map[string][]*apiv1.Pod
+	failedPodDrain            map[string]bool
+	failedNodeDeletion        map[string]bool
+	failedNodeTaint           map[string]bool
+	wantStatus                scaleDownStatusInfo
+	wantErr                   error
+	wantDeletedPods           []string
+	wantDeletedNodes          []string
+	wantTaintUpdates          map[string][][]apiv1.Taint
+	wantNodeDeleteResults     map[string]status.NodeDeleteResult
+	dynamicDeleteDelayEnabled bool // Set to true to enable DynamicNodeDeleteDelayAfterTaintEnabled.
+	wantLatencySamples        int  // Number of latencies the actuator should add to pastLatencies.
 }
 
 func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suffix string) map[string]startDeletionTestCase {
@@ -1139,7 +1142,7 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 		if !found {
 			return true, nil, fmt.Errorf("node %q not found", getAction.GetName())
 		}
-		return true, node, nil
+		return true, node.DeepCopy(), nil
 	})
 	fakeClient.Fake.AddReactor("get", "pods",
 		func(action core.Action) (bool, runtime.Object, error) {
@@ -1209,10 +1212,11 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 
 	// Set up other needed structures and options.
 	opts := config.AutoscalingOptions{
-		MaxScaleDownParallelism:        10,
-		MaxDrainParallelism:            5,
-		MaxPodEvictionTime:             0,
-		DaemonSetEvictionForEmptyNodes: true,
+		MaxScaleDownParallelism:                 10,
+		MaxDrainParallelism:                     5,
+		MaxPodEvictionTime:                      0,
+		DaemonSetEvictionForEmptyNodes:          true,
+		DynamicNodeDeleteDelayAfterTaintEnabled: tc.dynamicDeleteDelayEnabled,
 	}
 
 	allPods := []*apiv1.Pod{}
@@ -1228,7 +1232,8 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 		t.Fatalf("Couldn't create daemonset lister")
 	}
 
-	registry := kube_util.NewListerRegistry(nil, nil, podLister, pdbLister, dsLister, nil, nil, nil, nil)
+	nodeLister := kube_util.NewDynamicTestNodeLister(fakeClient)
+	registry := kube_util.NewListerRegistry(nodeLister, nil, podLister, pdbLister, dsLister, nil, nil, nil, nil)
 	autoscalingCtx, err := NewScaleTestAutoscalingContext(opts, fakeClient, registry, provider, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Couldn't set up autoscaling context: %v", err)
@@ -1275,6 +1280,7 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 	actuator := Actuator{
 		autoscalingCtx: &autoscalingCtx, nodeDeletionTracker: ndt,
 		nodeDeletionScheduler: NewGroupDeletionScheduler(&autoscalingCtx, ndt, ndb, evictor),
+		pastLatencies:         expiring.NewList(),
 		budgetProcessor:       budgets.NewScaleDownBudgetProcessor(&autoscalingCtx),
 		configGetter:          nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.NodeGroupDefaults),
 	}
@@ -1295,6 +1301,11 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 	// Verify ScaleDownResult looks as expected.
 	if diff := cmp.Diff(tc.wantStatus.result, gotResult); diff != "" {
 		t.Errorf("StartDeletion result diff (-want +got):\n%s", diff)
+	}
+
+	// Verify the number of taint latency samples. With the dynamic delay enabled, every successful taintNodesSync call adds one.
+	if got := len(actuator.pastLatencies.ToSlice()); got != tc.wantLatencySamples {
+		t.Errorf("pastLatencies: want %d samples, got %d", tc.wantLatencySamples, got)
 	}
 
 	// Verify ScaleDownNodes looks as expected.
@@ -1389,6 +1400,33 @@ func TestStartDeletion(t *testing.T) {
 				runStartDeletionTest(t, tc, false)
 			})
 		}
+	}
+}
+
+func TestStartDeletionWithDynamicNodeDeleteDelay(t *testing.T) {
+	testCases := getStartDeletionTestCases(false, false, "testNgDyn")
+	testsToRun := []struct {
+		name               string
+		wantLatencySamples int
+	}{
+		{name: "empty node deletion testNgDyn", wantLatencySamples: 1},
+		// Empty and drain nodes are tainted by separate taintNodesSync calls, so this runs two trackers.
+		{name: "empty and drain deletion work correctly together testNgDyn", wantLatencySamples: 2},
+		{name: "failure to taint empty node stops deletion and cleans already applied taints testNgDyn", wantLatencySamples: 0},
+		// Only the empty side records a sample, the drain side fails to taint.
+		{name: "failure to taint drain node stops further deletion and cleans already applied taints testNgDyn", wantLatencySamples: 1},
+	}
+
+	for _, tt := range testsToRun {
+		tc, ok := testCases[tt.name]
+		if !ok {
+			t.Fatalf("test case %q not found", tt.name)
+		}
+		tc.dynamicDeleteDelayEnabled = true
+		tc.wantLatencySamples = tt.wantLatencySamples
+		t.Run(tt.name, func(t *testing.T) {
+			runStartDeletionTest(t, tc, false)
+		})
 	}
 }
 
