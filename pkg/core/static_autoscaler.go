@@ -556,6 +556,7 @@ func (a *StaticAutoscaler) RunOnce(ctx context.Context, currentTime time.Time) c
 		return nil
 	}
 
+	var scalingErr caerrors.AutoscalerError
 	if shouldScaleUp {
 		scaleUpTriggered = true
 		nodes := make([]*apiv1.Node, len(allNodeInfos))
@@ -563,20 +564,25 @@ func (a *StaticAutoscaler) RunOnce(ctx context.Context, currentTime time.Time) c
 			nodes[i] = nodeInfo.Node()
 		}
 
+		var scaleUpErr caerrors.AutoscalerError
 		if a.AutoscalingContext.AutoscalingOptions.SalvoScaleUp {
-			scaleUpStatus, typedErr = a.runScaleUpSalvo(ctx, currentTime,
+			scaleUpStatus, scaleUpErr = a.runScaleUpSalvo(ctx, currentTime,
 				unschedulablePodsToHelp,
 				daemonsets,
 				nodes,
 				templateNodeInfos,
 			)
 		} else {
-			_, scaleUpStatus, typedErr = a.runSingleScaleUp(ctx, currentTime,
+			_, scaleUpStatus, scaleUpErr = a.runSingleScaleUp(ctx, currentTime,
 				unschedulablePodsToHelp,
 				daemonsets,
 				nodes,
 				templateNodeInfos,
 			)
+		}
+
+		if scaleUpErr != nil {
+			scalingErr = scaleUpErr
 		}
 
 		if scaleUpStatus.Result == status.ScaleUpSuccessful {
@@ -586,8 +592,8 @@ func (a *StaticAutoscaler) RunOnce(ctx context.Context, currentTime time.Time) c
 	}
 
 	if a.shouldScaleDown() {
-		if typedErr = a.scaleDown(ctx, currentTime, allNodes, scaleDownActuationStatus, scaleDownStatus); typedErr != nil {
-			return typedErr
+		if scaleDownErr := a.scaleDown(ctx, currentTime, allNodes, scaleDownActuationStatus, scaleDownStatus); scaleDownErr != nil && scalingErr == nil {
+			scalingErr = scaleDownErr
 		}
 	}
 
@@ -601,7 +607,21 @@ func (a *StaticAutoscaler) RunOnce(ctx context.Context, currentTime time.Time) c
 		scaleUpFn := func() (*status.ScaleUpStatus, caerrors.AutoscalerError) {
 			return a.scaleUpOrchestrator.ScaleUpToNodeGroupMinSize(ctx, nodes, templateNodeInfos)
 		}
-		_, scaleUpStatus, typedErr = a.instrumentedScaleUp(ctx, currentTime, scaleUpFn)
+
+		var minSizeScaleUpErr caerrors.AutoscalerError
+		_, scaleUpStatus, minSizeScaleUpErr = a.instrumentedScaleUp(ctx, currentTime, scaleUpFn)
+		if minSizeScaleUpErr != nil && scalingErr == nil {
+			scalingErr = minSizeScaleUpErr
+		}
+	}
+
+	// Might be an error from scale up, scale down or min size enforcement scale up.
+	// It doesn't make sense to block one of these scalings if any previous one is failed,
+	// but we still want to preserve the error if, for example, scale up fails, but all other scalings succeed.
+	// We return only the first received error, if there were multiple failed scalings,
+	// then they're already logged respectively.
+	if scalingErr != nil {
+		return scalingErr
 	}
 
 	return nil

@@ -67,6 +67,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupconfig"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroups/asyncnodegroups"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/scaledowncandidates"
+	scaleupstatus "sigs.k8s.io/cluster-autoscaler/pkg/processors/status"
 	processorstest "sigs.k8s.io/cluster-autoscaler/pkg/processors/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
@@ -199,6 +200,56 @@ func (p *scaleDownStatusProcessorMock) Process(ctx context.Context, _ *ca_contex
 }
 
 func (p *scaleDownStatusProcessorMock) CleanUp() {
+}
+
+type scaleUpOrchestratorMock struct {
+	scaleUpStatus        *scaleupstatus.ScaleUpStatus
+	scaleUpErr           errors.AutoscalerError
+	minSizeScaleUpStatus *scaleupstatus.ScaleUpStatus
+	minSizeScaleUpErr    errors.AutoscalerError
+	scaleUpCalls         int
+	minSizeScaleUpCalls  int
+}
+
+func (o *scaleUpOrchestratorMock) Initialize(*ca_context.AutoscalingContext, *ca_processors.AutoscalingProcessors, *clusterstate.ClusterStateRegistry, estimator.EstimatorBuilder, taints.TaintConfig, *resourcequotas.TrackerFactory) {
+}
+
+func (o *scaleUpOrchestratorMock) ScaleUp(context.Context, []*apiv1.Pod, []*apiv1.Node, []*appsv1.DaemonSet, map[string]*framework.NodeInfo, bool) (*scaleupstatus.ScaleUpStatus, errors.AutoscalerError) {
+	o.scaleUpCalls++
+	return o.scaleUpStatus, o.scaleUpErr
+}
+
+func (o *scaleUpOrchestratorMock) ScaleUpToNodeGroupMinSize(context.Context, []*apiv1.Node, map[string]*framework.NodeInfo) (*scaleupstatus.ScaleUpStatus, errors.AutoscalerError) {
+	o.minSizeScaleUpCalls++
+	return o.minSizeScaleUpStatus, o.minSizeScaleUpErr
+}
+
+type scaleDownPlannerMock struct {
+	updateErr   errors.AutoscalerError
+	updateCalls int
+}
+
+func (p *scaleDownPlannerMock) UpdateClusterState(context.Context, []*apiv1.Node, []*apiv1.Node, scaledown.ActuationStatus, time.Time) errors.AutoscalerError {
+	p.updateCalls++
+	return p.updateErr
+}
+
+func (p *scaleDownPlannerMock) CleanUpUnneededNodes(context.Context) {}
+
+func (p *scaleDownPlannerMock) NodesToDelete(context.Context, time.Time) ([]*apiv1.Node, []*apiv1.Node) {
+	return nil, nil
+}
+
+func (p *scaleDownPlannerMock) UnneededNodes() []*scaledown.UnneededNode {
+	return nil
+}
+
+func (p *scaleDownPlannerMock) UnremovableNodes() []*simulator.UnremovableNode {
+	return nil
+}
+
+func (p *scaleDownPlannerMock) NodeUtilizationMap() map[string]utilization.Info {
+	return nil
 }
 
 type fakeAllObjectsLister[T any] struct {
@@ -361,6 +412,102 @@ func setupAutoscaler(config *autoscalerSetupConfig) (*StaticAutoscaler, error) {
 	}
 
 	return autoscaler, nil
+}
+
+func TestStaticAutoscalerRunOnceContinuesScalingAfterError(t *testing.T) {
+	scaleUpErr := errors.NewAutoscalerError(errors.InternalError, "scale up failed")
+	scaleDownErr := errors.NewAutoscalerError(errors.ApiCallError, "scale down failed")
+
+	testCases := []struct {
+		name                string
+		scaleUpStatus       *scaleupstatus.ScaleUpStatus
+		scaleUpErr          errors.AutoscalerError
+		scaleDownErr        errors.AutoscalerError
+		expectedReturnedErr errors.AutoscalerError
+	}{
+		{
+			name:                "scale up failure does not block scale down",
+			scaleUpStatus:       &scaleupstatus.ScaleUpStatus{Result: scaleupstatus.ScaleUpError},
+			scaleUpErr:          scaleUpErr,
+			expectedReturnedErr: scaleUpErr,
+		},
+		{
+			name:                "scale down failure does not block min size enforcement",
+			scaleUpStatus:       &scaleupstatus.ScaleUpStatus{Result: scaleupstatus.ScaleUpSuccessful},
+			scaleDownErr:        scaleDownErr,
+			expectedReturnedErr: scaleDownErr,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			node := BuildTestNode("n1", 1000, 1000)
+			SetNodeReadyState(node, true, now)
+			unschedulablePod := BuildTestPod("p1", 2000, 100, MarkUnschedulable())
+			unschedulablePod.CreationTimestamp = metav1.NewTime(now.Add(-time.Hour))
+
+			mocks := newCommonMocks()
+			mocks.readyNodeLister.SetNodes([]*apiv1.Node{node})
+			mocks.allNodeLister.SetNodes([]*apiv1.Node{node})
+			mocks.allPodLister.On("List").Return([]*apiv1.Pod{unschedulablePod}, nil).Once()
+			mocks.daemonSetLister.On("List", labels.Everything()).Return([]*appsv1.DaemonSet{}, nil).Once()
+			mocks.podDisruptionBudgetLister.On("List").Return([]*policyv1.PodDisruptionBudget{}, nil).Once()
+
+			setupConfig := &autoscalerSetupConfig{
+				nodeGroups: []*nodeGroup{{
+					name:     "ng1",
+					nodes:    []*apiv1.Node{node},
+					template: framework.NewTestNodeInfo(BuildTestNode("template", 1000, 1000)),
+					min:      1,
+					max:      10,
+				}},
+				nodeStateUpdateTime: now,
+				autoscalingOptions: config.AutoscalingOptions{
+					NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+						ScaleDownUnneededTime:         time.Minute,
+						ScaleDownUnreadyTime:          time.Minute,
+						ScaleDownUtilizationThreshold: 0.5,
+						MaxNodeProvisionTime:          10 * time.Second,
+					},
+					EstimatorName:                  estimator.BinpackingEstimatorName,
+					EnforceNodeGroupMinSize:        true,
+					ScaleDownEnabled:               true,
+					MaxNodesTotal:                  10,
+					MaxCoresTotal:                  10,
+					MaxMemoryTotal:                 100000,
+					MaxNodeGroupBinpackingDuration: time.Second,
+				},
+				clusterStateConfig: clusterstate.ClusterStateRegistryConfig{OkTotalUnreadyCount: 1},
+				mocks:              mocks,
+				nodesDeleted:       make(chan bool, 1),
+			}
+
+			autoscaler, err := setupAutoscaler(setupConfig)
+			if !assert.NoError(t, err) {
+				return
+			}
+			autoscaler.initialized = true
+
+			scaleUpOrchestrator := &scaleUpOrchestratorMock{
+				scaleUpStatus:        tc.scaleUpStatus,
+				scaleUpErr:           tc.scaleUpErr,
+				minSizeScaleUpStatus: &scaleupstatus.ScaleUpStatus{Result: scaleupstatus.ScaleUpNotNeeded},
+			}
+			scaleDownPlanner := &scaleDownPlannerMock{updateErr: tc.scaleDownErr}
+			autoscaler.scaleUpOrchestrator = scaleUpOrchestrator
+			autoscaler.scaleDownPlanner = scaleDownPlanner
+			autoscaler.processorCallbacks.scaleDownPlanner = scaleDownPlanner
+
+			err = autoscaler.RunOnce(t.Context(), now)
+
+			assert.Equal(t, tc.expectedReturnedErr, err)
+			assert.Equal(t, 1, scaleUpOrchestrator.scaleUpCalls)
+			assert.Equal(t, 1, scaleDownPlanner.updateCalls)
+			assert.Equal(t, 1, scaleUpOrchestrator.minSizeScaleUpCalls)
+			mock.AssertExpectationsForObjects(t, mocks.allPodLister, mocks.daemonSetLister, mocks.podDisruptionBudgetLister)
+		})
+	}
 }
 
 // TODO: Refactor tests to use setupAutoscaler
