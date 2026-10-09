@@ -166,14 +166,25 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 	}
 	// Execute scale up.
 	logger.V(1).Info("Final scale-up plan", "scaleUpInfos", plan.scaleUpInfos)
-	aErr, failedNodeGroups := o.scaleUpExecutor.ExecuteScaleUps(ctx, plan.scaleUpInfos, now, allOrNothing)
+	aErr, failedNodeGroups, failedResizeErrors := o.scaleUpExecutor.ExecuteScaleUps(ctx, plan.scaleUpInfos, now, allOrNothing)
 	if aErr != nil {
 		failedGroupsMap := o.buildFailedGroupsMap(failedNodeGroups, plan.scaleUpInfos)
+		var successfulScaleUps []nodegroupset.ScaleUpInfo
+		for _, scaleUpInfo := range plan.scaleUpInfos {
+			if !failedGroupsMap[scaleUpInfo.Group.Id()] {
+				successfulScaleUps = append(successfulScaleUps, scaleUpInfo)
+			}
+		}
+		if len(successfulScaleUps) > 0 {
+			o.clusterStateRegistry.Recalculate(ctx)
+		}
 		markedEquivalenceGroups := markFailedGroupsAsUnschedulable(podEquivalenceGroups, failedGroupsMap, ScaleUpExecutionErrorReason)
 		return status.UpdateScaleUpError(
 			&status.ScaleUpStatus{
+				ScaleUpInfos:            successfulScaleUps,
 				CreateNodeGroupResults:  plan.createNodeGroupResults,
 				FailedResizeNodeGroups:  failedNodeGroups,
+				FailedResizeErrors:      failedResizeErrors,
 				PodsTriggeredScaleUp:    plan.bestOption.Pods,
 				PodsRemainUnschedulable: o.GetRemainingPods(ctx, markedEquivalenceGroups, plan.nodeGroups, skippedNodeGroups, nodeInfos),
 			},
@@ -292,11 +303,12 @@ func (o *ScaleUpOrchestrator) ScaleUpToNodeGroupMinSize(
 		return &status.ScaleUpStatus{Result: status.ScaleUpNotNeeded}, nil
 	}
 	logger.V(1).Info("ScaleUpToNodeGroupMinSize: final scale-up plan", "scaleUpInfos", scaleUpInfos)
-	aErr, failedNodeGroups := o.scaleUpExecutor.ExecuteScaleUps(ctx, scaleUpInfos, now, false /* allOrNothing disabled */)
+	aErr, failedNodeGroups, failedResizeErrors := o.scaleUpExecutor.ExecuteScaleUps(ctx, scaleUpInfos, now, false /* allOrNothing disabled */)
 	if aErr != nil {
 		return status.UpdateScaleUpError(
 			&status.ScaleUpStatus{
 				FailedResizeNodeGroups: failedNodeGroups,
+				FailedResizeErrors:     failedResizeErrors,
 			},
 			aErr,
 		)
@@ -1048,6 +1060,7 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 	logger := klog.FromContext(ctx)
 	schedulablePodGroups := map[string][]estimator.PodEquivalenceGroup{}
 	var options []expander.Option
+	rejectedForAllOrNothing := false
 
 	// This code here runs a simulation to see which pods can be scheduled on which node groups.
 	for _, nodeGroup := range args.validNodeGroups {
@@ -1061,6 +1074,7 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 		if len(option.Pods) == 0 || option.NodeCount == 0 {
 			logger.V(4).Info("No pod can fit to node group", "nodeGroupId", nodeGroup.Id())
 		} else if args.allOrNothing && len(option.Pods) < len(args.unschedulablePods) {
+			rejectedForAllOrNothing = true
 			logger.V(4).Info("Some pods can't fit to node group, giving up due to all-or-nothing scale-up strategy", "nodeGroupId", nodeGroup.Id())
 		} else {
 			options = append(options, option)
@@ -1075,6 +1089,9 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 	o.processors.BinpackingLimiter.FinalizeBinpacking(o.autoscalingCtx, options)
 
 	if len(options) == 0 {
+		if rejectedForAllOrNothing {
+			return scaleUpPlan{}, o.abortAllOrNothing(ctx, args), nil
+		}
 		logger.V(1).Info("No expansion options")
 		args.podEquivalenceGroups = markAllGroupsAsUnschedulable(args.podEquivalenceGroups, NoScaleUpOptionsAvailableReason)
 		return scaleUpPlan{}, o.noOptionsAvailableStatus(ctx, args), nil
@@ -1170,7 +1187,9 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 	if totalCapacity < newNodes {
 		logger.V(1).Info("Cannot add all needed nodes due to node group limits", "totalCapacity", totalCapacity, "nodeCount", newNodes)
 		if args.allOrNothing {
-			return scaleUpPlan{}, o.abortAllOrNothing(ctx, args), nil
+			st := o.abortAllOrNothing(ctx, args)
+			st.CreateNodeGroupResults = createNodeGroupResults
+			return scaleUpPlan{}, st, nil
 		}
 	}
 

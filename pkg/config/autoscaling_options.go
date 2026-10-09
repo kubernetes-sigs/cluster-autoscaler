@@ -327,6 +327,23 @@ type AutoscalingOptions struct {
 	CheckCapacityProvisioningRequestMaxBatchSize int
 	// CheckCapacityProvisioningRequestBatchTimebox is the maximum time to spend processing a batch of provisioning requests
 	CheckCapacityProvisioningRequestBatchTimebox time.Duration
+	// BestEffortAtomicBatchProcessing is used to enable/disable batch processing of the best-effort-atomic provisioning class.
+	// Compatible requests share an all-or-nothing capacity calculation; smaller sets of whole requests are retried if it doesn't fit.
+	BestEffortAtomicBatchProcessing bool
+	// BestEffortAtomicProvisioningRequestMaxBatchSize is the maximum number of best-effort-atomic provisioning requests to process in a single batch
+	BestEffortAtomicProvisioningRequestMaxBatchSize int
+	// BestEffortAtomicProvisioningRequestMaxBatchAttempts is the maximum number of scale-up attempts, each with fewer
+	// requests than the last, for one batch of best-effort-atomic provisioning requests in a single iteration.
+	BestEffortAtomicProvisioningRequestMaxBatchAttempts int
+	// BestEffortAtomicProvisioningRequestMaxResizeAttempts is the maximum number of those attempts that may end in a
+	// resize the cloud provider rejected.
+	BestEffortAtomicProvisioningRequestMaxResizeAttempts int
+	// BestEffortAtomicProvisioningRequestBatchTimebox is the time after which no new attempt starts for a batch of
+	// best-effort-atomic provisioning requests in an iteration.
+	BestEffortAtomicProvisioningRequestBatchTimebox time.Duration
+	// BestEffortAtomicProvisioningRequestBatchSizeTTL is how long a reduced size of best-effort-atomic batches is
+	// remembered after the batch that last reduced it.
+	BestEffortAtomicProvisioningRequestBatchSizeTTL time.Duration
 	// ForceDeleteLongUnregisteredNodes is used to enable/disable ignoring min size constraints during removal of long unregistered nodes
 	ForceDeleteLongUnregisteredNodes bool
 	// ForceDeleteFailedNodes is used to enable/disable ignoring min size constraints during removal of failed nodes

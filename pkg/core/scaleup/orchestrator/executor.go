@@ -55,14 +55,14 @@ func newScaleUpExecutor(
 
 // ExecuteScaleUps executes the scale ups, based on the provided scale up infos and options.
 // May scale up groups concurrently when autoscler option is enabled.
-// In case of issues returns an error and a scale up info which failed to execute.
-// If there were multiple concurrent errors one combined error is returned.
+// Returns a combined error, the groups whose resizes failed, and their individual errors.
+// Unattempted resizes never have an entry in the error map.
 func (e *scaleUpExecutor) ExecuteScaleUps(
 	ctx context.Context,
 	scaleUpInfos []nodegroupset.ScaleUpInfo,
 	now time.Time,
 	atomic bool,
-) (errors.AutoscalerError, []cloudprovider.NodeGroup) {
+) (errors.AutoscalerError, []cloudprovider.NodeGroup, map[string]errors.AutoscalerError) {
 	options := e.autoscalingCtx.AutoscalingOptions
 	if options.ParallelScaleUp {
 		return e.executeScaleUpsParallel(ctx, scaleUpInfos, now, atomic)
@@ -75,13 +75,13 @@ func (e *scaleUpExecutor) executeScaleUpsSync(
 	scaleUpInfos []nodegroupset.ScaleUpInfo,
 	now time.Time,
 	atomic bool,
-) (errors.AutoscalerError, []cloudprovider.NodeGroup) {
+) (errors.AutoscalerError, []cloudprovider.NodeGroup, map[string]errors.AutoscalerError) {
 	for _, scaleUpInfo := range scaleUpInfos {
 		if aErr := e.executeScaleUp(ctx, scaleUpInfo, now, atomic); aErr != nil {
-			return aErr, []cloudprovider.NodeGroup{scaleUpInfo.Group}
+			return aErr, []cloudprovider.NodeGroup{scaleUpInfo.Group}, map[string]errors.AutoscalerError{scaleUpInfo.Group.Id(): aErr}
 		}
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 func (e *scaleUpExecutor) executeScaleUpsParallel(
@@ -89,9 +89,9 @@ func (e *scaleUpExecutor) executeScaleUpsParallel(
 	scaleUpInfos []nodegroupset.ScaleUpInfo,
 	now time.Time,
 	atomic bool,
-) (errors.AutoscalerError, []cloudprovider.NodeGroup) {
+) (errors.AutoscalerError, []cloudprovider.NodeGroup, map[string]errors.AutoscalerError) {
 	if err := checkUniqueNodeGroups(scaleUpInfos); err != nil {
-		return err, extractNodeGroups(scaleUpInfos)
+		return err, extractNodeGroups(scaleUpInfos), nil
 	}
 	type errResult struct {
 		err  errors.AutoscalerError
@@ -118,13 +118,15 @@ func (e *scaleUpExecutor) executeScaleUpsParallel(
 	if len(results) > 0 {
 		failedNodeGroups := make([]cloudprovider.NodeGroup, len(results))
 		scaleUpErrors := make([]errors.AutoscalerError, len(results))
+		failedResizeErrors := make(map[string]errors.AutoscalerError, len(results))
 		for i, result := range results {
 			failedNodeGroups[i] = result.info.Group
 			scaleUpErrors[i] = result.err
+			failedResizeErrors[result.info.Group.Id()] = result.err
 		}
-		return errors.Combine(scaleUpErrors), failedNodeGroups
+		return errors.Combine(scaleUpErrors), failedNodeGroups, failedResizeErrors
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 func (e *scaleUpExecutor) increaseSize(ctx context.Context, nodeGroup cloudprovider.NodeGroup, increase int, atomic bool) error {
