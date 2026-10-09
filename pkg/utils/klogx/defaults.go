@@ -35,7 +35,7 @@ const (
 
 // PodsLoggingQuota returns a new quota with default limit for pods at current verbosity.
 func PodsLoggingQuota() *Quota {
-	if klog.V(5).Enabled() {
+	if klogV := klog.V(5); klogV.Enabled() {
 		return NewLoggingQuota(MaxPodsLoggedV5)
 	}
 	return NewLoggingQuota(MaxPodsLogged)
@@ -43,7 +43,7 @@ func PodsLoggingQuota() *Quota {
 
 // NodesLoggingQuota returns a new quota with default limit for nodes at current verbosity.
 func NodesLoggingQuota() *Quota {
-	if klog.V(5).Enabled() {
+	if klogV := klog.V(5); klogV.Enabled() {
 		return NewLoggingQuota(MaxNodesLoggedV5)
 	}
 	return NewLoggingQuota(MaxNodesLogged)

@@ -108,7 +108,7 @@ func (p *GpuCustomResourcesProcessor) GetNodeGpuTarget(ctx context.Context, auto
 		// count. Exclude the node from GPU quota usage rather than blocking
 		// cluster-wide scale-ups. This can temporarily undercount GPU usage and
 		// allow overprovisioning.
-		klog.Warningf("Unable to determine physical GPU capacity for unmanaged node %q; excluding it from GPU quota usage", node.Name)
+		logger.Info("Unable to determine physical GPU capacity for unmanaged node; excluding it from GPU quota usage", "node", klog.KObj(node))
 		return CustomResourceTarget{}, nil
 	}
 

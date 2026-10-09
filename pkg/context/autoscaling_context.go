@@ -170,7 +170,7 @@ func NewAutoscalingKubeClients(ctx context.Context, opts config.AutoscalingOptio
 	kubeEventRecorder := kube_util.CreateEventRecorder(ctx, kubeClient, opts.RecordDuplicatedEvents)
 	logRecorder, err := utils.NewStatusMapRecorder(kubeClient, opts.ConfigNamespace, kubeEventRecorder, opts.WriteStatusConfigMap, opts.StatusConfigMapName)
 	if err != nil {
-		klog.Error("Failed to initialize status configmap, unable to write status events")
+		klog.ErrorS(err, "Failed to initialize status configmap, unable to write status events")
 		// Get a dummy, so we can at least safely call the methods
 		// TODO(maciekpytel): recover from this after successful status configmap update?
 		logRecorder, _ = utils.NewStatusMapRecorder(kubeClient, opts.ConfigNamespace, kubeEventRecorder, false, opts.StatusConfigMapName)

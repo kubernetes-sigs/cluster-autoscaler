@@ -218,7 +218,7 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 	if autoscalingOptions.CapacitybufferPodInjectionEnabled {
 		// Add CapacityBuffer types to the default scheme for event recording.
 		if err := cbv1beta1.AddToScheme(clientgoscheme.Scheme); err != nil {
-			klog.Warningf("Failed to add CapacityBuffer (v1beta1) to scheme: %v", err)
+			klog.ErrorS(err, "Failed to add CapacityBuffer (v1beta1) to scheme")
 		}
 		if capacitybufferClient == nil {
 			capacitybufferClient, capacitybufferClientError = capacityclient.NewCapacityBufferClientFromManager(b.manager)
@@ -283,7 +283,7 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 		// and so that a cluster not serving the API is reported at startup.
 		// The cache is not running yet, so this must not block.
 		if _, err := b.manager.GetCache().GetInformer(ctx, &schedulingv1beta1.PodGroup{}, cache.BlockUntilSynced(false)); err != nil {
-			klog.Errorf("PodGroup support is enabled, but PodGroups cannot be watched; nodes hosting gang pods will not be protected from scale-down: %v", err)
+			klog.ErrorS(err, "PodGroup support is enabled, but PodGroups cannot be watched; nodes hosting gang pods will not be protected from scale-down")
 		}
 	}
 	cp.Register(scaledowncandidates.NewScaleDownCandidatesSortingProcessor(scaleDownCandidatesComparers))
@@ -316,7 +316,7 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 
 	b.informerFactory.Start(ctx.Done())
 
-	klog.Info("Waiting for caches to sync...")
+	klog.InfoS("Waiting for caches to sync...")
 	synced := b.informerFactory.WaitForCacheSync(ctx.Done())
 	for _, ok := range synced {
 		if !ok {

@@ -72,8 +72,8 @@ func (m *resourceUtilizationMetric) computeResourceUtilization(clusterState Clus
 		ratio = totalRequested / totalAllocatable
 	}
 
-	klog.V(5).Infof("Metric: %s, Allocated: %.2f, Allocatable: %.2f, Ratio: %.2f",
-		m.Name(), totalRequested, totalAllocatable, ratio)
+	klog.V(5).InfoS("Computed resource utilization",
+		"metric", m.Name(), "allocated", totalRequested, "allocatable", totalAllocatable, "ratio", ratio)
 	return ratio, nil
 }
 

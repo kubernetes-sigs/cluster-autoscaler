@@ -151,7 +151,7 @@ func (a *Actuator) startDeletion(ctx context.Context, empty, drain []*apiv1.Node
 	for _, bucket := range bucketsToDelete {
 		croppedNodesCount += len(bucket.Nodes)
 	}
-	klog.FromContext(ctx).V(0).Info("Scale-down: selected nodes to scale down", "nodeCount", croppedNodesCount)
+	klog.FromContext(ctx).Info("Scale-down: selected nodes to scale down", "nodeCount", croppedNodesCount)
 	latencyTracker := a.scaledownDelayCalculator.startLatencyTracker(ctx, a.autoscalingCtx.AutoscalingKubeClients.ListerRegistry.AllNodeLister(), croppedNodesCount)
 	tainted, err := a.taintNodesSync(ctx, bucketsToDelete, latencyTracker)
 
@@ -167,7 +167,7 @@ func (a *Actuator) startDeletion(ctx context.Context, empty, drain []*apiv1.Node
 
 	go func() {
 		waitTime := a.scaledownDelayCalculator.computeDelay(ctx, latencyTracker)
-		klog.FromContext(ctx).V(0).Info("Scale-down: Waiting before removing tainted nodes", "nodeCount", len(scaledDownNodes), "waitTime", waitTime)
+		klog.FromContext(ctx).Info("Scale-down: Waiting before removing tainted nodes", "nodeCount", len(scaledDownNodes), "waitTime", waitTime)
 		time.Sleep(waitTime)
 		for _, bucket := range tainted.buckets {
 			go a.deleteNodesAsync(ctx, bucket, force)
@@ -187,11 +187,11 @@ func (a *Actuator) registerDeletions(ctx context.Context, views []*budgets.NodeG
 			reportedSDNodes = append(reportedSDNodes, sdNode)
 			if bucket.Drain {
 				podsToReschedule := joinPodNames(sdNode.EvictedPods)
-				logger.V(0).Info("Scale-down: removing node", "node", klog.KObj(node), "utilization", sdNode.UtilInfo, "podsToReschedule", podsToReschedule)
+				logger.Info("Scale-down: removing node", "node", klog.KObj(node), "utilization", sdNode.UtilInfo, "podsToReschedule", podsToReschedule)
 				a.autoscalingCtx.LogRecorder.Eventf(apiv1.EventTypeNormal, "ScaleDown", "Scale-down: removing node %s, utilization: %v, pods to reschedule: %s", node.Name, sdNode.UtilInfo, podsToReschedule)
 				a.nodeDeletionTracker.StartDeletionWithDrain(bucket.Group.Id(), node.Name)
 			} else {
-				logger.V(0).Info("Scale-down: removing empty node", "node", klog.KObj(node))
+				logger.Info("Scale-down: removing empty node", "node", klog.KObj(node))
 				a.autoscalingCtx.LogRecorder.Eventf(apiv1.EventTypeNormal, "ScaleDownEmpty", "Scale-down: removing empty node %q", node.Name)
 				a.nodeDeletionTracker.StartDeletion(bucket.Group.Id(), node.Name)
 			}

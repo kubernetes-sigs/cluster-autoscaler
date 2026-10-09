@@ -45,26 +45,30 @@ func GetKubeConfig(opts config.KubeClientOptions) *rest.Config {
 	var err error
 
 	if opts.KubeConfigPath != "" {
-		klog.V(1).Infof("Using kubeconfig file: %s", opts.KubeConfigPath)
+		klog.V(1).InfoS("Using kubeconfig file", "path", opts.KubeConfigPath)
 		// use the current context in kubeconfig
 		kubeConfig, err = clientcmd.BuildConfigFromFlags("", opts.KubeConfigPath)
 		if err != nil {
-			klog.Fatalf("%v: %v", failedToBuildConfigErr, err)
+			klog.ErrorS(err, failedToBuildConfigErr)
+			klog.FlushAndExit(klog.ExitFlushTimeout, 255)
 		}
 	} else if opts.Master != "" {
 		url, err := url.Parse(opts.Master)
 		if err != nil {
-			klog.Fatalf("%v: %v", failedToParseK8sUrlErr, err)
+			klog.ErrorS(err, failedToParseK8sUrlErr)
+			klog.FlushAndExit(klog.ExitFlushTimeout, 255)
 		}
 
 		kubeConfig, err = config.GetKubeClientConfig(url)
 		if err != nil {
-			klog.Fatalf("%v: %v", failedToBuildClientConfigErr, err)
+			klog.ErrorS(err, failedToBuildClientConfigErr)
+			klog.FlushAndExit(klog.ExitFlushTimeout, 255)
 		}
 	} else {
 		kubeConfig, err = rest.InClusterConfig()
 		if err != nil {
-			klog.Fatalf("%v: %v", failedToFindInClusterConfigErr, err)
+			klog.ErrorS(err, failedToFindInClusterConfigErr)
+			klog.FlushAndExit(klog.ExitFlushTimeout, 255)
 		}
 	}
 	kubeConfig.QPS = opts.KubeClientQPS

@@ -136,23 +136,23 @@ func (s *DebuggingSnapshotImpl) SetStartTimestamp(t time.Time) {
 func (s *DebuggingSnapshotImpl) GetOutputBytes() ([]byte, bool) {
 	errMsgSet := false
 	if s.Error != "" {
-		klog.Errorf("Debugging snapshot found with error message set when GetOutputBytes() is called: %v", s.Error)
+		klog.ErrorS(nil, "Debugging snapshot found with error message set when GetOutputBytes() is called", "snapshotError", s.Error)
 		errMsgSet = true
 	}
 
-	klog.Infof("Debugging snapshot flush ready")
+	klog.InfoS("Debugging snapshot flush ready")
 	marshalOutput, err := json.Marshal(s)
 
 	// this error captures if the snapshot couldn't be marshalled, hence we create a new object
 	// and return the error message
 	if err != nil {
-		klog.Errorf("Unable to json marshal the debugging snapshot: %v", err)
+		klog.ErrorS(err, "Unable to json marshal the debugging snapshot")
 		errorSnapshot := DebuggingSnapshotImpl{}
 		errorSnapshot.SetErrorMessage("Unable to marshal the snapshot, " + err.Error())
 		errorSnapshot.SetEndTimestamp(s.EndTimestamp)
 		errorSnapshot.SetStartTimestamp(s.StartTimestamp)
 		errorMarshal, err1 := json.Marshal(errorSnapshot)
-		klog.Errorf("Unable to marshal a new Debugging Snapshot Impl, with just a error message: %v", err1)
+		klog.ErrorS(err1, "Unable to marshal a new Debugging Snapshot Impl, with just a error message")
 		return errorMarshal, true
 	}
 

@@ -109,7 +109,7 @@ func (s *AsyncNodeGroupInitializer) ChangeTargetSize(nodeGroup string, delta int
 // node groups.
 func (s *AsyncNodeGroupInitializer) InitializeNodeGroup(result nodegroups.AsyncNodeGroupCreationResult) {
 	if result.Error != nil {
-		klog.Errorf("Async node group creation failed. Async scale-up is cancelled. %v", result.Error)
+		klog.ErrorS(result.Error, "Async node group creation failed. Async scale-up is cancelled.")
 		s.emitScaleUpStatus(&status.ScaleUpStatus{}, errors.ToAutoscalerError(errors.InternalError, result.Error))
 		return
 	}
@@ -117,18 +117,18 @@ func (s *AsyncNodeGroupInitializer) InitializeNodeGroup(result nodegroups.AsyncN
 	scaleUpInfos := s.prepareScaleUps(result)
 
 	if len(scaleUpInfos) == 0 {
-		klog.Infof("Scale-up for node group %s is already finished or no new scale-ups are needed.", s.nodeGroup.Id())
+		klog.InfoS("Scale-up for node group is already finished or no new scale-ups are needed.", "nodeGroupId", s.nodeGroup.Id())
 		return
 	}
 
-	klog.Infof("Starting scale-up for async created node groups. Scale ups: %v", scaleUpInfos)
+	klog.InfoS("Starting scale-up for async created node groups.", "scaleUps", nodegroupset.ScaleUpInfos(scaleUpInfos))
 	err, failedNodeGroups := s.scaleUpExecutor.ExecuteScaleUps(context.TODO(), scaleUpInfos, time.Now(), s.atomicScaleUp)
 	if err != nil {
 		var failedNodeGroupIds []string
 		for _, failedNodeGroup := range failedNodeGroups {
 			failedNodeGroupIds = append(failedNodeGroupIds, failedNodeGroup.Id())
 		}
-		klog.Errorf("Async scale-up for asynchronously created node group failed: %v (node groups: %v)", err, failedNodeGroupIds)
+		klog.ErrorS(err, "Async scale-up for asynchronously created node group failed", "nodeGroupIds", failedNodeGroupIds)
 		s.emitScaleUpStatus(&status.ScaleUpStatus{
 			CreateNodeGroupResults: []nodegroups.CreateNodeGroupResult{result.CreationResult},
 			FailedResizeNodeGroups: failedNodeGroups,
@@ -136,7 +136,7 @@ func (s *AsyncNodeGroupInitializer) InitializeNodeGroup(result nodegroups.AsyncN
 		}, err)
 		return
 	}
-	klog.Infof("Initial scale-up succeeded. Scale ups: %v", scaleUpInfos)
+	klog.InfoS("Initial scale-up succeeded.", "scaleUps", nodegroupset.ScaleUpInfos(scaleUpInfos))
 	s.emitScaleUpStatus(&status.ScaleUpStatus{
 		Result:                 status.ScaleUpSuccessful,
 		ScaleUpInfos:           scaleUpInfos,
@@ -154,7 +154,7 @@ func (s *AsyncNodeGroupInitializer) prepareScaleUps(result nodegroups.AsyncNodeG
 	for _, nodeGroup := range result.CreationResult.AllCreatedNodeGroups() {
 		upcomingId, ok := result.CreatedToUpcomingMapping[nodeGroup.Id()]
 		if !ok {
-			klog.Errorf("Couldn't retrieve initialization data for new node group %v. It won't get initialized. Available created to upcoming node group mapping: %v", nodeGroup.Id(), result.CreatedToUpcomingMapping)
+			klog.ErrorS(nil, "Couldn't retrieve initialization data for new node group. It won't get initialized.", "nodeGroupId", nodeGroup.Id(), "createdToUpcomingMapping", result.CreatedToUpcomingMapping)
 			continue
 		}
 		targetSize := s.allTargetSizes[upcomingId]

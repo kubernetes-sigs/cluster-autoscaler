@@ -80,13 +80,13 @@ func (e *List) registerElementsFrom(list []int) {
 func (e *List) equals(want []int) bool {
 	got := e.ToSlice()
 	if len(got) != len(want) {
-		klog.Errorf("len(%v) != len(%v)", got, want)
+		klog.ErrorS(nil, "List lengths differ", "got", got, "want", want)
 		return false
 	}
 	for i, g := range got {
 		w := want[i]
 		if g.(int) != w {
-			klog.Errorf("%v != %v (difference at index %v)", got, want, i)
+			klog.ErrorS(nil, "Lists differ", "got", got, "want", want, "index", i)
 			return false
 		}
 	}

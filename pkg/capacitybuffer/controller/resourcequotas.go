@@ -70,18 +70,18 @@ func (r *resourceQuotaAllocator) Allocate(namespace string, buffers []*v1.Capaci
 	for _, buffer := range buffers {
 		if buffer.Namespace != namespace {
 			// should not happen, as buffers are filtered by the namespace in the controller
-			klog.Warningf("resourceQuotaAllocator: buffer %q namespace mismatch: %q, expected: %q", buffer.Name, buffer.Namespace, namespace)
+			klog.ErrorS(nil, "resourceQuotaAllocator: buffer namespace mismatch", "buffer", klog.KObj(buffer), "expectedNamespace", namespace)
 			continue
 		}
 		// Skip buffers that are not ready for provisioning or have no replicas
 		if buffer.Status.PodTemplateRef == nil || buffer.Status.PodTemplateGeneration == nil || buffer.Status.Replicas == nil {
-			klog.V(4).Infof("resourceQuotaAllocator: Skipping buffer %s (not ready or no replicas)", buffer.Name)
+			klog.V(4).InfoS("resourceQuotaAllocator: Skipping buffer, not ready or no replicas", "buffer", klog.KObj(buffer))
 			continue
 		}
 
 		podTemplate, err := r.client.GetPodTemplate(buffer.Namespace, buffer.Status.PodTemplateRef.Name)
 		if err != nil {
-			klog.V(4).Infof("resourceQuotaAllocator: Skipping buffer %s (pod template not found)", buffer.Name)
+			klog.V(4).InfoS("resourceQuotaAllocator: Skipping buffer, pod template not found", "buffer", klog.KObj(buffer))
 			continue
 		}
 		pod := podutils.GetPodFromTemplate(&podTemplate.Template)
@@ -118,7 +118,7 @@ func (r *resourceQuotaAllocator) Allocate(namespace string, buffers []*v1.Capaci
 		}
 
 		if allowedReplicas < currentReplicas {
-			klog.V(4).Infof("resourceQuotaAllocator: Limiting buffer %s from %d to %d due to quotas: %v", buffer.Name, currentReplicas, allowedReplicas, blockingQuotas)
+			klog.V(4).InfoS("resourceQuotaAllocator: Limiting buffer due to quotas", "buffer", klog.KObj(buffer), "currentReplicas", currentReplicas, "allowedReplicas", allowedReplicas, "blockingQuotas", blockingQuotas)
 			common.MarkBufferAsLimitedByQuota(buffer, currentReplicas, allowedReplicas, blockingQuotas)
 		} else {
 			common.UpdateBufferStatusLimitedByQuotas(buffer, false, "")
