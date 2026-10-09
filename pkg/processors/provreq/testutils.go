@@ -21,10 +21,18 @@ import (
 
 	"k8s.io/utils/clock/testing"
 	"k8s.io/utils/lru"
+	provreqpods "sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/pods"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqclient"
 )
 
-// NewFakePodsInjector creates a new instance of ProvisioningRequestPodsInjector with the given client and clock for testing.
-func NewFakePodsInjector(client *provreqclient.ProvisioningRequestClient, clock *testing.FakePassiveClock) *ProvisioningRequestPodsInjector {
-	return &ProvisioningRequestPodsInjector{initialRetryTime: 1 * time.Minute, maxBackoffTime: 10 * time.Minute, backoffDuration: lru.New(1000), client: client, clock: clock}
+// NewFakePodsInjector creates a ProvisioningRequestPodsInjector with the given test dependencies.
+func NewFakePodsInjector(client *provreqclient.ProvisioningRequestClient, clock *testing.FakePassiveClock, simulationWorkloadBuilder *provreqpods.SimulationWorkloadBuilder) *ProvisioningRequestPodsInjector {
+	return &ProvisioningRequestPodsInjector{
+		initialRetryTime:          time.Minute,
+		maxBackoffTime:            10 * time.Minute,
+		backoffDuration:           lru.New(1000),
+		client:                    client,
+		clock:                     clock,
+		simulationWorkloadBuilder: simulationWorkloadBuilder,
+	}
 }
