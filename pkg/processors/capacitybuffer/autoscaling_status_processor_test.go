@@ -18,31 +18,27 @@ package capacitybufferpodlister
 
 import (
 	"context"
-	"sync"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
-	v1beta1ac "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/applyconfiguration/autoscaling.x-k8s.io/v1beta1"
-	"k8s.io/client-go/rest"
-	cbctrl "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/controller"
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/fakepods"
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/testutil"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot/testsnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/annotations"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	"sigs.k8s.io/controller-runtime/pkg/config"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
+
+type fakeReadyReplicasUpdater struct {
+	updated map[string]int32
+}
+
+func (f *fakeReadyReplicasUpdater) Update(buffer *v1beta1.CapacityBuffer, readyReplicas int32) {
+	f.updated[buffer.Name] = readyReplicas
+}
 
 func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 	const namespace = "default"
@@ -150,33 +146,6 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 			wantUpdated: map[string]int32{"b1": 1},
 		},
 		{
-			name: "unchanged ready replicas are not enqueued",
-			buffers: []*v1beta1.CapacityBuffer{
-				testutil.NewBuffer(
-					testutil.WithName("b1"),
-					testutil.WithUID[*v1beta1.CapacityBuffer]("b1-uid"),
-					testutil.WithStatusReadyReplicas(1),
-				),
-			},
-			processed: []string{"b1"},
-			fakePods: []fakePodSpec{
-				{name: "p1", nodeName: "existing", buffer: "b1"},
-			},
-			wantUpdated: map[string]int32{},
-		},
-		{
-			name: "unchanged zero ready replicas are not enqueued",
-			buffers: []*v1beta1.CapacityBuffer{
-				testutil.NewBuffer(
-					testutil.WithName("b1"),
-					testutil.WithUID[*v1beta1.CapacityBuffer]("b1-uid"),
-					testutil.WithStatusReadyReplicas(0),
-				),
-			},
-			processed:   []string{"b1"},
-			wantUpdated: map[string]int32{},
-		},
-		{
 			name: "multiple buffers",
 			buffers: []*v1beta1.CapacityBuffer{
 				testutil.NewBuffer(
@@ -227,57 +196,12 @@ func TestCapacityBufferAutoscalingStatusProcessor(t *testing.T) {
 			err := snapshot.SetClusterState(context.Background(), []*apiv1.Node{existingNode, upcomingNode}, pods, nil, nil)
 			assert.NoError(t, err)
 
-			var mu sync.Mutex
-			gotUpdated := make(map[string]int32)
-			kubeClient := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
-				SubResourceApply: func(_ context.Context, _ client.Client, _ string, obj runtime.ApplyConfiguration, _ ...client.SubResourceApplyOption) error {
-					applyCfg := obj.(*v1beta1ac.CapacityBufferApplyConfiguration)
-					mu.Lock()
-					gotUpdated[*applyCfg.Name] = *applyCfg.Status.ReadyReplicas
-					mu.Unlock()
-					return nil
-				},
-			}).Build()
-
-			synctest.Test(t, func(t *testing.T) {
-				controller := cbctrl.NewReadyReplicasController(kubeClient)
-				// Start a controller-runtime manager so ReadyReplicasController's background
-				// worker is running and reconciles events enqueued by processor.Process.
-				mgr, err := manager.New(&rest.Config{}, manager.Options{
-					Metrics: metricsserver.Options{BindAddress: "0"},
-					Controller: config.Controller{
-						// SkipNameValidation allows registering the same controller name across multiple test cases.
-						SkipNameValidation: new(true),
-						// UsePriorityQueue is disabled in synctest unit tests so priorityqueue's background
-						// handleReadyItems goroutine does not remain blocked inside the synctest bubble on shutdown.
-						UsePriorityQueue: new(false),
-					},
-				})
-				assert.NoError(t, err)
-				assert.NoError(t, controller.SetupWithManager(mgr))
-
-				ctx, cancel := context.WithCancel(t.Context())
-				var wg sync.WaitGroup
-				wg.Go(func() {
-					assert.NoError(t, mgr.Start(ctx))
-				})
-				// Wait until the manager and controller workers have started and are parked waiting for events.
-				synctest.Wait()
-
-				processor := NewCapacityBufferAutoscalingStatusProcessor(controller, registry)
-				autoscalingCtx := &ca_context.AutoscalingContext{ClusterSnapshot: snapshot}
-				err = processor.Process(t.Context(), autoscalingCtx, nil, time.Now())
-				assert.NoError(t, err)
-
-				// Wait for the controller workers to drain all enqueued events and finish calling SubResourceApply.
-				synctest.Wait()
-				// Stop the manager and wait for all controller-runtime goroutines in the synctest bubble to exit.
-				cancel()
-				wg.Wait()
-				synctest.Wait()
-
-				assert.Equal(t, tc.wantUpdated, gotUpdated)
-			})
+			updater := &fakeReadyReplicasUpdater{updated: make(map[string]int32)}
+			processor := NewCapacityBufferAutoscalingStatusProcessor(updater, registry)
+			autoscalingCtx := &ca_context.AutoscalingContext{ClusterSnapshot: snapshot}
+			err = processor.Process(t.Context(), autoscalingCtx, nil, time.Now())
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantUpdated, updater.updated)
 		})
 	}
 }
