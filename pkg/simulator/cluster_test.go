@@ -21,14 +21,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/pdb"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot/testsnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/options"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/drain"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 )
@@ -233,6 +238,247 @@ func TestSimulateNodeRemoval(t *testing.T) {
 			toRemove, unremovable := r.SimulateNodeRemoval(context.Background(), test.nodeName, destinations, time.Now(), nil)
 			assert.Equal(t, test.toRemove, toRemove)
 			assert.Equal(t, test.unremovable, unremovable)
+		})
+	}
+}
+
+func TestSimulateNodeGroupRemoval(t *testing.T) {
+	node1 := BuildTestNode("n1", 1000, 2000000)
+	node2 := BuildTestNode("n2", 1000, 2000000)
+	destNode := BuildTestNode("dest", 2000, 4000000)
+
+	SetNodeReadyState(node1, true, time.Time{})
+	SetNodeReadyState(node2, true, time.Time{})
+	SetNodeReadyState(destNode, true, time.Time{})
+
+	replicas := int32(5)
+	replicaSets := []*appsv1.ReplicaSet{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "rs",
+				Namespace: "default",
+			},
+			Spec: appsv1.ReplicaSetSpec{
+				Replicas: &replicas,
+			},
+		},
+	}
+	rsLister, err := kube_util.NewTestReplicaSetLister(replicaSets)
+	assert.NoError(t, err)
+	registry := kube_util.NewListerRegistry(nil, nil, nil, nil, nil, nil, nil, rsLister, nil)
+	ownerRefs := GenerateOwnerReferences("rs", "ReplicaSet", "extensions/v1beta1", "")
+
+	pod1 := BuildTestPod("pod1", 100, 100000)
+	pod1.OwnerReferences = ownerRefs
+	pod1.Spec.NodeName = node1.Name
+
+	pod2 := BuildTestPod("pod2", 100, 100000)
+	pod2.OwnerReferences = ownerRefs
+	pod2.Spec.NodeName = node2.Name
+
+	podUnmovable := BuildTestPod("pod-unmovable", 100, 100000)
+	podUnmovable.Spec.NodeName = node2.Name
+
+	pdbLabels := map[string]string{"app": "pdb-protected"}
+	pdbPod1 := BuildTestPod("pdb-pod1", 100, 100000)
+	pdbPod1.OwnerReferences = ownerRefs
+	pdbPod1.Labels = pdbLabels
+	pdbPod1.Spec.NodeName = node1.Name
+
+	pdbPod2 := BuildTestPod("pdb-pod2", 100, 100000)
+	pdbPod2.OwnerReferences = ownerRefs
+	pdbPod2.Labels = pdbLabels
+	pdbPod2.Spec.NodeName = node2.Name
+
+	pdbWithDisruptionsAllowed := func(allowed int32) []*policyv1.PodDisruptionBudget {
+		return []*policyv1.PodDisruptionBudget{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "pdb", Namespace: "default"},
+				Spec: policyv1.PodDisruptionBudgetSpec{
+					Selector: &metav1.LabelSelector{MatchLabels: pdbLabels},
+				},
+				Status: policyv1.PodDisruptionBudgetStatus{DisruptionsAllowed: allowed},
+			},
+		}
+	}
+
+	testCases := []struct {
+		name                    string
+		groupNodes              []string
+		pods                    []*apiv1.Pod
+		pdbs                    []*policyv1.PodDisruptionBudget
+		initialDestinations     map[string]bool
+		wantUnremovable         bool
+		wantUnremovableNode     string
+		wantRemovableLen        int
+		wantDestinations        map[string]bool
+		wantBlockingReason      drain.BlockingPodReason
+		wantRisky               []bool
+		wantDisruptionsAllowed  *int32
+		wantSnapshotPodCounts   map[string]int
+		wantRemovedFromSnapshot []string
+		cancelCtx               bool
+		wantErr                 error
+	}{
+		{
+			name:                    "all nodes in group removable",
+			groupNodes:              []string{"n1", "n2"},
+			pods:                    []*apiv1.Pod{pod1, pod2},
+			initialDestinations:     map[string]bool{"dest": true, "n1": true, "n2": true},
+			wantUnremovable:         false,
+			wantRemovableLen:        2,
+			wantDestinations:        map[string]bool{"dest": true},
+			wantSnapshotPodCounts:   map[string]int{"dest": 2},
+			wantRemovedFromSnapshot: []string{"n1", "n2"},
+		},
+		{
+			name:                "node in group unremovable rolls back destinations and snapshot",
+			groupNodes:          []string{"n1", "n2"},
+			pods:                []*apiv1.Pod{pod1, podUnmovable},
+			initialDestinations: map[string]bool{"dest": true, "n1": true, "n2": true},
+			wantUnremovable:     true,
+			wantUnremovableNode: "n2",
+			// destinations should be rolled back to their original state
+			wantDestinations: map[string]bool{"dest": true, "n1": true, "n2": true},
+			// pod1 placement on dest and n1 removal, persisted when simulating n1, should be rolled back
+			wantSnapshotPodCounts: map[string]int{"dest": 0, "n1": 1, "n2": 1},
+		},
+		{
+			name:                "empty group succeeds with empty result",
+			groupNodes:          []string{},
+			pods:                []*apiv1.Pod{pod1, pod2},
+			initialDestinations: map[string]bool{"dest": true, "n1": true, "n2": true},
+			wantUnremovable:     false,
+			wantDestinations:    map[string]bool{"dest": true, "n1": true, "n2": true},
+		},
+		{
+			name:                   "PDB budget sufficient for the whole group, all nodes removable and not risky",
+			groupNodes:             []string{"n1", "n2"},
+			pods:                   []*apiv1.Pod{pdbPod1, pdbPod2},
+			pdbs:                   pdbWithDisruptionsAllowed(2),
+			initialDestinations:    map[string]bool{"dest": true, "n1": true, "n2": true},
+			wantUnremovable:        false,
+			wantRemovableLen:       2,
+			wantDestinations:       map[string]bool{"dest": true},
+			wantRisky:              []bool{false, false},
+			wantDisruptionsAllowed: ptr.To[int32](0),
+		},
+		{
+			name:                   "PDB budget exhausted before simulation, first node is blocked",
+			groupNodes:             []string{"n1", "n2"},
+			pods:                   []*apiv1.Pod{pdbPod1, pdbPod2},
+			pdbs:                   pdbWithDisruptionsAllowed(0),
+			initialDestinations:    map[string]bool{"dest": true, "n1": true, "n2": true},
+			wantUnremovable:        true,
+			wantUnremovableNode:    "n1",
+			wantDestinations:       map[string]bool{"dest": true, "n1": true, "n2": true},
+			wantBlockingReason:     drain.NotEnoughPdb,
+			wantDisruptionsAllowed: ptr.To[int32](0),
+		},
+		{
+			name:                   "PDB budget exhausted by sibling node in the group, second node is removable but risky",
+			groupNodes:             []string{"n1", "n2"},
+			pods:                   []*apiv1.Pod{pdbPod1, pdbPod2},
+			pdbs:                   pdbWithDisruptionsAllowed(1),
+			initialDestinations:    map[string]bool{"dest": true, "n1": true, "n2": true},
+			wantUnremovable:        false,
+			wantRemovableLen:       2,
+			wantDestinations:       map[string]bool{"dest": true},
+			wantRisky:              []bool{false, true},
+			wantDisruptionsAllowed: ptr.To[int32](-1),
+		},
+		{
+			name:                   "PDB budget consumed by a node in the group is rolled back when another node is unremovable",
+			groupNodes:             []string{"n1", "n2"},
+			pods:                   []*apiv1.Pod{pdbPod1, podUnmovable},
+			pdbs:                   pdbWithDisruptionsAllowed(1),
+			initialDestinations:    map[string]bool{"dest": true, "n1": true, "n2": true},
+			wantUnremovable:        true,
+			wantUnremovableNode:    "n2",
+			wantDestinations:       map[string]bool{"dest": true, "n1": true, "n2": true},
+			wantDisruptionsAllowed: ptr.To[int32](1),
+		},
+		{
+			name:                   "cancelled context aborts simulation without marking nodes unremovable",
+			groupNodes:             []string{"n1", "n2"},
+			pods:                   []*apiv1.Pod{pdbPod1, pdbPod2},
+			pdbs:                   pdbWithDisruptionsAllowed(2),
+			initialDestinations:    map[string]bool{"dest": true, "n1": true, "n2": true},
+			cancelCtx:              true,
+			wantErr:                context.Canceled,
+			wantDestinations:       map[string]bool{"dest": true, "n1": true, "n2": true},
+			wantDisruptionsAllowed: ptr.To[int32](2),
+			wantSnapshotPodCounts:  map[string]int{"dest": 0, "n1": 1, "n2": 1},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := testsnapshot.NewTestSnapshotOrDie(t)
+			clustersnapshot.InitializeClusterSnapshotOrDie(t, snapshot, []*apiv1.Node{node1, node2, destNode}, tc.pods)
+
+			destinations := make(map[string]bool, len(tc.initialDestinations))
+			for k, v := range tc.initialDestinations {
+				destinations[k] = v
+			}
+
+			var tracker pdb.RemainingPdbTracker
+			if tc.pdbs != nil {
+				tracker = pdb.NewBasicRemainingPdbTracker()
+				assert.NoError(t, tracker.SetPdbs(tc.pdbs))
+			}
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tc.cancelCtx {
+				cancel()
+			}
+
+			r := NewRemovalSimulator(registry, snapshot, testDeleteOptions(), nil, true)
+			result, err := r.SimulateNodeGroupRemoval(ctx, tc.groupNodes, destinations, time.Now(), tracker)
+			removable, unremovable := result.Removable, result.Unremovable
+			assert.ErrorIs(t, err, tc.wantErr)
+
+			if tc.wantUnremovable {
+				assert.NotNil(t, unremovable)
+				assert.Nil(t, removable)
+				if unremovable != nil {
+					assert.Equal(t, tc.wantUnremovableNode, unremovable.Node.Name)
+				}
+				if unremovable != nil && tc.wantBlockingReason != 0 {
+					assert.Equal(t, BlockedByPod, unremovable.Reason)
+					if assert.NotNil(t, unremovable.BlockingPod) {
+						assert.Equal(t, tc.wantBlockingReason, unremovable.BlockingPod.Reason)
+					}
+				}
+			} else {
+				assert.Nil(t, unremovable)
+				assert.Len(t, removable, tc.wantRemovableLen)
+				if tc.wantRisky != nil && len(removable) == len(tc.wantRisky) {
+					for i, wantRisky := range tc.wantRisky {
+						assert.Equalf(t, wantRisky, removable[i].IsRisky, "IsRisky mismatch for node %s", removable[i].Node.Name)
+					}
+				}
+			}
+			if diff := cmp.Diff(tc.wantDestinations, destinations); diff != "" {
+				t.Errorf("destinationMap mismatch (-want +got):\n%s", diff)
+			}
+			if tc.wantDisruptionsAllowed != nil {
+				pdbs := tracker.GetPdbs()
+				if assert.Len(t, pdbs, 1) {
+					assert.Equal(t, *tc.wantDisruptionsAllowed, pdbs[0].Status.DisruptionsAllowed)
+				}
+			}
+			for nodeName, wantPods := range tc.wantSnapshotPodCounts {
+				nodeInfo, err := snapshot.GetNodeInfo(nodeName)
+				if assert.NoErrorf(t, err, "node %s should be present in the snapshot", nodeName) {
+					assert.Lenf(t, nodeInfo.Pods(), wantPods, "pod count mismatch in the snapshot for node %s", nodeName)
+				}
+			}
+			for _, nodeName := range tc.wantRemovedFromSnapshot {
+				_, err := snapshot.GetNodeInfo(nodeName)
+				assert.ErrorIsf(t, err, clustersnapshot.ErrNodeNotFound, "node %s should be removed from the snapshot", nodeName)
+			}
 		})
 	}
 }
