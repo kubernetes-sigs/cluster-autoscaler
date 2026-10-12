@@ -117,6 +117,18 @@ func WithResourceClaim(refName, claimName, templateName string) func(*apiv1.Pod)
 	}
 }
 
+// WithPVCVolume adds a volume backed by the given PersistentVolumeClaim to a pod.
+func WithPVCVolume(volumeName, claimName string) func(*apiv1.Pod) {
+	return func(pod *apiv1.Pod) {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, apiv1.Volume{
+			Name: volumeName,
+			VolumeSource: apiv1.VolumeSource{
+				PersistentVolumeClaim: &apiv1.PersistentVolumeClaimVolumeSource{ClaimName: claimName},
+			},
+		})
+	}
+}
+
 // WithControllerOwnerRef sets an owner reference to the pod.
 func WithControllerOwnerRef(name, kind string, uid types.UID) func(*apiv1.Pod) {
 	return func(pod *apiv1.Pod) {
