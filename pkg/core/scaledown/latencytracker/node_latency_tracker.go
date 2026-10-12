@@ -37,6 +37,10 @@ const (
 	// deletion is considered "slow". Deletions that take
 	// longer than this threshold will be logged at a more visible level
 	scaleDownLatencyLogThreshold = 3 * time.Minute
+
+	// FailedToMarkToBeDeleted is the delay reason recorded when a node's deletion
+	// is aborted because tainting failed.
+	FailedToMarkToBeDeleted = "FailedToMarkToBeDeleted"
 )
 
 type unneededNodeState struct {
@@ -102,7 +106,7 @@ func (t *NodeLatencyTracker) Process(ctx context.Context, autoscalingCtx *ca_con
 		t.wrapped.Process(ctx, autoscalingCtx, status)
 	}
 
-	t.updateLatestDelayReasons(ctx, status.UnremovableNodes)
+	t.updateLatestDelayReasons(ctx, status.UnremovableNodes, status.NodeDeleteResults)
 
 	for _, node := range status.ScaledDownNodes {
 		t.recordAndCleanup(ctx, node.Node.Name, true)
@@ -168,7 +172,7 @@ func (t *NodeLatencyTracker) CleanUp() {
 	}
 }
 
-func (t *NodeLatencyTracker) updateLatestDelayReasons(ctx context.Context, unremovableNodes []*status.UnremovableNode) {
+func (t *NodeLatencyTracker) updateLatestDelayReasons(ctx context.Context, unremovableNodes []*status.UnremovableNode, nodeDeleteResults map[string]status.NodeDeleteResult) {
 	logger := klog.FromContext(ctx)
 	for _, val := range unremovableNodes {
 		if info, exists := t.unneededNodes[val.Node.Name]; exists {
@@ -177,6 +181,15 @@ func (t *NodeLatencyTracker) updateLatestDelayReasons(ctx context.Context, unrem
 				info.latestDelayReason = reasonStr
 				t.unneededNodes[val.Node.Name] = info
 				logger.V(6).Info("Tracking latest delay reason for node", "delayReason", reasonStr, "node", klog.KObj(val.Node))
+			}
+		}
+	}
+	for nodeName, res := range nodeDeleteResults {
+		if res.ResultType == status.NodeDeleteErrorFailedToMarkToBeDeleted {
+			if info, exists := t.unneededNodes[nodeName]; exists {
+				info.latestDelayReason = FailedToMarkToBeDeleted
+				t.unneededNodes[nodeName] = info
+				logger.V(6).Info("Tracking latest delay reason for node", "delayReason", FailedToMarkToBeDeleted, "nodeName", nodeName)
 			}
 		}
 	}

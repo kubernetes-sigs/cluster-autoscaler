@@ -232,17 +232,26 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 	close(failedTaintedNodes)
 	close(taintedNodes)
 	if len(failedTaintedNodes) > 0 {
+		err := errors.NewAutoscalerErrorf(errors.ApiCallError, "couldn't taint %d nodes with ToBeDeleted", len(failedTaintedNodes))
 		for nodeWithError := range failedTaintedNodes {
 			a.autoscalingCtx.Recorder.Eventf(nodeWithError.node, apiv1.EventTypeWarning, "ScaleDownFailed", "failed to mark the node as toBeDeleted/unschedulable: %v", nodeWithError.err)
+			a.nodeDeletionTracker.AddDeletionResult(nodeWithError.node.Name, status.NodeDeleteResult{
+				ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted,
+				Err:        nodeWithError.err,
+			})
 		}
 		// Clean up already applied taints in case of issues.
 		for taintedNode := range taintedNodes {
 			_, _ = taints.CleanToBeDeleted(ctx, taintedNode, a.autoscalingCtx.ClientSet, a.autoscalingCtx.CordonNodeBeforeTerminate)
+			a.nodeDeletionTracker.AddDeletionResult(taintedNode.Name, status.NodeDeleteResult{
+				ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted,
+				Err:        err,
+			})
 		}
 		if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
 			close(updateLatencyTracker.AwaitOrStopChan)
 		}
-		return nodeDeleteDelayAfterTaint, errors.NewAutoscalerErrorf(errors.ApiCallError, "couldn't taint %d nodes with ToBeDeleted", len(failedTaintedNodes))
+		return nodeDeleteDelayAfterTaint, err
 	}
 
 	if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {

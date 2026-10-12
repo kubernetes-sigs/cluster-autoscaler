@@ -62,6 +62,7 @@ func TestNodeLatencyTracker_SimulationLoop(t *testing.T) {
 		scaledDownList        []string                               // Nodes successfully deleted this loop
 		unremovableList       []string                               // Nodes failed to delete this loop
 		unremovableReason     map[string]simulator.UnremovableReason // Nodes failed to delete with specific reasons
+		nodeDeleteResults     map[string]status.NodeDeleteResult     // Node deletion results reported in this loop
 		wantTrackedNodes      []string                               // Expected internal state after this loop
 		wantThresholds        map[string]time.Duration               // Expected threshold values in internal state
 		wantNodeTypes         map[string]metrics.UnneededNodeType    // Expected nodeType values in internal state
@@ -226,6 +227,61 @@ func TestNodeLatencyTracker_SimulationLoop(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "Tracks FailedToMarkToBeDeleted only for nodes not sent for deletion",
+			steps: []step{
+				{
+					// Step 0: emptyNode and drainNode1, drainNode2 become unneeded
+					unneededList: []string{"emptyNode", "drainNode1", "drainNode2"},
+					nodeTypes: map[string]metrics.UnneededNodeType{
+						"emptyNode":  metrics.EmptyUnneededNode,
+						"drainNode1": metrics.UnderutilizedUnneededNode,
+						"drainNode2": metrics.UnderutilizedUnneededNode,
+					},
+					wantTrackedNodes: []string{"emptyNode", "drainNode1", "drainNode2"},
+					wantNodeTypes: map[string]metrics.UnneededNodeType{
+						"emptyNode":  metrics.EmptyUnneededNode,
+						"drainNode1": metrics.UnderutilizedUnneededNode,
+						"drainNode2": metrics.UnderutilizedUnneededNode,
+					},
+					wantLatestDelayReason: map[string]string{
+						"emptyNode":  "",
+						"drainNode1": "",
+						"drainNode2": "",
+					},
+				},
+				{
+					// Step 1: emptyNode succeeds tainting and is scaled down; drainNode1 and drainNode2 fail tainting
+					unneededList: []string{"emptyNode", "drainNode1", "drainNode2"},
+					nodeTypes: map[string]metrics.UnneededNodeType{
+						"emptyNode":  metrics.EmptyUnneededNode,
+						"drainNode1": metrics.UnderutilizedUnneededNode,
+						"drainNode2": metrics.UnderutilizedUnneededNode,
+					},
+					scaledDownList: []string{"emptyNode"},
+					nodeDeleteResults: map[string]status.NodeDeleteResult{
+						"emptyNode":  {ResultType: status.NodeDeleteOk},
+						"drainNode1": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted},
+						"drainNode2": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted},
+					},
+					wantTrackedNodes: []string{"drainNode1", "drainNode2"},
+					wantNodeTypes: map[string]metrics.UnneededNodeType{
+						"drainNode1": metrics.UnderutilizedUnneededNode,
+						"drainNode2": metrics.UnderutilizedUnneededNode,
+					},
+					wantLatestDelayReason: map[string]string{
+						"drainNode1": FailedToMarkToBeDeleted,
+						"drainNode2": FailedToMarkToBeDeleted,
+					},
+				},
+				{
+					// Step 2: drainNode1 and drainNode2 are scaled down on retry
+					unneededList:     []string{"drainNode1", "drainNode2"},
+					scaledDownList:   []string{"drainNode1", "drainNode2"},
+					wantTrackedNodes: []string{},
+				},
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -244,6 +300,7 @@ func TestNodeLatencyTracker_SimulationLoop(t *testing.T) {
 				} else {
 					sd = newScaleDownStatus(step.scaledDownList, step.unremovableList)
 				}
+				sd.NodeDeleteResults = step.nodeDeleteResults
 				tracker.Process(context.Background(), &ca_context.AutoscalingContext{}, sd)
 
 				gotTracked := tracker.getTrackedNodes()
