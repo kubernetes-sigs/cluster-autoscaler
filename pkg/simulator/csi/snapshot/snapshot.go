@@ -17,12 +17,18 @@ limitations under the License.
 package snapshot
 
 import (
+	"errors"
 	"fmt"
 
 	storagev1 "k8s.io/api/storage/v1"
 	schedulerinterface "k8s.io/kube-scheduler/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/common"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
+)
+
+var (
+	// ErrCsiNodeNotFound reported when CSI node cannot be found for requested node
+	ErrCsiNodeNotFound = errors.New("CSI node not found in the snapshot")
 )
 
 // Snapshot represents a snapshot of CSI node information for cluster simulation.
@@ -70,7 +76,7 @@ func (s *Snapshot) AddCSINodes(csiNodes []*storagev1.CSINode) error {
 func (s *Snapshot) Get(name string) (*storagev1.CSINode, error) {
 	csiNode, found := s.csiNodes.FindValue(name)
 	if !found {
-		return nil, fmt.Errorf("csi nodes %s not found", name)
+		return nil, ErrCsiNodeNotFound
 	}
 	return csiNode, nil
 }

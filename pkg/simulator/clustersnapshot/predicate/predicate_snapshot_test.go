@@ -2107,3 +2107,60 @@ func TestSetClusterStateConcurrentDRA(t *testing.T) {
 	err = snapshot.SetClusterState(context.Background(), nodes, pods, draSnap, nil)
 	assert.NoError(t, err)
 }
+
+func TestSetClusterStateMissingCSINode(t *testing.T) {
+	node := BuildTestNode("node", 10, 100)
+	csiNode := BuildCSINode(node)
+
+	tests := map[string]struct {
+		enableCSINodeAwareScheduling bool
+		csiSnapshot                  *csisnapshot.Snapshot
+		wantCSINode                  *storagev1.CSINode
+	}{
+		"CSINodePresentIsAttachedToNodeInfo": {
+			enableCSINodeAwareScheduling: true,
+			csiSnapshot:                  csisnapshot.NewSnapshot(map[string]*storagev1.CSINode{node.Name: csiNode}),
+			wantCSINode:                  csiNode,
+		},
+		"CSINodeNotFoundIsToleratedAndLeavesNodeInfoUnset": {
+			enableCSINodeAwareScheduling: true,
+			csiSnapshot:                  csisnapshot.NewEmptySnapshot(),
+		},
+		"NilCSISnapshotIsTolerated": {
+			enableCSINodeAwareScheduling: true,
+			csiSnapshot:                  nil,
+		},
+		"CSINodeAwareSchedulingDisabledSkipsCSILookup": {
+			enableCSINodeAwareScheduling: false,
+			csiSnapshot:                  csisnapshot.NewSnapshot(map[string]*storagev1.CSINode{node.Name: csiNode}),
+		},
+	}
+
+	for snapshotName, snapshotFactory := range snapshots {
+		for name, tc := range tests {
+			t.Run(fmt.Sprintf("%s:%s", snapshotName, name), func(t *testing.T) {
+				fwHandle, err := framework.NewTestFrameworkHandle()
+				if err != nil {
+					t.Fatalf("NewTestFrameworkHandle(): unexpected error: %v", err)
+				}
+
+				store, err := snapshotFactory()
+				assert.NoError(t, err)
+
+				snapshot := NewPredicateSnapshot(store, fwHandle, true, 1, tc.enableCSINodeAwareScheduling, 0)
+
+				if err := snapshot.SetClusterState(context.Background(), []*apiv1.Node{node}, nil, nil, tc.csiSnapshot); err != nil {
+					t.Fatalf("SetClusterState(): unexpected error: %v", err)
+				}
+
+				nodeInfo, err := snapshot.GetNodeInfo(node.Name)
+				if err != nil {
+					t.Fatalf("GetNodeInfo(%q): unexpected error: %v", node.Name, err)
+				}
+				if diff := cmp.Diff(tc.wantCSINode, nodeInfo.CSINode); diff != "" {
+					t.Errorf("GetNodeInfo(%q): unexpected CSINode (-want +got): %s", node.Name, diff)
+				}
+			})
+		}
+	}
+}

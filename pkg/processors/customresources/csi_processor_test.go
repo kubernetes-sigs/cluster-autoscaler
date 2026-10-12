@@ -213,11 +213,11 @@ func TestFilterOutNodesWithUnreadyCSIResources(t *testing.T) {
 				"node_2_CSI_Ready": true,
 			},
 		},
-		"node missing from CSI snapshot stays ready": {
+		"node missing from CSI snapshot is treated as unready": {
 			nodeGroupsAllNodes: map[string][]*apiv1.Node{
 				"ng1": {
 					buildTestNode("node_1_CSI_Ready", true),
-					buildTestNode("node_2_CSI_Ready", true),
+					buildTestNode("node_2_CSI_Unready", true),
 				},
 			},
 			nodeGroupsTemplatesCSINode: map[string]*storagev1.CSINode{
@@ -225,11 +225,23 @@ func TestFilterOutNodesWithUnreadyCSIResources(t *testing.T) {
 			},
 			nodesCSINode: map[string]*storagev1.CSINode{
 				"node_1_CSI_Ready": createCSINode("node_1_CSI_Ready", []string{"driver1", "driver2"}),
-				// node_2_CSI_Ready is missing from snapshot
+				// node_2_CSI_Unready has no backing CSINode object yet.
 			},
 			expectedNodesReadiness: map[string]bool{
+				"node_1_CSI_Ready":   true,
+				"node_2_CSI_Unready": false,
+			},
+		},
+		"node missing from CSI snapshot stays ready when template has no CSINode": {
+			nodeGroupsAllNodes: map[string][]*apiv1.Node{
+				"ng1": {
+					buildTestNode("node_1_CSI_Ready", true),
+				},
+			},
+			nodeGroupsTemplatesCSINode: map[string]*storagev1.CSINode{},
+			nodesCSINode:               map[string]*storagev1.CSINode{},
+			expectedNodesReadiness: map[string]bool{
 				"node_1_CSI_Ready": true,
-				"node_2_CSI_Ready": true, // stays ready because error getting CSI node keeps it in ready list
 			},
 		},
 		"fallback to NodeGroup template when registry is missing": {

@@ -74,8 +74,8 @@ func (p *CSICustomResourcesProcessor) FilterOutNodesWithUnreadyResources(ctx con
 
 		csiNode, err := csiSnapshot.Get(node.Name)
 		if err != nil {
-			newReadyNodes = append(newReadyNodes, node)
-			logger.V(5).Info("Failed to get CSI node for node, skipping CSI readiness check and keeping node in ready list", "node", klog.KObj(node), "err", err)
+			logger.V(5).Info("CSINode object not found for node, treating the node as having unready CSI resources", "node", klog.KObj(node), "err", err)
+			nodesWithUnreadyCSI[node.Name] = kubernetes.GetUnreadyNodeCopy(node, kubernetes.ResourceUnready)
 			continue
 		}
 
