@@ -47,6 +47,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/expander"
 	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
+	"sigs.k8s.io/cluster-autoscaler/pkg/observability/perf"
 	"sigs.k8s.io/cluster-autoscaler/pkg/observers/loopstart"
 	"sigs.k8s.io/cluster-autoscaler/pkg/observers/nodegroupchange"
 	ca_processors "sigs.k8s.io/cluster-autoscaler/pkg/processors"
@@ -169,7 +170,8 @@ func NewStaticAutoscaler(
 	quotasTrackerOptions resourcequotas.TrackerOptions,
 	minQuotasTrackerOptions resourcequotas.TrackerOptions,
 	csiProvider *csinodeprovider.Provider,
-	capacityBufferPodsRegistry *fakepods.Registry) *StaticAutoscaler {
+	capacityBufferPodsRegistry *fakepods.Registry,
+	perfCollector perf.Collector) *StaticAutoscaler {
 
 	klog.V(4).Infof("Creating new static autoscaler with opts: %v", opts)
 
@@ -198,6 +200,9 @@ func NewStaticAutoscaler(
 		draProvider,
 		templateNodeInfoRegistry,
 		csiProvider)
+	// Test-only performance sink; nil in production, making every instrumented
+	// call site a no-op.
+	autoscalingCtx.PerfCollector = perfCollector
 
 	taintConfig := taints.NewTaintConfig(opts)
 
@@ -540,7 +545,9 @@ func (a *StaticAutoscaler) RunOnce(ctx context.Context, currentTime time.Time) c
 		a.AutoscalingContext.DebuggingSnapshotter.SetClusterNodes(ctx, allNodeInfos)
 	}
 
+	stopFilterOut := perf.Measure(a.AutoscalingContext.PerfCollector, "filter_out_schedulable")
 	unschedulablePodsToHelp, err := a.processors.PodListProcessor.Process(ctx, a.AutoscalingContext, podsBySchedulability.Unschedulable)
+	stopFilterOut()
 
 	if err != nil {
 		logger.Info("Failed to process unschedulable pods", "err", err)
@@ -814,7 +821,9 @@ func (a *StaticAutoscaler) scaleDown(ctx context.Context, currentTime time.Time,
 		}
 	}
 
+	stopFindUnneeded := perf.Measure(a.AutoscalingContext.PerfCollector, "scale_down_find_unneeded")
 	typedErr := a.scaleDownPlanner.UpdateClusterState(ctx, podDestinations, scaleDownCandidates, scaleDownActuationStatus, currentTime)
+	stopFindUnneeded()
 	// Update clusterStateRegistry and metrics regardless of whether ScaleDown was successful or not.
 	unneededNodes := a.scaleDownPlanner.UnneededNodes()
 	a.processors.ScaleDownCandidatesNotifier.Update(ctx, unneededNodes, currentTime)

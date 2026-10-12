@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/pdb"
 	"sigs.k8s.io/cluster-autoscaler/pkg/debuggingsnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/expander"
+	"sigs.k8s.io/cluster-autoscaler/pkg/observability/perf"
 	processor_callbacks "sigs.k8s.io/cluster-autoscaler/pkg/processors/callbacks"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
 	csinodeprovider "sigs.k8s.io/cluster-autoscaler/pkg/simulator/csi/provider"
@@ -77,6 +78,12 @@ type AutoscalingContext struct {
 	TemplateNodeInfoRegistry TemplateNodeInfoRegistry
 	// CsiProvider is the provider for CSI node aware scheduling.
 	CsiProvider *csinodeprovider.Provider
+	// PerfCollector, when non-nil, receives performance measurements from
+	// instrumented core code regions (see the observability/perf package).
+	// It is nil in production, adding no overhead; tests inject an
+	// implementation to profile regions that are not behind a pluggable
+	// interface (e.g. the scale-up orchestrator's per-node-group loops).
+	PerfCollector perf.Collector
 	// GracefulDegradationLoopCount counts the number of subsequent CA loops where graceful degradation is active.
 	// GracefulDegradationLoopCount > 0 iff Cluster Autoscaler is running in a degraded mode.
 	GracefulDegradationLoopCount int

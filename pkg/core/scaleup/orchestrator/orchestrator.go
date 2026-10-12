@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/expander"
 	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
+	"sigs.k8s.io/cluster-autoscaler/pkg/observability/perf"
 	ca_processors "sigs.k8s.io/cluster-autoscaler/pkg/processors"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroups"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupset"
@@ -112,7 +113,9 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 	nodeGroups := o.autoscalingCtx.CloudProvider.NodeGroups(ctx)
 	if o.processors != nil && o.processors.NodeGroupListProcessor != nil {
 		var err error
+		stopNGL := perf.Measure(o.autoscalingCtx.PerfCollector, "node_group_list_processing")
 		nodeGroups, nodeInfos, err = o.processors.NodeGroupListProcessor.Process(ctx, o.autoscalingCtx, nodeGroups, nodeInfos, unschedulablePods)
+		stopNGL()
 		if err != nil {
 			markedEquivalenceGroups := markAllGroupsAsUnschedulable(podEquivalenceGroups, ScaleUpExecutionErrorReason)
 			return status.UpdateScaleUpError(
@@ -403,11 +406,13 @@ func (o *ScaleUpOrchestrator) ComputeExpansionOption(
 	}
 
 	estimateStart := time.Now()
+	stopEstimate := perf.Measure(o.autoscalingCtx.PerfCollector, "scale_up_estimate")
 	expansionEstimator := o.estimatorBuilder(
 		o.autoscalingCtx.ClusterSnapshot,
 		estimator.NewEstimationContext(o.autoscalingCtx.MaxNodesTotal, option.SimilarNodeGroups, currentNodeCount),
 	)
 	option.NodeCount, option.Pods = expansionEstimator.Estimate(ctx, podGroups, nodeInfo, nodeGroup)
+	stopEstimate()
 	metrics.UpdateDurationFromStart(ctx, metrics.Estimate, estimateStart)
 
 	autoscalingOptions, err := nodeGroup.GetOptions(ctx, o.autoscalingCtx.NodeGroupDefaults)
@@ -1050,10 +1055,13 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 	var options []expander.Option
 
 	// This code here runs a simulation to see which pods can be scheduled on which node groups.
+	stopSchedulable := perf.Measure(o.autoscalingCtx.PerfCollector, "scale_up_spg_schedulable_groups")
 	for _, nodeGroup := range args.validNodeGroups {
 		schedulablePodGroups[nodeGroup.Id()] = o.SchedulablePodGroups(ctx, args.podEquivalenceGroups, nodeGroup, args.nodeInfos[nodeGroup.Id()])
 	}
+	stopSchedulable()
 
+	stopComputeOptions := perf.Measure(o.autoscalingCtx.PerfCollector, "scale_up_spg_compute_options")
 	for _, nodeGroup := range args.validNodeGroups {
 		option := o.ComputeExpansionOption(ctx, nodeGroup, schedulablePodGroups, args.nodeInfos, len(args.nodes), args.now, args.allOrNothing)
 		o.processors.BinpackingLimiter.MarkProcessed(o.autoscalingCtx, nodeGroup.Id())
@@ -1070,6 +1078,7 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 			break
 		}
 	}
+	stopComputeOptions()
 
 	// Finalize binpacking limiter.
 	o.processors.BinpackingLimiter.FinalizeBinpacking(o.autoscalingCtx, options)
