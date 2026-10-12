@@ -43,6 +43,7 @@ type unneededNodeState struct {
 	unneededSince     time.Time
 	removalThreshold  time.Duration
 	latestDelayReason string
+	nodeType          metrics.UnneededNodeType
 }
 
 // NodeLatencyTracker keeps track of nodes that are marked as unneeded, when they became unneeded,
@@ -71,6 +72,7 @@ func (t *NodeLatencyTracker) UpdateScaleDownCandidates(ctx context.Context, list
 			t.unneededNodes[nodeName] = unneededNodeState{
 				unneededSince:    timestamp,
 				removalThreshold: candidate.RemovalThreshold,
+				nodeType:         candidate.NodeType,
 			}
 			logger.V(6).Info("Started tracking unneeded node with removal threshold.", "node", klog.KObj(candidate.Node), "timestamp", timestamp, "threshold", candidate.RemovalThreshold)
 		} else {
@@ -78,6 +80,11 @@ func (t *NodeLatencyTracker) UpdateScaleDownCandidates(ctx context.Context, list
 				info.removalThreshold = candidate.RemovalThreshold
 				t.unneededNodes[nodeName] = info
 				logger.V(6).Info("Updated removal threshold for tracked node.", "node", klog.KObj(candidate.Node), "threshold", candidate.RemovalThreshold)
+			}
+			if info.nodeType != candidate.NodeType {
+				info.nodeType = candidate.NodeType
+				t.unneededNodes[nodeName] = info
+				logger.V(6).Info("Updated unneeded type for tracked node.", "node", klog.KObj(candidate.Node), "nodeType", candidate.NodeType)
 			}
 		}
 	}
@@ -127,7 +134,7 @@ func (t *NodeLatencyTracker) recordAndCleanup(ctx context.Context, nodeName stri
 	}
 
 	if latency > 0 {
-		metrics.UpdateScaleDownNodeRemovalLatency(isRemoved, delayReason, latency)
+		metrics.UpdateScaleDownNodeRemovalLatency(isRemoved, delayReason, info.nodeType, latency)
 		if !isRemoved {
 			logger.V(4).Info("Node became needed again", "nodeName", nodeName, "unneededDuration", duration, "delayReason", delayReason, "latency", latency)
 		}

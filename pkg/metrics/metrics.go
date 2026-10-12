@@ -56,6 +56,9 @@ type NodeDeletionReason string
 // NodeDeletionResult describes result of the node deletion attempt
 type NodeDeletionResult string
 
+// UnneededNodeType describes type of unneeded node
+type UnneededNodeType string
+
 const (
 	caNamespace           = "cluster_autoscaler"
 	readyLabel            = "ready"
@@ -116,6 +119,11 @@ const (
 	NodeDeletionSucceeded NodeDeletionResult = "succeeded"
 	// NodeDeletionFailed means the node deletion request failed
 	NodeDeletionFailed NodeDeletionResult = "failed"
+
+	// EmptyUnneededNode means the unneeded node has no pods to reschedule
+	EmptyUnneededNode UnneededNodeType = "empty"
+	// UnderutilizedUnneededNode means the unneeded node has pods to reschedule
+	UnderutilizedUnneededNode UnneededNodeType = "underutilized"
 
 	gpuNodeMetricsDeprecatedVersion = "1.36.0"
 	// nodeDeletionMetricsDeprecatedVersion is the version in which metrics superseded
@@ -560,9 +568,9 @@ func newCaMetrics() *caMetrics {
 			&k8smetrics.HistogramOpts{
 				Namespace: caNamespace,
 				Name:      "node_removal_latency_seconds",
-				Help:      "Latency from when an unneeded node is eligible for scale down until it is removed (deleted=true) or it became needed again (deleted=false). The 'delay_reason' label indicates the technical bottleneck that delayed the scale-down ('none' if not delayed).",
+				Help:      "Latency from when an unneeded node is eligible for scale down until it is removed (deleted=true) or it became needed again (deleted=false). The 'delay_reason' label indicates the technical bottleneck that delayed the scale-down ('none' if not delayed). The 'node_type' label indicates whether the node was 'empty' or 'underutilized'.",
 				Buckets:   k8smetrics.ExponentialBuckets(1, 1.5, 19), // ~1s → ~24min
-			}, []string{"deleted", "delay_reason"},
+			}, []string{"deleted", "delay_reason", "node_type"},
 		),
 
 		nodeTemplateResourcesMismatch: k8smetrics.NewGaugeVec(
@@ -973,8 +981,8 @@ func (m *caMetrics) ObserveBinpackingHeterogeneity(instanceType, cpuCount, names
 
 // UpdateScaleDownNodeRemovalLatency records the time after which node was deleted/needed
 // again after being marked unneeded
-func (m *caMetrics) UpdateScaleDownNodeRemovalLatency(deleted bool, delayReason string, duration time.Duration) {
-	m.scaleDownNodeRemovalLatency.WithLabelValues(strconv.FormatBool(deleted), delayReason).Observe(duration.Seconds())
+func (m *caMetrics) UpdateScaleDownNodeRemovalLatency(deleted bool, delayReason string, nodeType UnneededNodeType, duration time.Duration) {
+	m.scaleDownNodeRemovalLatency.WithLabelValues(strconv.FormatBool(deleted), delayReason, string(nodeType)).Observe(duration.Seconds())
 }
 
 // ObserveMaxNodeSkipEvalDurationSeconds records the longest time during which node was skipped during ScaleDown.

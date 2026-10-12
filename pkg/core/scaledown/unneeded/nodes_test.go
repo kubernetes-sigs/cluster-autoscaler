@@ -32,6 +32,7 @@ import (
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/status"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/core/test"
+	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/customresources"
 	nodeprocessors "sigs.k8s.io/cluster-autoscaler/pkg/processors/nodes"
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
@@ -60,6 +61,7 @@ func TestUpdate(t *testing.T) {
 		wantTimestamps map[string]time.Time
 		wantVersions   map[string]string
 		wantThresholds map[string]time.Duration
+		wantNodeTypes  map[string]metrics.UnneededNodeType
 	}{
 		{
 			desc: "added then deleted",
@@ -75,12 +77,13 @@ func TestUpdate(t *testing.T) {
 			initialNodes: []simulator.NodeToBeRemoved{},
 			finalNodes: []simulator.NodeToBeRemoved{
 				makeNode("n1", "v1"),
-				makeNode("n2", "v1"),
+				makeNodeWithPods("n2", "v1"),
 				makeNode("n3", "v1"),
 			},
 			wantTimestamps: map[string]time.Time{"n1": finalTimestamp, "n2": finalTimestamp, "n3": finalTimestamp},
 			wantVersions:   map[string]string{"n1": "v1", "n2": "v1", "n3": "v1"},
 			wantThresholds: map[string]time.Duration{"n1": defaultUnreadyTime, "n2": defaultUnreadyTime, "n3": defaultUnreadyTime},
+			wantNodeTypes:  map[string]metrics.UnneededNodeType{"n1": metrics.EmptyUnneededNode, "n2": metrics.UnderutilizedUnneededNode, "n3": metrics.EmptyUnneededNode},
 		},
 		{
 			desc: "single one remaining",
@@ -90,11 +93,12 @@ func TestUpdate(t *testing.T) {
 				makeNode("n3", "v1"),
 			},
 			finalNodes: []simulator.NodeToBeRemoved{
-				makeNode("n2", "v2"),
+				makeNodeWithPods("n2", "v2"),
 			},
 			wantTimestamps: map[string]time.Time{"n2": initialTimestamp},
 			wantVersions:   map[string]string{"n2": "v2"},
 			wantThresholds: map[string]time.Duration{"n2": defaultUnreadyTime},
+			wantNodeTypes:  map[string]metrics.UnneededNodeType{"n2": metrics.UnderutilizedUnneededNode},
 		},
 		{
 			desc: "single one older",
@@ -109,6 +113,7 @@ func TestUpdate(t *testing.T) {
 			wantTimestamps: map[string]time.Time{"n1": finalTimestamp, "n2": initialTimestamp, "n3": finalTimestamp},
 			wantVersions:   map[string]string{"n1": "v2", "n2": "v2", "n3": "v2"},
 			wantThresholds: map[string]time.Duration{"n1": defaultUnreadyTime, "n2": defaultUnreadyTime, "n3": defaultUnreadyTime},
+			wantNodeTypes:  map[string]metrics.UnneededNodeType{"n1": metrics.EmptyUnneededNode, "n2": metrics.EmptyUnneededNode, "n3": metrics.EmptyUnneededNode},
 		},
 		{
 			desc: "threshold updated on existing node (Ready -> Unready)",
@@ -121,6 +126,7 @@ func TestUpdate(t *testing.T) {
 			wantTimestamps: map[string]time.Time{"n2": initialTimestamp},
 			wantVersions:   map[string]string{"n2": "v2"},
 			wantThresholds: map[string]time.Duration{"n2": defaultUnreadyTime},
+			wantNodeTypes:  map[string]metrics.UnneededNodeType{"n2": metrics.EmptyUnneededNode},
 		},
 		{
 			desc: "mixed update and preservation",
@@ -134,6 +140,7 @@ func TestUpdate(t *testing.T) {
 			wantTimestamps: map[string]time.Time{"n1": initialTimestamp, "n2": finalTimestamp},
 			wantVersions:   map[string]string{"n1": "v2", "n2": "v2"},
 			wantThresholds: map[string]time.Duration{"n1": defaultUnneededTime, "n2": defaultUnreadyTime},
+			wantNodeTypes:  map[string]metrics.UnneededNodeType{"n1": metrics.EmptyUnneededNode, "n2": metrics.EmptyUnneededNode},
 		},
 	}
 
@@ -167,6 +174,7 @@ func TestUpdate(t *testing.T) {
 				assert.Equal(t, tc.wantTimestamps[n.Node.Name], nn.since)
 				assert.Equal(t, tc.wantVersions[n.Node.Name], version(nn.ntbr))
 				assert.Equal(t, tc.wantThresholds[n.Node.Name], n.RemovalThreshold)
+				assert.Equal(t, tc.wantNodeTypes[n.Node.Name], n.NodeType)
 			}
 		})
 	}
@@ -178,6 +186,12 @@ func makeNode(name, version string) simulator.NodeToBeRemoved {
 	n := BuildTestNode(name, 1000, 10)
 	n.Annotations = map[string]string{testVersion: version}
 	return simulator.NodeToBeRemoved{Node: n}
+}
+
+func makeNodeWithPods(name, version string) simulator.NodeToBeRemoved {
+	nn := makeNode(name, version)
+	nn.PodsToReschedule = []*apiv1.Pod{BuildTestPod("p1", 100, 1)}
+	return nn
 }
 
 func makeNodeWithReadyStatus(name, version string, ready bool) simulator.NodeToBeRemoved {
