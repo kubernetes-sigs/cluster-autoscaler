@@ -116,3 +116,11 @@ func WithProvisioningRequestEnabled() AutoscalingOptionOverride {
 		o.ProvisioningRequestEnabled = true
 	}
 }
+
+// WithCSINodeAwareScheduling enables CSI node aware scheduling (CSINode snapshotting, the CSI custom
+// resources processor and the NodeVolumeLimits scheduler plugin backed by the snapshot).
+func WithCSINodeAwareScheduling() AutoscalingOptionOverride {
+	return func(o *config.AutoscalingOptions) {
+		o.CSINodeAwareSchedulingEnabled = true
+	}
+}
