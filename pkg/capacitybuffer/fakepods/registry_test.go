@@ -41,6 +41,7 @@ func TestFakePodsRegistry(t *testing.T) {
 		initialMap := map[types.UID]*v1beta1.CapacityBuffer{uid1: buffer1}
 		r := NewRegistry(initialMap)
 		assert.Equal(t, buffer1, r.GetCapacityBuffer(uid1))
+		assert.ElementsMatch(t, []*v1beta1.CapacityBuffer{buffer1}, r.ProcessedBuffers())
 	})
 
 	t.Run("Set and Get", func(t *testing.T) {
@@ -72,5 +73,67 @@ func TestFakePodsRegistry(t *testing.T) {
 		assert.Equal(t, 0, len(r.fakePodsUIDToBuffer))
 		assert.Nil(t, r.GetCapacityBuffer(uid1))
 		assert.Nil(t, r.GetCapacityBuffer(uid2))
+		assert.Empty(t, r.ProcessedBuffers())
 	})
+}
+
+func TestFakePodsRegistryProcessedBuffers(t *testing.T) {
+	buffer1 := &v1beta1.CapacityBuffer{ObjectMeta: metav1.ObjectMeta{Name: "buffer1", UID: "buffer1-uid"}}
+	buffer2 := &v1beta1.CapacityBuffer{ObjectMeta: metav1.ObjectMeta{Name: "buffer2", UID: "buffer2-uid"}}
+	podUID1 := types.UID("pod-uid1")
+	podUID2 := types.UID("pod-uid2")
+
+	testCases := []struct {
+		name          string
+		setup         func(r *Registry)
+		wantProcessed []*v1beta1.CapacityBuffer
+	}{
+		{
+			name:          "empty registry",
+			setup:         func(r *Registry) {},
+			wantProcessed: nil,
+		},
+		{
+			name: "MarkProcessed deduplicates buffers",
+			setup: func(r *Registry) {
+				r.MarkProcessed(buffer1)
+				r.MarkProcessed(buffer1)
+			},
+			wantProcessed: []*v1beta1.CapacityBuffer{buffer1},
+		},
+		{
+			name: "SetCapacityBuffer implicitly marks buffer as processed",
+			setup: func(r *Registry) {
+				r.SetCapacityBuffer(podUID1, buffer1)
+				r.SetCapacityBuffer(podUID2, buffer1)
+				r.MarkProcessed(buffer2)
+			},
+			wantProcessed: []*v1beta1.CapacityBuffer{buffer1, buffer2},
+		},
+		{
+			name: "UnsetCapacityBuffer keeps buffer processed",
+			setup: func(r *Registry) {
+				r.SetCapacityBuffer(podUID1, buffer1)
+				r.UnsetCapacityBuffer(podUID1)
+			},
+			wantProcessed: []*v1beta1.CapacityBuffer{buffer1},
+		},
+		{
+			name: "Clear removes processed buffers",
+			setup: func(r *Registry) {
+				r.SetCapacityBuffer(podUID1, buffer1)
+				r.MarkProcessed(buffer2)
+				r.Clear()
+			},
+			wantProcessed: nil,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRegistry(nil)
+			tc.setup(r)
+			assert.ElementsMatch(t, tc.wantProcessed, r.ProcessedBuffers())
+		})
+	}
 }

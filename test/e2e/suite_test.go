@@ -31,10 +31,12 @@ import (
 	"sigs.k8s.io/e2e-framework/pkg/env"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/envfuncs"
+	"sigs.k8s.io/e2e-framework/pkg/features"
 )
 
 var (
 	testEnv env.Environment
+	testCfg = KwokTestConfig()
 )
 
 func TestMain(m *testing.M) {
@@ -46,6 +48,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatalf("error loading config: %v", err)
 	}
+
 	testEnv, err = env.NewWithContext(ctx, cfg)
 	if err != nil {
 		log.Fatalf("error creating test environment: %v", err)
@@ -56,6 +59,17 @@ func TestMain(m *testing.M) {
 	testEnv.Setup(
 		envfuncs.CreateNamespace(namespace),
 	)
+
+	testEnv.BeforeEachFeature(func(ctx context.Context, cfg *envconf.Config, t *testing.T, f features.Feature) (context.Context, error) {
+		client, err := cfg.NewClient()
+		if err != nil {
+			return ctx, err
+		}
+		if err := CleanUpNodeGroup(ctx, client, testCfg.NodeGroup); err != nil {
+			return ctx, err
+		}
+		return ctx, nil
+	})
 
 	testEnv.Finish(
 		func(ctx context.Context, config *envconf.Config) (context.Context, error) {

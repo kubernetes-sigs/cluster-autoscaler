@@ -107,3 +107,71 @@ func TestUpdateScaleDownNodeRemovalLatency(t *testing.T) {
 	assert.Equal(t, uint64(1), metric2.Histogram.GetSampleCount())
 	assert.Equal(t, 20.0, metric2.Histogram.GetSampleSum())
 }
+
+func TestRegisterNodesDeleted(t *testing.T) {
+	type deletion struct {
+		count  int
+		reason NodeDeletionReason
+		result NodeDeletionResult
+	}
+	type series struct {
+		reason NodeDeletionReason
+		result NodeDeletionResult
+	}
+	tests := map[string]struct {
+		deletions  []deletion
+		wantTotals map[series]float64
+	}{
+		"SingleIncrement": {
+			deletions: []deletion{
+				{count: 5, reason: NodeDeletionReasonCreateErrors, result: NodeDeletionSucceeded},
+			},
+			wantTotals: map[series]float64{
+				{NodeDeletionReasonCreateErrors, NodeDeletionSucceeded}: 5,
+			},
+		},
+		"MultipleIncrementsSameSeries": {
+			deletions: []deletion{
+				{count: 2, reason: NodeDeletionReasonScaleDown, result: NodeDeletionSucceeded},
+				{count: 3, reason: NodeDeletionReasonScaleDown, result: NodeDeletionSucceeded},
+				{count: 4, reason: NodeDeletionReasonScaleDown, result: NodeDeletionSucceeded},
+			},
+			wantTotals: map[series]float64{
+				{NodeDeletionReasonScaleDown, NodeDeletionSucceeded}: 9,
+			},
+		},
+		"SeriesAreIsolatedByReasonAndResult": {
+			deletions: []deletion{
+				{count: 1, reason: NodeDeletionReasonScaleDown, result: NodeDeletionSucceeded},
+				{count: 2, reason: NodeDeletionReasonScaleDown, result: NodeDeletionFailed},
+				{count: 3, reason: NodeDeletionReasonCreateErrors, result: NodeDeletionSucceeded},
+				{count: 4, reason: NodeDeletionReasonOldUnregistered, result: NodeDeletionFailed},
+			},
+			wantTotals: map[series]float64{
+				{NodeDeletionReasonScaleDown, NodeDeletionSucceeded}:       1,
+				{NodeDeletionReasonScaleDown, NodeDeletionFailed}:          2,
+				{NodeDeletionReasonCreateErrors, NodeDeletionSucceeded}:    3,
+				{NodeDeletionReasonCreateErrors, NodeDeletionFailed}:       0,
+				{NodeDeletionReasonOldUnregistered, NodeDeletionSucceeded}: 0,
+				{NodeDeletionReasonOldUnregistered, NodeDeletionFailed}:    4,
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			reg := metrics.NewKubeRegistry()
+			m := newCaMetricsWithRegistry(reg)
+			m.RegisterAll(false)
+
+			for _, d := range tc.deletions {
+				m.RegisterNodesDeleted(d.count, d.reason, d.result)
+			}
+
+			for s, want := range tc.wantTotals {
+				got := testutil.ToFloat64(m.nodeDeletionCount.CounterVec.WithLabelValues(string(s.reason), string(s.result)))
+				assert.Equal(t, want, got, "reason=%s result=%s", s.reason, s.result)
+			}
+		})
+	}
+}

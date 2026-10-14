@@ -77,6 +77,7 @@ func TestLastIndexOrderMapping(t *testing.T) {
 				gotOrder = append(gotOrder, mapping.At(i))
 			}
 			assert.Equal(t, tc.wantOrder, gotOrder)
+			assert.False(t, mapping.PreferProcessingInOrder())
 		})
 	}
 }
@@ -129,6 +130,7 @@ func TestPriorityNodeOrderMapping(t *testing.T) {
 				gotOrder = append(gotOrder, mapping.At(i))
 			}
 			assert.Equal(t, tc.wantOrder, gotOrder)
+			assert.True(t, mapping.PreferProcessingInOrder())
 		})
 	}
 }

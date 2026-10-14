@@ -2,6 +2,8 @@ name: Verify Go
 
 on:
   push:
+    branches:
+      - main
     paths:
       - '**/*.go'
       - 'go.mod'

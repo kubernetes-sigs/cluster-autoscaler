@@ -110,17 +110,6 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 	metrics.UpdateDurationFromStart(ctx, metrics.BuildPodEquivalenceGroups, buildPodEquivalenceGroupsStart)
 
 	nodeGroups := o.autoscalingCtx.CloudProvider.NodeGroups(ctx)
-	upcomingNodes, aErr := o.UpcomingNodes(ctx, nodeInfos)
-	if aErr != nil {
-		markedEquivalenceGroups := markAllGroupsAsUnschedulable(podEquivalenceGroups, ScaleUpExecutionErrorReason)
-		return status.UpdateScaleUpError(
-			&status.ScaleUpStatus{
-				PodsRemainUnschedulable: o.GetRemainingPods(ctx, markedEquivalenceGroups, nodeGroups, map[string]status.Reasons{}, nodeInfos),
-			},
-			aErr.AddPrefix("could not get upcoming nodes: "),
-		)
-	}
-	logger.V(4).Info("Upcoming nodes", "nodesCount", len(upcomingNodes))
 	if o.processors != nil && o.processors.NodeGroupListProcessor != nil {
 		var err error
 		nodeGroups, nodeInfos, err = o.processors.NodeGroupListProcessor.Process(ctx, o.autoscalingCtx, nodeGroups, nodeInfos, unschedulablePods)
@@ -176,7 +165,7 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 		return st, aErr
 	}
 	// Execute scale up.
-	logger.V(1).Info("Executing final scale-up plan", "scaleUpInfos", plan.scaleUpInfos)
+	logger.V(1).Info("Final scale-up plan", "scaleUpInfos", plan.scaleUpInfos)
 	aErr, failedNodeGroups := o.scaleUpExecutor.ExecuteScaleUps(ctx, plan.scaleUpInfos, now, allOrNothing)
 	if aErr != nil {
 		failedGroupsMap := o.buildFailedGroupsMap(failedNodeGroups, plan.scaleUpInfos)
@@ -235,7 +224,7 @@ func (o *ScaleUpOrchestrator) ScaleUpToNodeGroupMinSize(
 
 	now := time.Now()
 	nodeGroups := o.autoscalingCtx.CloudProvider.NodeGroups(ctx)
-	scaleUpInfos := make([]nodegroupset.ScaleUpInfo, 0)
+	scaleUpInfos := make(nodegroupset.ScaleUpInfos, 0)
 
 	tracker, err := o.quotasTrackerFactory.NewQuotasTracker(ctx, o.autoscalingCtx, nodes)
 	if err != nil {
@@ -583,22 +572,6 @@ func (o *ScaleUpOrchestrator) SchedulablePodGroups(
 	return schedulablePodGroups
 }
 
-// UpcomingNodes returns a list of nodes that are not ready but should be.
-func (o *ScaleUpOrchestrator) UpcomingNodes(ctx context.Context, nodeInfos map[string]*framework.NodeInfo) ([]*framework.NodeInfo, errors.AutoscalerError) {
-	upcomingCounts, _ := o.clusterStateRegistry.GetUpcomingNodes(ctx)
-	upcomingNodes := make([]*framework.NodeInfo, 0)
-	for nodeGroup, numberOfNodes := range upcomingCounts {
-		nodeTemplate, found := nodeInfos[nodeGroup]
-		if !found {
-			return nil, errors.NewAutoscalerErrorf(errors.InternalError, "failed to find template node for node group %s", nodeGroup)
-		}
-		for i := 0; i < numberOfNodes; i++ {
-			upcomingNodes = append(upcomingNodes, nodeTemplate)
-		}
-	}
-	return upcomingNodes, nil
-}
-
 // IsNodeGroupReadyToScaleUp returns nil if node group is ready to be scaled up, otherwise a reason is provided.
 func (o *ScaleUpOrchestrator) IsNodeGroupReadyToScaleUp(ctx context.Context, nodeGroup cloudprovider.NodeGroup, now time.Time) *SkippedReasons {
 	// Non-existing node groups are created later so skip check for them.
@@ -875,11 +848,12 @@ func (o *ScaleUpOrchestrator) getRemainingPodsConsideringSkippedNodeGroups(ctx c
 	// For all egs here we need to generate the NoScaleUpInfo object because we only considered egs that are unschedulable in the first place.
 	// eg.SchedulingErrors will contain scheduling errors of this eg for not skipped nodegroups from the previous simulation + errors for skipped nodegroups from current simulation.
 	for _, eg := range egs {
+		skippedNGsPerEg := findSkippedNodeGroupsSatisfyingPodPredicates(eg, skipped)
 		for _, pod := range eg.Pods {
 			noScaleUpInfo := status.NoScaleUpInfo{
 				Pod:                pod,
 				RejectedNodeGroups: eg.SchedulingErrors,
-				SkippedNodeGroups:  findSkippedNodeGroupsSatisfyingPodPredicates(eg, skipped),
+				SkippedNodeGroups:  skippedNGsPerEg,
 			}
 			remaining = append(remaining, noScaleUpInfo)
 		}
@@ -1063,7 +1037,7 @@ type scaleUpCtx struct {
 }
 
 type scaleUpPlan struct {
-	scaleUpInfos           []nodegroupset.ScaleUpInfo
+	scaleUpInfos           nodegroupset.ScaleUpInfos
 	createNodeGroupResults []nodegroups.CreateNodeGroupResult
 	bestOption             *expander.Option
 	nodeGroups             []cloudprovider.NodeGroup
@@ -1102,6 +1076,7 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 
 	if len(options) == 0 {
 		logger.V(1).Info("No expansion options")
+		args.podEquivalenceGroups = markAllGroupsAsUnschedulable(args.podEquivalenceGroups, NoScaleUpOptionsAvailableReason)
 		return scaleUpPlan{}, o.noOptionsAvailableStatus(ctx, args), nil
 	}
 

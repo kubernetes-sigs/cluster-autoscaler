@@ -37,6 +37,7 @@ import (
 	. "sigs.k8s.io/cluster-autoscaler/pkg/core/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 )
 
 type testIteration struct {
@@ -168,16 +169,18 @@ func TestScheduleDeletion(t *testing.T) {
 				scheduler.ResetAndReportMetrics()
 				tracker.ClearResultsNotNewerThan(time.Now())
 
-				if err := scheduleAll(ti.toSchedule, scheduler); err != nil {
+				ctx := test.GetTestContext(t)
+				if err := scheduleAll(ctx, ti.toSchedule, scheduler, tracker); err != nil {
 					t.Fatal(err)
 				}
 				for _, bucket := range ti.toAbort {
 					for _, node := range bucket.Nodes {
 						nodeDeleteResult := status.NodeDeleteResult{ResultType: status.NodeDeleteErrorFailedToDelete, Err: cmpopts.AnyError}
-						scheduler.AbortNodeDeletionDueToError(context.Background(), node, bucket.Group.Id(), false, "simulated abort", nodeDeleteResult)
+						tracker.StartDeletion(bucket.Group.Id(), node.Name)
+						scheduler.AbortNodeDeletionDueToError(ctx, node, bucket.Group.Id(), false, "simulated abort", nodeDeleteResult)
 					}
 				}
-				if err := scheduleAll(ti.toScheduleAfterAbort, scheduler); err != nil {
+				if err := scheduleAll(ctx, ti.toScheduleAfterAbort, scheduler, tracker); err != nil {
 					t.Fatal(err)
 				}
 
@@ -208,14 +211,15 @@ func (b *countingBatcher) AddNodes(ctx context.Context, nodes []*apiv1.Node, nod
 	b.addedNodes += len(nodes)
 }
 
-func scheduleAll(toSchedule []*budgets.NodeGroupView, scheduler *GroupDeletionScheduler) error {
+func scheduleAll(ctx context.Context, toSchedule []*budgets.NodeGroupView, scheduler *GroupDeletionScheduler, tracker *deletiontracker.NodeDeletionTracker) error {
 	for _, bucket := range toSchedule {
-		bucketSize, err := bucket.Group.TargetSize(context.Background())
+		bucketSize, err := bucket.Group.TargetSize(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to get target size for node group %q: %s", bucket.Group.Id(), err)
 		}
 		for _, node := range bucket.Nodes {
-			scheduler.ScheduleDeletion(context.Background(), framework.NewTestNodeInfo(node), bucket.Group, bucketSize, false)
+			tracker.StartDeletion(bucket.Group.Id(), node.Name)
+			scheduler.ScheduleDeletion(ctx, framework.NewTestNodeInfo(node), bucket.Group, bucketSize, false)
 		}
 	}
 	return nil

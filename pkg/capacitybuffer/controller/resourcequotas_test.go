@@ -460,6 +460,33 @@ func TestResourceQuotaAllocator(t *testing.T) {
 			wantReplicas:       []int32{2, 0, 5}, // Affinity pod limited, regular pod ignored
 			wantExceededQuotas: [][]string{{"quota-cross-ns"}, {"quota-cross-ns"}, nil},
 		},
+		{
+			name: "buffer limited by pods quota",
+			quotas: []*corev1.ResourceQuota{
+				testutil.NewResourceQuota(
+					testutil.WithResourceQuotaName("quota-pods"),
+					testutil.WithResourceQuotaHard(corev1.ResourceList{
+						"cpu":    resource.MustParse("10"),
+						"memory": resource.MustParse("10Gi"),
+						"pods":   resource.MustParse("10"),
+					}),
+					testutil.WithResourceQuotaUsed(corev1.ResourceList{
+						"cpu":    resource.MustParse("2"),
+						"memory": resource.MustParse("2Gi"),
+						"pods":   resource.MustParse("7"),
+					}),
+				),
+			},
+			buffers: []*v1.CapacityBuffer{
+				testutil.NewBuffer(
+					testutil.WithStatusPodTemplateRef("podTemp"),
+					testutil.WithStatusPodTemplateGeneration(0),
+					testutil.WithStatusReplicas(5),
+				),
+			},
+			wantReplicas:       []int32{3}, // CPU/memory allow 8 replicas, but pods limits to 3 (10 total - 7 used)
+			wantExceededQuotas: [][]string{{"quota-pods"}},
+		},
 	}
 
 	for _, tt := range tests {

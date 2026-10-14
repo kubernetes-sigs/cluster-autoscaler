@@ -160,6 +160,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&p.o.NodeGroupBackoffResetTimeout, "node-group-backoff-reset-timeout", 3*time.Hour, "nodeGroupBackoffResetTimeout is the time after last failed scale-up when the backoff duration is reset.")
 	fs.IntVar(&p.o.MaxScaleDownParallelism, "max-scale-down-parallelism", 10, "Maximum number of nodes (both empty and needing drain) that can be deleted in parallel.")
 	fs.IntVar(&p.o.MaxDrainParallelism, "max-drain-parallelism", 1, "Maximum number of nodes needing drain, that can be drained and deleted in parallel.")
+	fs.IntVar(&p.o.MaxConcurrentNodesTainting, "max-concurrent-nodes-tainting", 5, "Maximum number of nodes that can be tainted/untainted as ToBeDeleted at the same time.")
 	fs.BoolVar(&p.o.RecordDuplicatedEvents, "record-duplicated-events", false, "enable duplication of similar events within a 5 minute window.")
 	fs.IntVar(&p.o.MaxNodesPerScaleUp, "max-nodes-per-scaleup", 1000, "Max nodes added in a single scale-up. This is intended strictly for optimizing CA algorithm latency and not a tool to rate-limit scale-up throughput.")
 	fs.DurationVar(&p.o.MaxNodeGroupBinpackingDuration, "max-nodegroup-binpacking-duration", 10*time.Second, "Maximum time that will be spent in binpacking simulation for each NodeGroup.")
@@ -206,6 +207,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&p.o.CapacitybufferControllerEnabled, "capacity-buffer-controller-enabled", false, "Whether to enable the default controller for capacity buffers or not")
 	fs.BoolVar(&p.o.CapacitybufferPodInjectionEnabled, "capacity-buffer-pod-injection-enabled", false, "Whether to enable pod list processor that processes ready capacity buffers and injects fake pods accordingly")
 	fs.BoolVar(&p.o.CapacityBufferPodDryRunEnabled, "capacity-buffer-pod-dry-run-enabled", true, "Whether to use server dry run to build managed pod templates for capacity buffers. That ensures that the buffers' fake pods will more reliably resemble real pods by going through the pod defaulting, mutating and validating webhooks. No-op if --capacity-buffer-controller-enabled is false. Note: requires \"create\" permission on pods to call server dry run. No real pods will be created.")
+	fs.BoolVar(&p.o.CapacityBufferReadyReplicasEnabled, "capacity-buffer-ready-replicas-enabled", true, "Whether to reconcile capacity buffers' readyReplicas status field. No-op if --capacity-buffer-pod-injection-enabled is false.")
 	fs.BoolVar(&p.o.NodeRemovalLatencyTrackingEnabled, "node-removal-latency-tracking-enabled", false, "Whether to track latency from when an unneeded node is eligible for scale down until it is removed or needed again.")
 	fs.BoolVar(&p.o.MaxNodeSkipEvalTimeTrackerEnabled, "max-node-skip-eval-time-tracker-enabled", false, "Whether to enable the tracking of the maximum time of node being skipped during ScaleDown")
 	fs.BoolVar(&p.o.CapacityQuotasEnabled, "capacity-quotas-enabled", false, "Whether to enable CapacityQuota CRD support.")
@@ -293,6 +295,10 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 
 	if !slices.Contains(config.AvailableUnreadyNodesScopes, p.o.UnreadyNodesScope) {
 		return config.AutoscalingOptions{}, fmt.Errorf("Invalid value for --unready-nodes-scope flag: %q, available values: [%s]", p.o.UnreadyNodesScope, strings.Join(config.AvailableUnreadyNodesScopes, ","))
+	}
+
+	if p.o.MaxConcurrentNodesTainting < 1 {
+		return config.AutoscalingOptions{}, fmt.Errorf("Invalid value for --max-concurrent-nodes-tainting flag: %d", p.o.MaxConcurrentNodesTainting)
 	}
 
 	if p.o.DynamicResourceAllocationEnabled == false {

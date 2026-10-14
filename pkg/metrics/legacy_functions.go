@@ -194,8 +194,17 @@ func UpdateScaleDownInCooldown(inCooldown bool) {
 
 // RegisterOldUnregisteredNodesRemoved records number of old unregistered
 // nodes that have been removed by the cluster autoscaler
+//
+// Deprecated: superseded by RegisterNodesDeleted with NodeDeletionReasonOldUnregistered.
+// Scheduled for removal in 1.38.
 func RegisterOldUnregisteredNodesRemoved(nodesCount int) {
 	DefaultMetrics.RegisterOldUnregisteredNodesRemoved(nodesCount)
+}
+
+// RegisterNodesDeleted records number of nodes the cluster autoscaler attempted
+// to delete, broken down by the reason for the deletion and its result
+func RegisterNodesDeleted(nodesCount int, reason NodeDeletionReason, result NodeDeletionResult) {
+	DefaultMetrics.RegisterNodesDeleted(nodesCount, reason, result)
 }
 
 // UpdateOverflowingControllers sets the number of controllers that could not

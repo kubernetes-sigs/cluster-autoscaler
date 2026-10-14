@@ -17,7 +17,10 @@ limitations under the License.
 package builder
 
 import (
-	"context"
+	"testing"
+	"testing/synctest"
+	"time"
+
 	"github.com/stretchr/testify/assert"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
@@ -28,16 +31,14 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/expander"
 	"sigs.k8s.io/cluster-autoscaler/pkg/loop"
+	testutils "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"testing"
-	"testing/synctest"
-	"time"
 )
 
 func TestAutoscalerBuilderNoError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := testutils.GetTestContextWithCancel(t)
 
 		options := config.AutoscalingOptions{
 			CloudProviderName: "gce",

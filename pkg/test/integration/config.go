@@ -42,6 +42,7 @@ var DefaultAutoscalingOptions = config.AutoscalingOptions{
 	ScaleDownDelayAfterFailure: 0,
 	MaxScaleDownParallelism:    10,
 	MaxDrainParallelism:        1,
+	MaxConcurrentNodesTainting: 5,
 	ScaleDownDelayTypeLocal:    true,
 	ScaleDownEnabled:           true,
 	MaxNodesTotal:              10000,

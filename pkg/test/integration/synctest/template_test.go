@@ -17,7 +17,6 @@ limitations under the License.
 package synctest
 
 import (
-	"context"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -51,7 +50,7 @@ func TestStaticAutoscaler_Template(t *testing.T) {
 	fakes := infra.Fakes
 
 	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := test.GetTestContextWithCancel(t)
 		// This ensures all background goroutines wake up and exit when the test finishes.
 		defer TearDown(cancel)
 
@@ -63,10 +62,10 @@ func TestStaticAutoscaler_Template(t *testing.T) {
 		fakes.CloudProvider.AddNodeGroup("ng", fakecloudprovider.WithNode(n))
 		fakes.K8s.AddPod(test.BuildScheduledTestPod("p", 600, 100, n.Name))
 
-		err = RunOnceAfter(t, autoscaler, unneededTime)
+		err = RunOnceAfter(ctx, t, autoscaler, unneededTime)
 		assert.NoError(t, err)
 		// Make assertions.
-		size, _ := fakes.CloudProvider.GetNodeGroup("ng").TargetSize(context.Background())
+		size, _ := fakes.CloudProvider.GetNodeGroup("ng").TargetSize(ctx)
 		assert.Equal(t, 1, size)
 	})
 }

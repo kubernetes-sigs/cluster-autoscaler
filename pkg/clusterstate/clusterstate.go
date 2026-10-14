@@ -358,7 +358,10 @@ func (csr *ClusterStateRegistry) updateScaleRequests(ctx context.Context, curren
 		if csr.asyncNodeGroupStateChecker.IsUpcoming(scaleUpRequest.NodeGroup) {
 			continue
 		}
-		if !csr.areThereUpcomingNodesInNodeGroup(ctx, nodeGroupName) {
+		upcoming, ok := csr.getUpcomingNodesInNodeGroup(ctx, nodeGroupName)
+		// Long-unregistered nodes aren't upcoming, but they haven't fulfilled the request.
+		pending := upcoming + len(csr.perNodeGroupReadiness[nodeGroupName].LongUnregistered)
+		if !ok || pending <= 0 {
 			// scale up finished successfully, remove request
 			delete(csr.scaleUpRequests, nodeGroupName)
 			logger.V(4).Info("Scale up in group finished successfully", "nodeGroupName", nodeGroupName, "duration", currentTime.Sub(scaleUpRequest.Time))
@@ -431,7 +434,11 @@ func (csr *ClusterStateRegistry) UpdateNodes(ctx context.Context, nodes []*apiv1
 	csr.updateNodeGroupMetrics(ctx)
 	targetSizes, err := getTargetSizes(ctx, csr.cloudProvider)
 	if err != nil {
-		return err
+		logger := klog.FromContext(ctx)
+		logger.Info("Failed to get target sizes for some node groups", "err", err)
+		if len(targetSizes) == 0 {
+			return err
+		}
 	}
 	metrics.UpdateNodeGroupTargetSize(targetSizes)
 
@@ -486,16 +493,23 @@ func (csr *ClusterStateRegistry) Recalculate(ctx context.Context) {
 }
 
 // getTargetSizes gets target sizes of node groups.
+// If TargetSize() fails for a node group, that group is skipped so healthy
+// groups can still be autoscaled. The returned error is a join of per-group
+// failures; the map contains sizes for groups that succeeded.
 func getTargetSizes(ctx context.Context, cp cloudprovider.CloudProvider) (map[string]int, error) {
 	result := make(map[string]int)
+	var errs []error
+	logger := klog.FromContext(ctx)
 	for _, ng := range cp.NodeGroups(ctx) {
 		size, err := ng.TargetSize(ctx)
 		if err != nil {
-			return map[string]int{}, err
+			logger.Info("Failed to get target size for node group", "nodeGroup", ng.Id(), "err", err)
+			errs = append(errs, fmt.Errorf("node group %s: %w", ng.Id(), err))
+			continue
 		}
 		result[ng.Id()] = size
 	}
-	return result, nil
+	return result, errors.Join(errs...)
 }
 
 // IsClusterHealthy returns true if the cluster health is within the acceptable limits

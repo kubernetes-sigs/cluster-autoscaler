@@ -1211,6 +1211,7 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 	opts := config.AutoscalingOptions{
 		MaxScaleDownParallelism:        10,
 		MaxDrainParallelism:            5,
+		MaxConcurrentNodesTainting:     5,
 		MaxPodEvictionTime:             0,
 		DaemonSetEvictionForEmptyNodes: true,
 	}
@@ -1533,6 +1534,7 @@ func TestStartDeletionInBatchBasic(t *testing.T) {
 			opts := config.AutoscalingOptions{
 				MaxScaleDownParallelism:        10,
 				MaxDrainParallelism:            5,
+				MaxConcurrentNodesTainting:     5,
 				MaxPodEvictionTime:             0,
 				DaemonSetEvictionForEmptyNodes: true,
 			}

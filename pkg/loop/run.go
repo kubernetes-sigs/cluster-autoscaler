@@ -50,6 +50,9 @@ func RunAutoscalerOnce(ctx context.Context, autoscaler autoscaler, healthCheck *
 	healthCheck.UpdateLastActivity(loopStart)
 
 	err := autoscaler.RunOnce(ctx, loopStart)
+	if err != nil {
+		logger.Error(err, "Autoscaling iteration aborted with an error", "errorType", err.Type())
+	}
 	if err != nil && err.Type() != errors.TransientError {
 		metrics.RegisterError(err)
 	} else {

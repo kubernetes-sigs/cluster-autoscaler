@@ -35,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apimachineryruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	apimachinerywatch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
 	k8s_testing "k8s.io/client-go/testing"
 	"k8s.io/klog/v2"
@@ -55,6 +56,16 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 )
+
+func init() {
+	// Bump the default channel size of fake watchers (from default of 100)
+	// to avoid "panic: channel full" during large benchmarks.
+	// When simulating thousands of node deletions, corresponding delete events
+	// are written synchronously to the watcher's result channel. Since tests
+	// don't always actively drain these events synchronously, a larger channel
+	// buffer prevents the channel from filling up and causing benchmark failures.
+	apimachinerywatch.DefaultChanSize = 20000
+}
 
 // Benchmark evaluates the performance of the Cluster Autoscaler's primary control loop (RunOnce).
 //
@@ -765,6 +776,7 @@ func BenchmarkRunOnceScaleDown(b *testing.B) {
 			opts.NodeGroupDefaults.ScaleDownUnneededTime = 0
 			opts.MaxScaleDownParallelism = 2000
 			opts.MaxDrainParallelism = 2000
+			opts.MaxConcurrentNodesTainting = 5
 			opts.ScaleDownDelayAfterAdd = 0
 			opts.ScaleDownEnabled = true
 			opts.ScaleDownNonEmptyCandidatesCount = 2000
@@ -783,6 +795,7 @@ func BenchmarkRunOnceScaleDownDRA(b *testing.B) {
 			opts.NodeGroupDefaults.ScaleDownUnneededTime = 0
 			opts.MaxScaleDownParallelism = 2000
 			opts.MaxDrainParallelism = 2000
+			opts.MaxConcurrentNodesTainting = 5
 			opts.ScaleDownDelayAfterAdd = 0
 			opts.ScaleDownEnabled = true
 			opts.ScaleDownNonEmptyCandidatesCount = 2000

@@ -108,8 +108,11 @@ func (ds *GroupDeletionScheduler) scheduleDeletion(ctx context.Context, nodeInfo
 			if err := nodeGroup.ForceDeleteNodes(ctx, []*apiv1.Node{nodeInfo.Node()}); err != nil {
 				focrefulNodeDeleteResult := status.NodeDeleteResult{ResultType: status.NodeDeleteErrorFailedToDelete, Err: err}
 				ds.AbortNodeDeletion(ctx, nodeInfo.Node(), nodeGroup.Id(), drain, "forceful node deletion failed", focrefulNodeDeleteResult, true)
+				metrics.RegisterNodesDeleted(1, metrics.NodeDeletionReasonScaleDown, metrics.NodeDeletionFailed)
 				return
 			}
+
+			metrics.RegisterNodesDeleted(1, metrics.NodeDeletionReasonScaleDown, metrics.NodeDeletionSucceeded)
 		} else {
 			ds.AbortNodeDeletion(ctx, nodeInfo.Node(), nodeGroup.Id(), drain, "prepareNodeForDeletion failed", nodeDeleteResult, true)
 			return

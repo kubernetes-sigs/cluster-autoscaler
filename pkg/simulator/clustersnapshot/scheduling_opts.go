@@ -34,6 +34,9 @@ type NodeOrderMapping interface {
 	// MarkMatch marks the node at the given index as the last successful match.
 	// This can be used by the mapping to adjust the order for subsequent pods.
 	MarkMatch(index int)
+	// PreferProcessingInOrder returns true if the passing node at the smallest step 'i' is preferred.
+	// Otherwise, a passing node at a later step may be picked. Processing in order may cause a slight performance penalty.
+	PreferProcessingInOrder() bool
 }
 
 type lastIndexOrderMapping struct {
@@ -60,6 +63,11 @@ func (m *lastIndexOrderMapping) At(i int) int {
 
 func (m *lastIndexOrderMapping) MarkMatch(index int) {
 	m.lastIndex = index
+}
+
+func (m *lastIndexOrderMapping) PreferProcessingInOrder() bool {
+	// Starting from the last match is only a heuristic, so any passing node will do.
+	return false
 }
 
 type priorityNodeOrderMapping struct {
@@ -93,6 +101,11 @@ func (m *priorityNodeOrderMapping) At(i int) int {
 
 func (m *priorityNodeOrderMapping) MarkMatch(index int) {
 	// No work needed here bec we want to respect the ordering every time.
+}
+
+func (m *priorityNodeOrderMapping) PreferProcessingInOrder() bool {
+	// The nodes are sorted by priority, so the passing node with the highest priority is preferred.
+	return true
 }
 
 // SchedulingOptions contains options for the scheduling strategies and simulation.

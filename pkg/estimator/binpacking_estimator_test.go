@@ -18,6 +18,7 @@ package estimator
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -26,6 +27,9 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
+	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
+	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot/store"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot/testsnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
@@ -251,6 +255,163 @@ func TestBinpackingEstimate(t *testing.T) {
 				assert.Equal(t, fastpathEstimatedPods, estimatedPods)
 			}
 		})
+	}
+}
+
+// TestBinpackingEstimatePlacementOnAddedNodes checks on which of the nodes added during the
+// estimation pods from later equivalence groups end up.
+func TestBinpackingEstimatePlacementOnAddedNodes(t *testing.T) {
+	const zoneKey = "topology.kubernetes.io/zone"
+	pods := func(name string, millicores int64, count int, options ...func(*apiv1.Pod)) PodEquivalenceGroup {
+		options = append([]func(*apiv1.Pod){WithNamespace("universe"), WithLabels(map[string]string{"app": name})}, options...)
+		return makePodEquivalenceGroup(BuildTestPod(name, millicores, 100, options...), count)
+	}
+	// Pods of this group can't share a zone, so every pod after the first one fails to schedule
+	// and leaves an empty node added for it behind.
+	zonalAntiAffinityPods := func(name string, millicores int64, count int) PodEquivalenceGroup {
+		return pods(name, millicores, count, WithPodAntiAffinity(map[string]string{"app": name}, zoneKey))
+	}
+
+	// Nodes added by the estimator are named after the template, with the index of the node in the
+	// order they were added (see addNewNodeToSnapshot), so the highest index is the last node.
+	const templateName = "template"
+	addedNode := func(index int) string { return fmt.Sprintf("%s-e-%d", templateName, index) }
+
+	testCases := []struct {
+		name string
+		// All groups have different pod sizes, so the orderer keeps them in this order.
+		podsEquivalenceGroups []PodEquivalenceGroup
+		fastpath              bool
+		maxNodes              int
+		expectNodeCount       int
+		expectPodCount        int
+		// Number of pods on each node added during the estimation, by node name.
+		expectPodsPerNode map[string]int
+	}{
+		{
+			name: "pods from later groups go to the last node while it has room",
+			podsEquivalenceGroups: []PodEquivalenceGroup{
+				pods("big", 600, 2),
+				pods("a", 150, 1),
+				pods("b", 120, 1),
+				pods("c", 100, 1),
+			},
+			expectNodeCount:   2,
+			expectPodCount:    5,
+			expectPodsPerNode: map[string]int{addedNode(0): 1, addedNode(1): 4},
+		},
+		{
+			name: "pods go to an earlier node when the last node is full",
+			podsEquivalenceGroups: []PodEquivalenceGroup{
+				pods("big", 600, 2),
+				pods("medium", 400, 1),
+				pods("small", 300, 1),
+			},
+			expectNodeCount:   2,
+			expectPodCount:    4,
+			expectPodsPerNode: map[string]int{addedNode(0): 2, addedNode(1): 2},
+		},
+		{
+			name: "pods go to an earlier node when the last node has a host port conflict",
+			podsEquivalenceGroups: []PodEquivalenceGroup{
+				pods("big", 600, 2),
+				pods("hostport", 200, 2, WithHostPort(5555)),
+			},
+			expectNodeCount:   2,
+			expectPodCount:    4,
+			expectPodsPerNode: map[string]int{addedNode(0): 2, addedNode(1): 2},
+		},
+		{
+			name: "pods go to an earlier node when the last node fails hostname anti-affinity",
+			podsEquivalenceGroups: []PodEquivalenceGroup{
+				pods("big", 600, 2),
+				pods("spread", 200, 2, WithPodHostnameAntiAffinity(map[string]string{"app": "spread"})),
+			},
+			expectNodeCount:   2,
+			expectPodCount:    4,
+			expectPodsPerNode: map[string]int{addedNode(0): 2, addedNode(1): 2},
+		},
+		{
+			name: "empty last node doesn't take pods that fit on a node with pods",
+			podsEquivalenceGroups: []PodEquivalenceGroup{
+				zonalAntiAffinityPods("zonal", 600, 2),
+				pods("small", 300, 1),
+			},
+			expectNodeCount:   1,
+			expectPodCount:    2,
+			expectPodsPerNode: map[string]int{addedNode(0): 2, addedNode(1): 0},
+		},
+		{
+			name: "empty last node is used when pods don't fit on any node with pods",
+			podsEquivalenceGroups: []PodEquivalenceGroup{
+				zonalAntiAffinityPods("zonal", 600, 2),
+				pods("medium", 500, 1),
+			},
+			expectNodeCount:   2,
+			expectPodCount:    2,
+			expectPodsPerNode: map[string]int{addedNode(0): 1, addedNode(1): 1},
+		},
+		{
+			// The last group is binpacked with fastpath: 10 of its 29 remaining pods fill the empty
+			// last node, and the other 19 are counted on 2 more nodes that aren't added to the snapshot.
+			name: "fastpath reuses an empty last node",
+			podsEquivalenceGroups: []PodEquivalenceGroup{
+				zonalAntiAffinityPods("zonal", 600, 2),
+				pods("small", 300, 1),
+				pods("many", 100, 30),
+			},
+			fastpath:          true,
+			expectNodeCount:   4,
+			expectPodCount:    32,
+			expectPodsPerNode: map[string]int{addedNode(0): 3, addedNode(1): 10},
+		},
+		{
+			// Adding another node instead of reusing the empty one would use up the limit one node
+			// early and leave the last 9 pods out.
+			name: "fastpath reuses an empty last node without using up the node limit",
+			podsEquivalenceGroups: []PodEquivalenceGroup{
+				zonalAntiAffinityPods("zonal", 600, 2),
+				pods("small", 300, 1),
+				pods("many", 100, 30),
+			},
+			fastpath:          true,
+			maxNodes:          4,
+			expectNodeCount:   4,
+			expectPodCount:    32,
+			expectPodsPerNode: map[string]int{addedNode(0): 3, addedNode(1): 10},
+		},
+	}
+	stores := map[string]func() clustersnapshot.ClusterSnapshotStore{
+		"basic": func() clustersnapshot.ClusterSnapshotStore { return store.NewBasicSnapshotStore() },
+		"delta": func() clustersnapshot.ClusterSnapshotStore { return store.NewDeltaSnapshotStore() },
+	}
+	for _, tc := range testCases {
+		for storeName, newStore := range stores {
+			t.Run(fmt.Sprintf("%s/%s", tc.name, storeName), func(t *testing.T) {
+				clusterSnapshot := testsnapshot.NewCustomTestSnapshotOrDie(t, newStore())
+				err := clusterSnapshot.AddNodeInfo(framework.NewTestNodeInfo(makeNode(100, 100, 10, "oldnode", "zone-jupiter")))
+				assert.NoError(t, err)
+
+				podsPerNode := map[string]int{}
+				recordPodsPerNode := func(snapshot clustersnapshot.ClusterSnapshot, _ cloudprovider.NodeGroup, _ map[string]bool) {
+					nodeInfos, err := snapshot.ListNodeInfos()
+					assert.NoError(t, err)
+					for _, nodeInfo := range nodeInfos {
+						if name := nodeInfo.Node().Name; name != "oldnode" {
+							podsPerNode[name] = len(nodeInfo.Pods())
+						}
+					}
+				}
+				limiter := NewThresholdBasedEstimationLimiter([]Threshold{NewStaticThreshold(tc.maxNodes, time.Duration(0))})
+				estimator := NewBinpackingNodeEstimator(clusterSnapshot, limiter, NewDecreasingPodOrderer(), nil, recordPodsPerNode, tc.fastpath)
+				nodeInfo := framework.NewTestNodeInfo(makeNode(1000, 1000, 10, "template", "zone-mars"))
+
+				estimatedNodes, estimatedPods := estimator.Estimate(t.Context(), tc.podsEquivalenceGroups, nodeInfo, nil)
+				assert.Equal(t, tc.expectNodeCount, estimatedNodes)
+				assert.Equal(t, tc.expectPodCount, len(estimatedPods))
+				assert.Equal(t, tc.expectPodsPerNode, podsPerNode)
+			})
+		}
 	}
 }
 

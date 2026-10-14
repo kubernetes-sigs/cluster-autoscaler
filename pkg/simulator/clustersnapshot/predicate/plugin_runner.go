@@ -22,6 +22,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
@@ -140,7 +141,11 @@ func (p *SchedulerPluginRunner) RunFiltersUntilPassingNode(pod *apiv1.Pod, opts 
 		// Filter didn't pass for some plugin, so this Node won't work - move on to the next one.
 	}
 
-	workqueue.ParallelizeUntil(ctx, p.parallelism, len(nodeInfosList), checkNode, workqueue.WithChunkSize(chunkSizeFor(len(nodeInfosList), p.parallelism)))
+	if nodeOrdering.PreferProcessingInOrder() {
+		parallelizeUntilInOrder(ctx, p.parallelism, len(nodeInfosList), checkNode)
+	} else {
+		workqueue.ParallelizeUntil(ctx, p.parallelism, len(nodeInfosList), checkNode, workqueue.WithChunkSize(chunkSizeFor(len(nodeInfosList), p.parallelism)))
+	}
 
 	if foundNode != nil {
 		nodeOrdering.MarkMatch(foundIndex)
@@ -216,6 +221,34 @@ func (p *SchedulerPluginRunner) failingFilterDebugInfo(filterName string, nodeIn
 	}
 
 	return strings.Join(infoParts, ", ")
+}
+
+// parallelizeUntilInOrder is like workqueue.ParallelizeUntil, but starts the pieces in increasing order, and never drops a
+// started piece when ctx is cancelled. So if doWorkPiece cancels ctx at piece i, every piece before i still runs.
+func parallelizeUntilInOrder(ctx context.Context, workers, pieces int, doWorkPiece workqueue.DoWorkPieceFunc) {
+	var (
+		nextPiece atomic.Int64
+		wg        sync.WaitGroup
+	)
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				piece := int(nextPiece.Add(1) - 1)
+				if piece >= pieces {
+					return
+				}
+				doWorkPiece(piece)
+			}
+		}()
+	}
+
+	wg.Wait()
 }
 
 // chunkSizeFor returns a chunk size for the given number of items to use for

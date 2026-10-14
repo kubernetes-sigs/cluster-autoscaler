@@ -50,6 +50,12 @@ type NodeGroupType string
 // PodEvictionResult describes result of the pod eviction attempt
 type PodEvictionResult string
 
+// NodeDeletionReason describes why Cluster Autoscaler attempted to delete a node
+type NodeDeletionReason string
+
+// NodeDeletionResult describes result of the node deletion attempt
+type NodeDeletionResult string
+
 const (
 	caNamespace           = "cluster_autoscaler"
 	readyLabel            = "ready"
@@ -99,7 +105,22 @@ const (
 	// PodEvictionFailed means creation of the pod eviction object failed
 	PodEvictionFailed PodEvictionResult = "failed"
 
+	// NodeDeletionReasonScaleDown means the node was deleted by the scale-down pipeline
+	NodeDeletionReasonScaleDown NodeDeletionReason = "scale_down"
+	// NodeDeletionReasonCreateErrors means the node was deleted because it failed to be created
+	NodeDeletionReasonCreateErrors NodeDeletionReason = "create_errors"
+	// NodeDeletionReasonOldUnregistered means the node was deleted because it did not register in time
+	NodeDeletionReasonOldUnregistered NodeDeletionReason = "old_unregistered"
+
+	// NodeDeletionSucceeded means the node deletion request succeeded
+	NodeDeletionSucceeded NodeDeletionResult = "succeeded"
+	// NodeDeletionFailed means the node deletion request failed
+	NodeDeletionFailed NodeDeletionResult = "failed"
+
 	gpuNodeMetricsDeprecatedVersion = "1.36.0"
+	// nodeDeletionMetricsDeprecatedVersion is the version in which metrics superseded
+	// by nodes_deleted_total were deprecated. They are scheduled for removal in 1.38.
+	nodeDeletionMetricsDeprecatedVersion = "1.37.0"
 )
 
 // Names of Cluster Autoscaler operations
@@ -182,6 +203,7 @@ type caMetrics struct {
 	unremovableNodesCount            *k8smetrics.GaugeVec
 	scaleDownInCooldown              *k8smetrics.Gauge
 	oldUnregisteredNodesRemovedCount *k8smetrics.Counter
+	nodeDeletionCount                *k8smetrics.CounterVec
 	overflowingControllersCount      *k8smetrics.Gauge
 	skippedScaleEventsCount          *k8smetrics.CounterVec
 	nodeGroupCreationCount           *k8smetrics.CounterVec
@@ -450,10 +472,19 @@ func newCaMetrics() *caMetrics {
 
 		oldUnregisteredNodesRemovedCount: k8smetrics.NewCounter(
 			&k8smetrics.CounterOpts{
-				Namespace: caNamespace,
-				Name:      "old_unregistered_nodes_removed_count",
-				Help:      "Number of unregistered nodes removed by CA.",
+				Namespace:         caNamespace,
+				Name:              "old_unregistered_nodes_removed_count",
+				Help:              "Number of unregistered nodes removed by CA. Superseded by nodes_deleted_total with reason=old_unregistered.",
+				DeprecatedVersion: nodeDeletionMetricsDeprecatedVersion,
 			},
+		),
+
+		nodeDeletionCount: k8smetrics.NewCounterVec(
+			&k8smetrics.CounterOpts{
+				Namespace: caNamespace,
+				Name:      "nodes_deleted_total",
+				Help:      "Number of nodes CA attempted to delete, by reason and result.",
+			}, []string{"reason", "result"},
 		),
 
 		overflowingControllersCount: k8smetrics.NewGauge(
@@ -588,6 +619,7 @@ func (m *caMetrics) RegisterAll(emitPerNodeGroupMetrics bool) {
 	m.mustRegister(m.unremovableNodesCount)
 	m.mustRegister(m.scaleDownInCooldown)
 	m.mustRegister(m.oldUnregisteredNodesRemovedCount)
+	m.mustRegister(m.nodeDeletionCount)
 	m.mustRegister(m.overflowingControllersCount)
 	m.mustRegister(m.skippedScaleEventsCount)
 	m.mustRegister(m.nodeGroupCreationCount)
@@ -626,6 +658,12 @@ func (m *caMetrics) InitMetrics() {
 
 	for _, result := range []PodEvictionResult{PodEvictionSucceed, PodEvictionFailed} {
 		m.evictionsCount.WithLabelValues(string(result)).Add(0)
+	}
+
+	for _, reason := range []NodeDeletionReason{NodeDeletionReasonScaleDown, NodeDeletionReasonCreateErrors, NodeDeletionReasonOldUnregistered} {
+		for _, result := range []NodeDeletionResult{NodeDeletionSucceeded, NodeDeletionFailed} {
+			m.nodeDeletionCount.WithLabelValues(string(reason), string(result)).Add(0)
+		}
 	}
 
 	m.skippedScaleEventsCount.WithLabelValues(DirectionScaleDown, CpuResourceLimit).Add(0)
@@ -871,8 +909,17 @@ func (m *caMetrics) UpdateScaleDownInCooldown(inCooldown bool) {
 
 // RegisterOldUnregisteredNodesRemoved records number of old unregistered
 // nodes that have been removed by the cluster autoscaler
+//
+// Deprecated: superseded by RegisterNodesDeleted with NodeDeletionReasonOldUnregistered.
+// Scheduled for removal in 1.38.
 func (m *caMetrics) RegisterOldUnregisteredNodesRemoved(nodesCount int) {
 	m.oldUnregisteredNodesRemovedCount.Add(float64(nodesCount))
+}
+
+// RegisterNodesDeleted records number of nodes the cluster autoscaler attempted
+// to delete, broken down by the reason for the deletion and its result
+func (m *caMetrics) RegisterNodesDeleted(nodesCount int, reason NodeDeletionReason, result NodeDeletionResult) {
+	m.nodeDeletionCount.WithLabelValues(string(reason), string(result)).Add(float64(nodesCount))
 }
 
 // UpdateOverflowingControllers sets the number of controllers that could not

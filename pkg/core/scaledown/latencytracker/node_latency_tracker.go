@@ -103,7 +103,7 @@ func (t *NodeLatencyTracker) Process(ctx context.Context, autoscalingCtx *ca_con
 
 	if klog.V(6).Enabled() {
 		for nodeName := range t.unneededNodes {
-			logger.Info("Node remains in unneeded list (not scaled down). Continuing to track latency.", "nodeName", nodeName)
+			logger.V(6).Info("Node remains in unneeded list (not scaled down). Continuing to track latency.", "nodeName", nodeName)
 		}
 	}
 }
@@ -128,13 +128,12 @@ func (t *NodeLatencyTracker) recordAndCleanup(ctx context.Context, nodeName stri
 
 	if latency > 0 {
 		metrics.UpdateScaleDownNodeRemovalLatency(isRemoved, delayReason, latency)
-	} else {
-		logger.V(6).Info("Node was unneeded. Latency is <= 0, skipping metric", "nodeName", nodeName, "duration", duration, "threshold", info.removalThreshold, "latency", latency, "isRemoved", isRemoved, "delayReason", delayReason)
+		if !isRemoved {
+			logger.V(4).Info("Node became needed again", "nodeName", nodeName, "unneededDuration", duration, "delayReason", delayReason, "latency", latency)
+		}
 	}
 	if isRemoved {
 		t.logDeletion(ctx, nodeName, duration, info.removalThreshold, latency)
-	} else {
-		logger.V(4).Info("Node became needed again", "nodeName", nodeName, "unneededDuration", duration, "delayReason", delayReason, "latency", latency)
 	}
 }
 

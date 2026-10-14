@@ -357,6 +357,9 @@ func (m *earlyExitNodeOrderMapping) At(i int) int {
 func (m *earlyExitNodeOrderMapping) MarkMatch(index int) {
 	m.sortedNodesOrdering.MarkMatch(index)
 }
+func (m *earlyExitNodeOrderMapping) PreferProcessingInOrder() bool {
+	return m.sortedNodesOrdering.PreferProcessingInOrder()
+}
 
 func TestRunFilterUntilPassingNode_ExitEarlyWhenOrderingReturnNegativeOne(t *testing.T) {
 	p100 := BuildTestPod("p100", 100, 1000)
@@ -389,11 +392,6 @@ func TestRunFilterUntilPassingNode_ExitEarlyWhenOrderingReturnNegativeOne(t *tes
 func TestRunFilterUntilPassingNode_PreferSmallestSteps(t *testing.T) {
 	p100 := BuildTestPod("p100", 100, 1000)
 
-	n1 := BuildTestNode("n1", 1000, 2000000)
-	n2 := BuildTestNode("n2", 1000, 2000000)
-	n3 := BuildTestNode("n3", 1000, 2000000)
-	n4 := BuildTestNode("n4", 1000, 2000000)
-
 	orderedIterator := clustersnapshot.NewPriorityNodeOrderMapping(func(a, b *framework.NodeInfo) bool {
 		return a.Node().Name < b.Node().Name
 	})
@@ -401,14 +399,14 @@ func TestRunFilterUntilPassingNode_PreferSmallestSteps(t *testing.T) {
 	pluginRunner, snapshot, err := newTestPluginRunnerAndSnapshot(nil)
 	pluginRunner.parallelism = 16
 	assert.NoError(t, err)
-	assert.NoError(t, snapshot.AddNodeInfo(framework.NewTestNodeInfo(n1)))
-	assert.NoError(t, snapshot.AddNodeInfo(framework.NewTestNodeInfo(n2)))
-	assert.NoError(t, snapshot.AddNodeInfo(framework.NewTestNodeInfo(n3)))
-	assert.NoError(t, snapshot.AddNodeInfo(framework.NewTestNodeInfo(n4)))
+	// Many more nodes than workers, so that n001 and n002 are in the same chunk.
+	for i := 1; i <= 100; i++ {
+		assert.NoError(t, snapshot.AddNodeInfo(framework.NewTestNodeInfo(BuildTestNode(fmt.Sprintf("n%03d", i), 1000, 2000000))))
+	}
 
-	// We want to ensure that even if n2 is checked faster, n1 is preferred if it also passes.
-	// We use channels to block n1's evaluation until n2 has been visited, ensuring n2
-	// would finish first if not for the the logic that prefers smallest steps.
+	// We want to ensure that even if n002 is checked faster, n001 is preferred if it also passes.
+	// We use channels to block n001's evaluation until n002 has been visited, ensuring n002
+	// would finish first if not for the logic that prefers smallest steps.
 	delayFirstNode := make(chan struct{})
 	firstNodeReached := make(chan struct{})
 	secondNodeVisited := make(chan struct{})
@@ -420,19 +418,19 @@ func TestRunFilterUntilPassingNode_PreferSmallestSteps(t *testing.T) {
 		node, _, err := pluginRunner.RunFiltersUntilPassingNode(p100, clustersnapshot.SchedulingOptions{
 			NodeOrdering: orderedIterator, // Needed to make the test deterministic.
 			IsNodeAcceptable: func(info *framework.NodeInfo) bool {
-				if info.Node().Name == "n1" {
+				switch info.Node().Name {
+				case "n001":
 					close(firstNodeReached)
 					<-delayFirstNode
-				} else {
-					// Block other nodes until n1's callback is in flight. Otherwise
-					// a passing node could call cancel() before the workqueue dispatches
-					// n1's chunk, causing n1 to be silently skipped and the test to flake
+					return true
+				case "n002":
+					// Make sure that n002 passes while n001 is being checked.
 					<-firstNodeReached
-					if info.Node().Name == "n2" {
-						close(secondNodeVisited)
-					}
+					close(secondNodeVisited)
+					return true
+				default:
+					return false
 				}
-				return true // all nodes pass
 			},
 		})
 		assert.NoError(t, err)
@@ -440,12 +438,17 @@ func TestRunFilterUntilPassingNode_PreferSmallestSteps(t *testing.T) {
 		close(schedulingFinished)
 	}()
 
-	<-secondNodeVisited
+	select {
+	case <-secondNodeVisited:
+	case <-time.After(5 * time.Second):
+		// E.g. n002 is queued behind n001 on the same worker.
+		t.Errorf("Timeout while waiting for n002 to be visited while n001 is being checked.")
+	}
 	assert.Empty(t, chosenNodeName)
 
 	close(delayFirstNode)
 	<-schedulingFinished
-	assert.Equal(t, "n1", chosenNodeName)
+	assert.Equal(t, "n001", chosenNodeName)
 }
 
 func TestDebugInfo(t *testing.T) {

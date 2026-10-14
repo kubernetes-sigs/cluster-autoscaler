@@ -283,6 +283,7 @@ func setupCloudProvider(config *autoscalerSetupConfig) (*testprovider.TestCloudP
 func applySaneDefaultOpts(autoscalingOptions *config.AutoscalingOptions) {
 	autoscalingOptions.MaxScaleDownParallelism = 10
 	autoscalingOptions.MaxDrainParallelism = 1
+	autoscalingOptions.MaxConcurrentNodesTainting = 5
 	autoscalingOptions.NodeDeletionBatcherInterval = 0 * time.Second
 	autoscalingOptions.NodeDeleteDelayAfterTaint = 1 * time.Second
 	autoscalingOptions.ScaleDownSimulationTimeout = 10 * time.Second
@@ -3167,6 +3168,7 @@ func waitForDeleteToFinish(t *testing.T, deleteFinished <-chan bool) {
 func newScaleDownPlannerAndActuator(autoscalingCtx *ca_context.AutoscalingContext, p *ca_processors.AutoscalingProcessors, cs *clusterstate.ClusterStateRegistry, nodeDeletionTracker *deletiontracker.NodeDeletionTracker) (scaledown.Planner, scaledown.Actuator) {
 	autoscalingCtx.MaxScaleDownParallelism = 10
 	autoscalingCtx.MaxDrainParallelism = 1
+	autoscalingCtx.MaxConcurrentNodesTainting = 5
 	autoscalingCtx.NodeDeletionBatcherInterval = 0 * time.Second
 	autoscalingCtx.NodeDeleteDelayAfterTaint = 1 * time.Millisecond
 	autoscalingCtx.ScaleDownSimulationTimeout = 10 * time.Second
@@ -3280,6 +3282,7 @@ func buildStaticAutoscaler(t *testing.T, provider cloudprovider.CloudProvider, a
 		},
 		MaxScaleDownParallelism:    10,
 		MaxDrainParallelism:        1,
+		MaxConcurrentNodesTainting: 5,
 		ScaleDownEnabled:           true,
 		MaxBulkSoftTaintCount:      20,
 		MaxBulkSoftTaintTime:       5 * time.Second,

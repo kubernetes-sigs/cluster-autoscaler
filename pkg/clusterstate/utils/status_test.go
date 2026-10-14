@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"sigs.k8s.io/yaml"
+
 	apiv1 "k8s.io/api/core/v1"
 	kube_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -259,4 +261,123 @@ func TestWriteStatusConfigMapMarshal(t *testing.T) {
 		t.Fatalf("Expected WriteStatusConfigMap not to return error, got: %v", err)
 	}
 	assert.YAMLEq(t, string(want), result.Data["status"])
+}
+
+func TestMarshalAndTruncateStatus(t *testing.T) {
+	testNodeGroups := []api.NodeGroupStatus{
+		// Size when marshalled individually: ~1025 bytes
+		{Name: "ng-1-healthy", Health: api.NodeGroupHealthCondition{Status: api.ClusterAutoscalerHealthy}, ScaleUp: api.NodeGroupScaleUpCondition{Status: api.ClusterAutoscalerNoActivity}, ScaleDown: api.ScaleDownCondition{Status: api.ClusterAutoscalerNoCandidates}},
+		// Size when marshalled individually: ~981 bytes
+		{Name: "ng-2-unhealthy", Health: api.NodeGroupHealthCondition{Status: api.ClusterAutoscalerUnhealthy}},
+		// Size when marshalled individually: ~1005 bytes
+		{Name: "ng-3-scaleup-backoff", Health: api.NodeGroupHealthCondition{Status: api.ClusterAutoscalerHealthy}, ScaleUp: api.NodeGroupScaleUpCondition{Status: api.ClusterAutoscalerBackoff}},
+		// Size when marshalled individually: ~1011 bytes
+		{Name: "ng-4-scaleup-inprogress", Health: api.NodeGroupHealthCondition{Status: api.ClusterAutoscalerHealthy}, ScaleUp: api.NodeGroupScaleUpCondition{Status: api.ClusterAutoscalerInProgress}},
+		// Size when marshalled individually: ~1020 bytes
+		{Name: "ng-5-scaledown-candidates", Health: api.NodeGroupHealthCondition{Status: api.ClusterAutoscalerHealthy}, ScaleDown: api.ScaleDownCondition{Status: api.ClusterAutoscalerCandidatesPresent}},
+	}
+
+	testCases := []struct {
+		name                 string
+		nodeGroups           []api.NodeGroupStatus
+		maxSize              int
+		expectedLengths      int
+		expectedNamesInOrder []string
+	}{
+		{
+			// Fits all 5 node groups. Total marshaled size is ~3274 bytes.
+			name:                 "No truncation needed",
+			nodeGroups:           testNodeGroups,
+			maxSize:              100000,
+			expectedLengths:      5,
+			expectedNamesInOrder: []string{"ng-1-healthy", "ng-2-unhealthy", "ng-3-scaleup-backoff", "ng-4-scaleup-inprogress", "ng-5-scaledown-candidates"},
+		},
+		{
+			// Fits exactly 2 node groups (which marshal to ~1544 bytes).
+			// An empty status is ~430 bytes, and each additional group is ~550 bytes.
+			name:                 "Truncation limits to 2 elements",
+			nodeGroups:           testNodeGroups,
+			maxSize:              1600,
+			expectedLengths:      2,
+			expectedNamesInOrder: []string{"ng-2-unhealthy", "ng-3-scaleup-backoff"},
+		},
+		{
+			// Fits exactly 1 node group (which marshals to ~981 bytes).
+			// 2 groups (~1544 bytes) exceeds the 1500 maxSize limit.
+			name:                 "Exactly one NodeGroup fits",
+			nodeGroups:           testNodeGroups,
+			maxSize:              1500,
+			expectedLengths:      1,
+			expectedNamesInOrder: []string{"ng-2-unhealthy"},
+		},
+		{
+			// Fits 0 node groups. Empty status is ~430 bytes, which exceeds the maxSize limit of 10.
+			name:                 "Max size too small for even 0 node groups",
+			nodeGroups:           testNodeGroups,
+			maxSize:              10,
+			expectedLengths:      0,
+			expectedNamesInOrder: []string{},
+		},
+		{
+			// Fits 0 node groups. Total marshaled size is ~430 bytes.
+			name:                 "Empty NodeGroups",
+			nodeGroups:           []api.NodeGroupStatus{},
+			maxSize:              100000,
+			expectedLengths:      0,
+			expectedNamesInOrder: []string{},
+		},
+		{
+			// Fits all 3 node groups. Total marshaled size is ~2047 bytes.
+			name: "Stable sort test: same priority elements retain original order",
+			nodeGroups: []api.NodeGroupStatus{
+				{Name: "ng-a-healthy", Health: api.NodeGroupHealthCondition{Status: api.ClusterAutoscalerHealthy}},
+				{Name: "ng-b-healthy", Health: api.NodeGroupHealthCondition{Status: api.ClusterAutoscalerHealthy}},
+				{Name: "ng-c-healthy", Health: api.NodeGroupHealthCondition{Status: api.ClusterAutoscalerHealthy}},
+			},
+			maxSize:              100000,
+			expectedLengths:      3,
+			expectedNamesInOrder: []string{"ng-a-healthy", "ng-b-healthy", "ng-c-healthy"},
+		},
+		{
+			// Fits exactly 1 node group (which marshals to ~977 bytes).
+			// 2 groups (~1512 bytes) exceeds the 1500 maxSize limit.
+			name: "Stable sort test with truncation",
+			nodeGroups: []api.NodeGroupStatus{
+				{Name: "ng-a-healthy", Health: api.NodeGroupHealthCondition{Status: api.ClusterAutoscalerHealthy}},
+				{Name: "ng-b-healthy", Health: api.NodeGroupHealthCondition{Status: api.ClusterAutoscalerHealthy}},
+				{Name: "ng-c-healthy", Health: api.NodeGroupHealthCondition{Status: api.ClusterAutoscalerHealthy}},
+			},
+			maxSize:              1500, // fits exactly 1 item based on our byte sizing logic
+			expectedLengths:      1,
+			expectedNamesInOrder: []string{"ng-a-healthy"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			testStatus := api.ClusterAutoscalerStatus{
+				NodeGroups: make([]api.NodeGroupStatus, len(tc.nodeGroups)),
+			}
+			copy(testStatus.NodeGroups, tc.nodeGroups)
+
+			b, err := marshalAndTruncateStatus(testStatus, tc.maxSize)
+			assert.NoError(t, err)
+
+			// If the max size is extremely small (like 10), even 0 node groups will exceed it,
+			// but the function should still return the 0-node-group YAML (which is ~430 bytes).
+			// So we only enforce length checks if maxSize is reasonably large.
+			if tc.maxSize >= 500 {
+				assert.True(t, len(b) <= tc.maxSize, "Output YAML size must be under the limit")
+			}
+
+			var out api.ClusterAutoscalerStatus
+			err = yaml.Unmarshal(b, &out)
+			assert.NoError(t, err)
+
+			assert.Equal(t, tc.expectedLengths, len(out.NodeGroups))
+			for i, expectedName := range tc.expectedNamesInOrder {
+				assert.Equal(t, expectedName, out.NodeGroups[i].Name)
+			}
+		})
+	}
 }

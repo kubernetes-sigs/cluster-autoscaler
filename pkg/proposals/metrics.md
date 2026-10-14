@@ -103,7 +103,8 @@ This metrics describe internal state and actions taken by Cluster Autoscaler.
 | unneeded_nodes_count | Gauge | | Number of nodes currently considered unneeded by CA. |
 | unremovable_nodes_count | Gauge | `reason`=&lt;unremovable-reason&gt; | Number of nodes currently considered unremovable by CA, broken down by reason. |
 | scale_down_in_cooldown | Gauge | | Whether scale-down is currently in cooldown. 1 if it is, 0 otherwise. |
-| old_unregistered_nodes_removed_count | Counter | | Number of unregistered nodes removed by CA. |
+| old_unregistered_nodes_removed_count | Counter | | **Deprecated since 1.37.0**, superseded by `nodes_deleted_total` with `reason=old_unregistered`. Number of unregistered nodes removed by CA. |
+| nodes_deleted_total | Counter | `reason`=&lt;`scale_down`, `create_errors` or `old_unregistered`&gt;, `result`=&lt;`succeeded` or `failed`&gt; | Number of nodes CA attempted to delete, broken down by the reason for the deletion and whether the deletion request to the cloud provider succeeded. |
 | overflowing_controllers_count | Gauge | | Number of controllers that own a large set of heterogenous pods, preventing CA from treating these pods as equivalent during binpacking. |
 | skipped_scale_events_count | Counter | `direction`=&lt;scaling-direction&gt;, `reason`=&lt;skipped-scale-reason&gt; | Number of times scaling has been skipped due to a resource limit being reached, or similar event. |
 | created_node_groups_total | Counter | `group_type`=&lt;node-group-type&gt; | Number of node groups created by Node Autoprovisioning. |

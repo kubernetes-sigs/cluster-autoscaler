@@ -184,7 +184,7 @@ func (s *PredicateSnapshot) ListNodeInfos() ([]*framework.NodeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var result []*framework.NodeInfo
+	result := make([]*framework.NodeInfo, 0, len(schedNodeInfos))
 	for _, schedNodeInfo := range schedNodeInfos {
 		nodeInfo, ok := schedNodeInfo.(*framework.NodeInfo)
 		if !ok {

@@ -156,11 +156,13 @@ func deleteNodesFromCloudProvider(ctx context.Context, autoscalingCtx *ca_contex
 		return nil, errors.NewAutoscalerErrorf(errors.InternalError, "picked node that doesn't belong to a node group: %s", nodes[0].Name)
 	}
 	if err := nodeGroup.DeleteNodes(ctx, nodes); err != nil {
+		metrics.RegisterNodesDeleted(len(nodes), metrics.NodeDeletionReasonScaleDown, metrics.NodeDeletionFailed)
 		scaleStateNotifier.RegisterFailedScaleDown(nodeGroup,
 			string(errors.CloudProviderError),
 			time.Now())
 		return nodeGroup, errors.NewAutoscalerErrorf(errors.CloudProviderError, "failed to delete nodes from group %s: %v", nodeGroup.Id(), err)
 	}
+	metrics.RegisterNodesDeleted(len(nodes), metrics.NodeDeletionReasonScaleDown, metrics.NodeDeletionSucceeded)
 	return nodeGroup, nil
 }
 

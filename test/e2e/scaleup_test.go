@@ -21,11 +21,8 @@ package e2e
 import (
 	"context"
 	"testing"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/e2e-framework/klient/k8s"
 	"sigs.k8s.io/e2e-framework/klient/wait"
 	"sigs.k8s.io/e2e-framework/klient/wait/conditions"
@@ -34,39 +31,7 @@ import (
 )
 
 func TestClusterAutoscaling(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "fake-pod",
-			Namespace: "default",
-			Labels: map[string]string{
-				"app": "fake-pod",
-			},
-		},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name:  "fake-container",
-					Image: "fake-image",
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU:    resource.MustParse("100m"),
-							corev1.ResourceMemory: resource.MustParse("100Mi"),
-						},
-					},
-				},
-			},
-			NodeSelector: map[string]string{
-				"kwok-nodegroup": "kind-worker",
-			},
-			Tolerations: []corev1.Toleration{
-				{
-					Key:      "kwok-provider",
-					Operator: corev1.TolerationOpExists,
-					Effect:   corev1.TaintEffectNoSchedule,
-				},
-			},
-		},
-	}
+	pod := NewTestPod("fake-pod", testEnv.EnvConf().Namespace())
 
 	scaleUpFeature := features.New("Cluster Autoscaler Scale Up").
 		Assess("scale up when a pod is pending", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
@@ -94,7 +59,7 @@ func TestClusterAutoscaling(t *testing.T) {
 					}
 				}
 				return false, nil
-			}, wait.WithTimeout(2*time.Minute), wait.WithContext(ctx))
+			}, wait.WithTimeout(testCfg.PodSchedulingTimeout), wait.WithContext(ctx))
 			if err != nil {
 				t.Fatalf("TriggeredScaleUp event not found: %v", err)
 			}
@@ -103,7 +68,7 @@ func TestClusterAutoscaling(t *testing.T) {
 			err = wait.For(conditions.New(client.Resources()).ResourceMatch(pod, func(object k8s.Object) bool {
 				p := object.(*corev1.Pod)
 				return p.Spec.NodeName != ""
-			}), wait.WithTimeout(2*time.Minute), wait.WithContext(ctx))
+			}), wait.WithTimeout(testCfg.PodSchedulingTimeout), wait.WithContext(ctx))
 			if err != nil {
 				t.Fatalf("pod not scheduled: %v", err)
 			}
@@ -116,14 +81,14 @@ func TestClusterAutoscaling(t *testing.T) {
 					return false, err
 				}
 				for _, node := range nodeList.Items {
-					if node.Labels["kwok-nodegroup"] == "kind-worker" {
+					if node.Labels[testCfg.NodeGroupLabelKey] == testCfg.NodeGroup {
 						return true, nil
 					}
 				}
 				return false, nil
-			}, wait.WithTimeout(2*time.Minute), wait.WithContext(ctx))
+			}, wait.WithTimeout(testCfg.NodeReadyTimeout), wait.WithContext(ctx))
 			if err != nil {
-				t.Fatalf("kind-worker node not created: %v", err)
+				t.Fatalf("%s node not created: %v", testCfg.NodeGroup, err)
 			}
 
 			return ctx
@@ -133,8 +98,7 @@ func TestClusterAutoscaling(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Delete the pod
-			_ = client.Resources().Delete(ctx, pod)
+			TeardownPodAndNodeGroup(ctx, client, []*corev1.Pod{pod}, testCfg.NodeGroup)
 			return ctx
 		}).
 		Feature()

@@ -282,6 +282,7 @@ func TestStaticAutoscalerCSI(t *testing.T) {
 					ScaleDownEnabled:               true,
 					MaxScaleDownParallelism:        10,
 					MaxDrainParallelism:            10,
+					MaxConcurrentNodesTainting:     5,
 					NodeDeletionBatcherInterval:    0 * time.Second,
 					NodeDeleteDelayAfterTaint:      1 * time.Millisecond,
 					MaxNodesTotal:                  1000,
@@ -333,10 +334,10 @@ func TestStaticAutoscalerCSI(t *testing.T) {
 			// Run one autoscaler loop.
 			require.NoError(t, autoscaler.RunOnce(t.Context(), now.Add(2*time.Minute)))
 
-			// Scale-down is a multi-iteration process (mark unneeded -> taint -> delete after delay).
-			// Run one more loop to allow the actuator to call the cloud provider ScaleDown callbacks.
+			// The first loop marked the nodes as unneeded, and the second one, past ScaleDownUnneededTime,
+			// started deleting them asynchronously. Wait for the deletions instead of running another
+			// loop: the listers still return the deleted nodes, so a later loop could delete them again.
 			if len(tc.expectedScaleDowns) > 0 {
-				require.NoError(t, autoscaler.RunOnce(t.Context(), now.Add(4*time.Minute)))
 				for range allExpectedScaleDowns {
 					select {
 					case <-setupConfig.nodesDeleted:

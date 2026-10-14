@@ -54,7 +54,9 @@ func TestPodListProcessor(t *testing.T) {
 		expectedUnschedPodsCount     int
 		expectedUnschedFakePodsCount int
 		expectedBuffersProvCondition map[string]metav1.Condition
-		expectError                  bool
+		// expectedProcessedBuffers are names of buffers expected to be marked as processed in the registry.
+		expectedProcessedBuffers []string
+		expectError              bool
 	}{
 		{
 			name:                         "No buffers to process",
@@ -76,6 +78,7 @@ func TestPodListProcessor(t *testing.T) {
 		},
 		{
 			name:                         "Buffer not ready for provisiong to be ignored",
+			expectedProcessedBuffers:     []string{"b"},
 			objectsInKubernetesClient:    []runtime.Object{},
 			objectsInBuffersClient:       []runtime.Object{getTestingBuffer("b", "ref", 1, 1, false, 1, testProvStrategyAllowed)},
 			unschedulablePods:            []*corev1.Pod{getTestingPod("Pod")},
@@ -85,6 +88,7 @@ func TestPodListProcessor(t *testing.T) {
 		},
 		{
 			name:                         "Buffer ready for provisiong with no valid reference",
+			expectedProcessedBuffers:     []string{"buffer"},
 			objectsInKubernetesClient:    []runtime.Object{},
 			objectsInBuffersClient:       []runtime.Object{getTestingBuffer("buffer", "ref", 1, 1, true, 1, testProvStrategyAllowed)},
 			unschedulablePods:            []*corev1.Pod{getTestingPod("Pod")},
@@ -95,6 +99,7 @@ func TestPodListProcessor(t *testing.T) {
 		},
 		{
 			name:                         "Buffer ready for provisiong with valid reference",
+			expectedProcessedBuffers:     []string{"buffer"},
 			objectsInKubernetesClient:    []runtime.Object{getTestingPodTemplate("ref", 1)},
 			objectsInBuffersClient:       []runtime.Object{getTestingBuffer("buffer", "ref", 1, 1, true, 1, testProvStrategyAllowed)},
 			unschedulablePods:            []*corev1.Pod{getTestingPod("Pod")},
@@ -116,6 +121,7 @@ func TestPodListProcessor(t *testing.T) {
 		},
 		{
 			name:                      "Multiple Buffers ready for provisiong with different references",
+			expectedProcessedBuffers:  []string{"buffer1", "buffer2"},
 			objectsInKubernetesClient: []runtime.Object{getTestingPodTemplate("ref1", 1), getTestingPodTemplate("ref2", 1)},
 			objectsInBuffersClient: []runtime.Object{
 				getTestingBuffer("buffer1", "ref1", 3, 1, true, 1, testProvStrategyAllowed),
@@ -133,6 +139,7 @@ func TestPodListProcessor(t *testing.T) {
 		},
 		{
 			name:                      "Mixing cases",
+			expectedProcessedBuffers:  []string{"buffer1", "buffer2"},
 			objectsInKubernetesClient: []runtime.Object{getTestingPodTemplate("ref1", 1), getTestingPodTemplate("ref2", 1)},
 			objectsInBuffersClient: []runtime.Object{
 				getTestingBuffer("buffer1", "ref1", 3, 1, false, 1, testProvStrategyAllowed),
@@ -146,6 +153,7 @@ func TestPodListProcessor(t *testing.T) {
 		},
 		{
 			name:                      "Buffer not ready for provisioning and provisioning set to true",
+			expectedProcessedBuffers:  []string{"buffer"},
 			objectsInKubernetesClient: []runtime.Object{getTestingPodTemplate("ref", 1)},
 			objectsInBuffersClient: []runtime.Object{testutil.NewBuffer(
 				testutil.WithName("buffer"),
@@ -175,6 +183,7 @@ func TestPodListProcessor(t *testing.T) {
 		},
 		{
 			name:                         "Buffer with zero replicas",
+			expectedProcessedBuffers:     []string{"buffer"},
 			objectsInKubernetesClient:    []runtime.Object{getTestingPodTemplate("ref", 1)},
 			objectsInBuffersClient:       []runtime.Object{getTestingBuffer("buffer", "ref", 0, 1, true, 1, testProvStrategyAllowed)},
 			unschedulablePods:            []*corev1.Pod{getTestingPod("Pod")},
@@ -223,6 +232,12 @@ func TestPodListProcessor(t *testing.T) {
 				}
 			}
 			assert.Equal(t, test.expectedUnschedFakePodsCount, numberOfFakePods)
+
+			var processedBuffers []string
+			for _, buffer := range capacityBuffersRegistry.ProcessedBuffers() {
+				processedBuffers = append(processedBuffers, buffer.Name)
+			}
+			assert.ElementsMatch(t, test.expectedProcessedBuffers, processedBuffers)
 
 			for bufferName, expectedCondition := range test.expectedBuffersProvCondition {
 				buffer, err := fakeBuffersClient.AutoscalingV1beta1().CapacityBuffers(corev1.NamespaceDefault).Get(context.Background(), bufferName, metav1.GetOptions{})
