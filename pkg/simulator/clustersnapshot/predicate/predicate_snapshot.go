@@ -83,6 +83,7 @@ func (s *PredicateSnapshot) SetClusterState(ctx context.Context, nodes []*apiv1.
 	}
 	s.csiSnapshot = csiSnapshot
 
+	nodeLoggingQuota := klogx.NodesLoggingQuota()
 	nodeInfos := make([]*framework.NodeInfo, len(nodes))
 	nodeNameToIdx := make(map[string]int, len(nodes))
 	for i, node := range nodes {
@@ -98,7 +99,7 @@ func (s *PredicateSnapshot) SetClusterState(ctx context.Context, nodes []*apiv1.
 			if csiNode, err := csiSnapshot.Get(node.Name); err == nil {
 				ni.SetCSINode(csiNode)
 			} else if errors.Is(err, csisnapshot.ErrCsiNodeNotFound) {
-				klogx.V(4).Infof("SetClusterState: CSINode for node %q not found in the CSI snapshot, unable to populate node info: %v", node.Name, err)
+				klogx.V(4).UpTo(nodeLoggingQuota).Infof("SetClusterState: CSINode for node %q not found in the CSI snapshot, unable to populate node info: %v", node.Name, err)
 			} else {
 				return fmt.Errorf("failed to populate CSI snapshot: %w", err)
 			}

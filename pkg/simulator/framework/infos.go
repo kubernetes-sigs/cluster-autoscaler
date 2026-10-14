@@ -63,7 +63,8 @@ type NodeInfo struct {
 	// LocalResourceSlices contains all node-local ResourceSlices exposed by this Node.
 	LocalResourceSlices []*resourceapi.ResourceSlice
 
-	// CSINode contains the CSI node exposed by this Node.
+	// CSINode contains the CSI node exposed by this Node. It can possibly be nil as the
+	// result of autoscaler loop kicking in before CSI information gets populated in the etcd
 	CSINode *storagev1.CSINode
 }
 

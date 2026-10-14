@@ -23,7 +23,6 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	schedulerinterface "k8s.io/kube-scheduler/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/common"
-	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 )
 
 var (
@@ -89,15 +88,6 @@ func (s *Snapshot) AddCSINode(csiNode *storagev1.CSINode) error {
 
 	s.csiNodes.SetCurrent(csiNode.Name, csiNode)
 	return nil
-}
-
-// AddCSINodeInfoToNodeInfo adds a CSI node to the node info.
-func (s *Snapshot) AddCSINodeInfoToNodeInfo(nodeInfo *framework.NodeInfo) (*framework.NodeInfo, error) {
-	csiNode, err := s.Get(nodeInfo.Node().Name)
-	if err != nil {
-		return nil, err
-	}
-	return nodeInfo.SetCSINode(csiNode), nil
 }
 
 // RemoveCSINode removes a CSI node from the snapshot.
