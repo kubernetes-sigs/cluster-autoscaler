@@ -65,45 +65,45 @@ type UnremovableReason int
 func (r UnremovableReason) String() string {
 	switch r {
 	case NoReason:
-		return "NoReason"
+		return "uninitialized_status_reason_bug"
 	case ScaleDownDisabledAnnotation:
-		return "ScaleDownDisabledAnnotation"
+		return "node_has_scale_down_disabled_annotation"
 	case ScaleDownUnreadyDisabled:
-		return "ScaleDownUnreadyDisabled"
+		return "scale_down_unready_disabled"
 	case NotAutoscaled:
-		return "NotAutoscaled"
+		return "not_autoscaled"
 	case NotUnneededLongEnough:
-		return "NotUnneededLongEnough"
+		return "not_unneeded_long_enough"
 	case NotUnreadyLongEnough:
-		return "NotUnreadyLongEnough"
+		return "not_unready_long_enough"
 	case NodeGroupMinSizeReached:
-		return "NodeGroupMinSizeReached"
+		return "node_pool_min_size_limit_reached"
 	case NodeGroupMaxDeletionCountReached:
-		return "NodeGroupMaxDeletionCountReached"
+		return "max_deletion_count_reached"
 	case AtomicScaleDownFailed:
-		return "AtomicScaleDownFailed"
+		return "atomic_node_group_scale_down_failed"
 	case MinimalResourceLimitExceeded:
-		return "MinimalResourceLimitExceeded"
+		return "minimal_resource_limit_exceeded"
 	case CurrentlyBeingDeleted:
-		return "CurrentlyBeingDeleted"
+		return "node_is_already_being_deleted"
 	case NotUnderutilized:
-		return "NotUnderutilized"
+		return "node_utilization_is_above_scale_down_threshold"
 	case NotUnneededOtherReason:
-		return "NotUnneededOtherReason"
+		return "skipped_in_this_autoscaling_loop"
 	case RecentlyUnremovable:
-		return "RecentlyUnremovable"
+		return "node_recently_marked_unremovable"
 	case NoPlaceToMovePods:
-		return "NoPlaceToMovePods"
+		return "no_suitable_node_to_reschedule_pods"
 	case BlockedByPod:
-		return "BlockedByPod"
+		return "node_has_unevictable_pods"
 	case UnexpectedError:
-		return "UnexpectedError"
+		return "internal_autoscaler_error"
 	case NoNodeInfo:
-		return "NoNodeInfo"
+		return "node_not_found_in_cluster_snapshot"
 	case BlockedByOnCompletionPod:
-		return "BlockedByOnCompletionPod"
+		return "node_has_on_completion_pods_running"
 	default:
-		return "Unknown"
+		return "unknown"
 	}
 }
 

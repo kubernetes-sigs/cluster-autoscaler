@@ -174,23 +174,23 @@ func TestNodeLatencyTracker_SimulationLoop(t *testing.T) {
 					unneededList:          []string{"node1"},
 					unremovableReason:     map[string]simulator.UnremovableReason{"node1": simulator.BlockedByPod},
 					wantTrackedNodes:      []string{"node1"},
-					wantLatestDelayReason: map[string]string{"node1": "BlockedByPod"},
+					wantLatestDelayReason: map[string]string{"node1": "node_has_unevictable_pods"},
 				},
 				{
 					// Step 3: node1 is still unremovable due to AtomicScaleDownFailed
 					unneededList:          []string{"node1"},
 					unremovableReason:     map[string]simulator.UnremovableReason{"node1": simulator.AtomicScaleDownFailed},
 					wantTrackedNodes:      []string{"node1"},
-					wantLatestDelayReason: map[string]string{"node1": "AtomicScaleDownFailed"},
+					wantLatestDelayReason: map[string]string{"node1": "atomic_node_group_scale_down_failed"},
 				},
 				{
 					// Step 4: node1 is unremovable due to NotUnneededLongEnough (not a blocker)
 					// The latest blocker reason should NOT be overwritten by a non-blocker!
-					// It should remain "AtomicScaleDownFailed".
+					// It should remain "atomic_node_group_scale_down_failed".
 					unneededList:          []string{"node1"},
 					unremovableReason:     map[string]simulator.UnremovableReason{"node1": simulator.NotUnneededLongEnough},
 					wantTrackedNodes:      []string{"node1"},
-					wantLatestDelayReason: map[string]string{"node1": "AtomicScaleDownFailed"},
+					wantLatestDelayReason: map[string]string{"node1": "atomic_node_group_scale_down_failed"},
 				},
 				{
 					// Step 5: node1 is finally deleted
