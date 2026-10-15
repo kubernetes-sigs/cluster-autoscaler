@@ -19,11 +19,11 @@ package planner
 import (
 	"context"
 	"fmt"
-
-	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
-
 	"testing"
 	"time"
+
+	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/strategy"
+	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
 
 	"github.com/stretchr/testify/assert"
 
@@ -510,7 +510,8 @@ func TestUpdateClusterState(t *testing.T) {
 			clustersnapshot.InitializeClusterSnapshotOrDie(t, autoscalingCtx.ClusterSnapshot, tc.nodes, tc.pods)
 			deleteOptions := options.NodeDeleteOptions{}
 			factory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{CustomResourcesProcessor: processors.CustomResourcesProcessor, QuotaProvider: resourcequotas.NewCloudMinProvider(provider)})
-			p := New(&autoscalingCtx, processors, deleteOptions, nil, factory)
+			sdStrategy, _ := strategy.NewStrategy("")
+			p := New(&autoscalingCtx, processors, deleteOptions, nil, factory, sdStrategy)
 			p.eligibilityChecker = &fakeEligibilityChecker{eligible: asMap(tc.eligible)}
 			if tc.isSimulationTimeout {
 				autoscalingCtx.AutoscalingOptions.ScaleDownSimulationTimeout = 1 * time.Second
@@ -709,7 +710,8 @@ func TestUpdateClusterStatUnneededNodesLimit(t *testing.T) {
 			clustersnapshot.InitializeClusterSnapshotOrDie(t, autoscalingCtx.ClusterSnapshot, nodes, nil)
 			deleteOptions := options.NodeDeleteOptions{}
 			factory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{CustomResourcesProcessor: processors.CustomResourcesProcessor, QuotaProvider: resourcequotas.NewCloudMinProvider(provider)})
-			p := New(&autoscalingCtx, processors, deleteOptions, nil, factory)
+			sdStrategy, _ := strategy.NewStrategy("")
+			p := New(&autoscalingCtx, processors, deleteOptions, nil, factory, sdStrategy)
 			p.eligibilityChecker = &fakeEligibilityChecker{eligible: asMap(nodeNames(nodes))}
 			p.minUpdateInterval = tc.updateInterval
 			p.unneededNodes.Update(context.Background(), &autoscalingCtx, previouslyUnneeded, time.Now())
@@ -846,7 +848,8 @@ func TestNewPlannerWithExistingDeletionCandidateNodes(t *testing.T) {
 
 			deleteOptions := options.NodeDeleteOptions{}
 			factory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{CustomResourcesProcessor: processors.CustomResourcesProcessor, QuotaProvider: resourcequotas.NewCloudMinProvider(provider)})
-			p := New(&autoscalingCtx, processors, deleteOptions, nil, factory)
+			sdStrategy, _ := strategy.NewStrategy("")
+			p := New(&autoscalingCtx, processors, deleteOptions, nil, factory, sdStrategy)
 
 			p.unneededNodes.AsList()
 		})
@@ -1112,7 +1115,8 @@ func TestNodesToDelete(t *testing.T) {
 			clustersnapshot.InitializeClusterSnapshotOrDie(t, autoscalingCtx.ClusterSnapshot, allNodes, nil)
 			deleteOptions := options.NodeDeleteOptions{}
 			factory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{CustomResourcesProcessor: processors.CustomResourcesProcessor, QuotaProvider: resourcequotas.NewCloudMinProvider(provider)})
-			p := New(&autoscalingCtx, processors, deleteOptions, nil, factory)
+			sdStrategy, _ := strategy.NewStrategy("")
+			p := New(&autoscalingCtx, processors, deleteOptions, nil, factory, sdStrategy)
 			p.latestUpdate = time.Now()
 
 			if tc.minLimits != nil {
@@ -1292,7 +1296,8 @@ func TestAtomicScaleDownNodeNilGroup(t *testing.T) {
 
 	deleteOptions := options.NodeDeleteOptions{}
 	factory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{CustomResourcesProcessor: processors.CustomResourcesProcessor, QuotaProvider: resourcequotas.NewCloudMinProvider(provider)})
-	p := New(&autoscalingCtx, processors, deleteOptions, nil, factory)
+	sdStrategy, _ := strategy.NewStrategy("")
+	p := New(&autoscalingCtx, processors, deleteOptions, nil, factory, sdStrategy)
 
 	node := &simulator.NodeToBeRemoved{
 		Node: n1,
