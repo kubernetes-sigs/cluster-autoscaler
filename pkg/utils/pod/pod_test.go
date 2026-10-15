@@ -21,7 +21,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apiserver/pkg/util/feature"
+	featuretesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/types"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 )
@@ -287,6 +291,57 @@ func TestClearPodNodeNames(t *testing.T) {
 				cleanedPod.Spec.NodeName = tc.pods[i].Spec.NodeName
 				assert.Equal(t, tc.pods[i], cleanedPod)
 			}
+		})
+	}
+}
+
+func TestPodRequests(t *testing.T) {
+	cpuQuantity := resource.MustParse("2000m")
+	memQuantity := resource.MustParse("5000")
+	podWithDRA := BuildTestPod("podWithDRA", 500, 1000)
+	podWithDRA.Status.NodeAllocatableResourceClaimStatuses = []apiv1.NodeAllocatableResourceClaimStatus{
+		{
+			ResourceClaimName: "claim-1",
+			Containers:        []string{podWithDRA.Spec.Containers[0].Name},
+			Mapping: []apiv1.NodeAllocatableMappedResources{
+				{
+					Name:     apiv1.ResourceCPU,
+					Quantity: &cpuQuantity,
+				},
+				{
+					Name:     apiv1.ResourceMemory,
+					Quantity: &memQuantity,
+				},
+			},
+		},
+	}
+
+	testCases := []struct {
+		name                         string
+		draNodeAllocatableGateEnable bool
+		expectedCPU                  int64
+		expectedMemory               int64
+	}{
+		{
+			name:                         "DRANodeAllocatableResources disabled",
+			draNodeAllocatableGateEnable: false,
+			expectedCPU:                  500,
+			expectedMemory:               1000,
+		},
+		{
+			name:                         "DRANodeAllocatableResources enabled",
+			draNodeAllocatableGateEnable: true,
+			expectedCPU:                  2500,
+			expectedMemory:               6000,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			featuretesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.DRANodeAllocatableResources, tc.draNodeAllocatableGateEnable)
+			requests := PodRequests(podWithDRA)
+			assert.Equal(t, tc.expectedCPU, requests.Cpu().MilliValue())
+			assert.Equal(t, tc.expectedMemory, requests.Memory().Value())
 		})
 	}
 }

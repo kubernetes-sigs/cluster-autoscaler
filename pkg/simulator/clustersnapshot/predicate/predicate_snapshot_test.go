@@ -31,6 +31,7 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apiserver/pkg/util/feature"
@@ -339,6 +340,70 @@ func validTestCases(t *testing.T, snapshotName string) []modificationTestCase {
 
 	deviceClasses := map[string]*resourceapi.DeviceClass{
 		"defaultClass": {ObjectMeta: metav1.ObjectMeta{Name: "defaultClass", UID: "defaultClassUid"}},
+	}
+
+	devCpuMult := resource.MustParse("1m")
+	nodeAllocResourceSlice := &resourceapi.ResourceSlice{
+		ObjectMeta: metav1.ObjectMeta{Name: "nodeAllocSlice", UID: "nodeAllocSliceUid"},
+		Spec: resourceapi.ResourceSliceSpec{
+			NodeName: &node.Name,
+			Driver:   "driver.cpu.com",
+			Pool:     resourceapi.ResourcePool{Name: "poolNodeAlloc", ResourceSliceCount: 1},
+			Devices: []resourceapi.Device{{
+				Name: "dev-cpu",
+				NodeAllocatableResources: map[apiv1.ResourceName]resourceapi.NodeAllocatableResource{
+					apiv1.ResourceCPU: {
+						Mapping: &resourceapi.NodeAllocatableMapping{
+							DeviceMultiplier: &devCpuMult,
+						},
+					},
+				},
+			}},
+		},
+	}
+
+	podWithNodeAllocClaim := BuildTestPod("podWithNodeAllocClaim", 1, 1,
+		WithResourceClaim("claim-na", "nodeAllocClaim", "nodeAllocClaimTemplate"))
+	podWithNodeAllocClaim.Spec.Containers[0].Resources.Claims = []apiv1.ResourceClaim{{Name: "claim-na"}}
+
+	nodeAllocClaim := drautils.TestClaimWithPodOwnership(podWithNodeAllocClaim,
+		&resourceapi.ResourceClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "nodeAllocClaim", UID: "nodeAllocClaimUid", Namespace: "default"},
+			Spec: resourceapi.ResourceClaimSpec{
+				Devices: resourceapi.DeviceClaim{
+					Requests: []resourceapi.DeviceRequest{{
+						Name: "req1",
+						Exactly: &resourceapi.ExactDeviceRequest{
+							DeviceClassName: "defaultClass",
+							AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
+							Count:           1,
+						},
+					}},
+				},
+			},
+		},
+	)
+	nodeAllocClaimAlloc := &resourceapi.AllocationResult{
+		NodeSelector: nodeSelector,
+		Devices: resourceapi.DeviceAllocationResult{
+			Results: []resourceapi.DeviceRequestAllocationResult{
+				{Request: "req1", Driver: "driver.cpu.com", Pool: "poolNodeAlloc", Device: "dev-cpu"},
+			},
+		},
+	}
+	scheduledPodWithNodeAllocClaim := podWithNodeAllocClaim.DeepCopy()
+	cpuQuantity1m := resource.MustParse("1m")
+	scheduledPodWithNodeAllocClaim.Status.NodeAllocatableResourceClaimStatuses = []apiv1.NodeAllocatableResourceClaimStatus{
+		{
+			ResourceClaimName: "nodeAllocClaim",
+			Containers:        []string{podWithNodeAllocClaim.Spec.Containers[0].Name},
+			Mapping: []apiv1.NodeAllocatableMappedResources{
+				{
+					Name:     apiv1.ResourceCPU,
+					Quantity: &cpuQuantity1m,
+				},
+			},
+		},
 	}
 
 	testCases := []modificationTestCase{
@@ -914,6 +979,42 @@ func validTestCases(t *testing.T, snapshotName string) []modificationTestCase {
 			},
 		},
 		{
+			name: "schedule pod with node-allocatable ResourceClaim",
+			state: snapshotState{
+				nodes:       []*apiv1.Node{node},
+				csiSnapshot: createCSISnapshot(csiNode),
+				draSnapshot: drasnapshot.NewSnapshot(
+					map[drasnapshot.ResourceClaimId]*resourceapi.ResourceClaim{
+						drasnapshot.GetClaimId(nodeAllocClaim): nodeAllocClaim.DeepCopy(),
+					},
+					map[string][]*resourceapi.ResourceSlice{node.Name: {nodeAllocResourceSlice}}, nil, deviceClasses),
+			},
+			op: func(snapshot clustersnapshot.ClusterSnapshot) error {
+				if err := snapshot.SchedulePod(podWithNodeAllocClaim, node.Name); err != nil {
+					return err
+				}
+				nodeInfo, err := snapshot.GetNodeInfo(node.Name)
+				if err != nil {
+					return err
+				}
+				// Total pod's footprint is 1 CPU from claim and 1 from standard spec.
+				if nodeInfo.GetRequested().GetMilliCPU() != 2 {
+					return fmt.Errorf("unexpected requested CPU: %d, want 2", nodeInfo.GetRequested().GetMilliCPU())
+				}
+				return nil
+			},
+			modifiedState: snapshotState{
+				nodes:       []*apiv1.Node{node},
+				csiSnapshot: createCSISnapshot(csiNode),
+				podsByNode:  map[string][]*apiv1.Pod{node.Name: {scheduledPodWithNodeAllocClaim}},
+				draSnapshot: drasnapshot.NewSnapshot(
+					map[drasnapshot.ResourceClaimId]*resourceapi.ResourceClaim{
+						drasnapshot.GetClaimId(nodeAllocClaim): drautils.TestClaimWithPodReservations(drautils.TestClaimWithAllocation(nodeAllocClaim, nodeAllocClaimAlloc), scheduledPodWithNodeAllocClaim),
+					},
+					map[string][]*resourceapi.ResourceSlice{node.Name: {nodeAllocResourceSlice}}, nil, deviceClasses),
+			},
+		},
+		{
 			name: "scheduling pod with failing DRA predicates is an error",
 			// Start with a NodeInfo with LocalResourceSlices but no Pods. The DRA snapshot doesn't track one of the claims
 			// referenced by the Pod we're trying to schedule.
@@ -1348,6 +1449,7 @@ func TestForking(t *testing.T) {
 	//	t.Fatalf("Error while setting higher klog verbosity: %v", err)
 	//}
 	featuretesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.DynamicResourceAllocation, true)
+	featuretesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.DRANodeAllocatableResources, true)
 
 	node := BuildTestNode("specialNode-2", 10, 100)
 	for snapshotName, snapshotFactory := range snapshots {
@@ -2011,6 +2113,7 @@ func TestWithForkedSnapshot(t *testing.T) {
 	//	t.Fatalf("Error while setting higher klog verbosity: %v", err)
 	//}
 	featuretesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.DynamicResourceAllocation, true)
+	featuretesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.DRANodeAllocatableResources, true)
 
 	err := fmt.Errorf("some error")
 	for snapshotName, snapshotFactory := range snapshots {
