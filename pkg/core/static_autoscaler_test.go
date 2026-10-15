@@ -67,6 +67,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupconfig"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroups/asyncnodegroups"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/scaledowncandidates"
+	scaleupstatus "sigs.k8s.io/cluster-autoscaler/pkg/processors/status"
 	processorstest "sigs.k8s.io/cluster-autoscaler/pkg/processors/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
@@ -3997,6 +3998,179 @@ func TestShouldScaleDown(t *testing.T) {
 				mocks.onScaleDown.AssertCalled(t, "ScaleDown", "ng1", underutilizedNode.Name)
 			} else {
 				mocks.onScaleDown.AssertNotCalled(t, "ScaleDown", "ng1", underutilizedNode.Name)
+			}
+		})
+	}
+}
+
+type mockScaleUpEnforcer struct {
+	force     bool
+	callCount int
+}
+
+func (m *mockScaleUpEnforcer) ShouldForceScaleUp(unschedulablePods []*apiv1.Pod) bool {
+	m.callCount++
+	return m.force
+}
+
+func TestShouldScaleUp(t *testing.T) {
+	now := time.Now()
+	readyNode := BuildTestNode("n1", 1000, 1000)
+	SetNodeReadyState(readyNode, true, now)
+
+	oldPod := BuildTestPod("old-pod", 500, 1000, MarkUnschedulable())
+	oldPod.CreationTimestamp = metav1.NewTime(now.Add(-1 * time.Minute))
+
+	newPod := BuildTestPod("new-pod", 500, 1000, MarkUnschedulable())
+	newPod.CreationTimestamp = metav1.NewTime(now.Add(-1 * time.Second))
+
+	testCases := []struct {
+		name                         string
+		gracefulDegradationEnabled   bool
+		gracefulDegradationLoopCount int
+		maxNodesTotal                int
+		bypassedSchedulers           map[string]bool
+		forceScaleUp                 bool
+		unschedulablePods            []*apiv1.Pod
+		readyNodes                   []*apiv1.Node
+		wantShouldScaleUp            bool
+		wantResult                   scaleupstatus.ScaleUpResult
+		wantPodsRemainUnschedulable  int
+		wantEnforcerCalls            int
+	}{
+		{
+			name:                         "graceful degradation cooldown",
+			gracefulDegradationEnabled:   true,
+			gracefulDegradationLoopCount: 4,
+			maxNodesTotal:                10,
+			unschedulablePods:            []*apiv1.Pod{oldPod},
+			readyNodes:                   []*apiv1.Node{readyNode},
+			wantShouldScaleUp:            false,
+			wantResult:                   scaleupstatus.ScaleUpInCooldown,
+			wantEnforcerCalls:            0,
+		},
+		{
+			name:              "no unschedulable pods",
+			maxNodesTotal:     10,
+			unschedulablePods: []*apiv1.Pod{},
+			readyNodes:        []*apiv1.Node{readyNode},
+			wantShouldScaleUp: false,
+			wantResult:        scaleupstatus.ScaleUpNotNeeded,
+			wantEnforcerCalls: 0,
+		},
+		{
+			name:                        "max nodes reached, not forced",
+			maxNodesTotal:               1,
+			unschedulablePods:           []*apiv1.Pod{oldPod},
+			readyNodes:                  []*apiv1.Node{readyNode},
+			forceScaleUp:                false,
+			wantShouldScaleUp:           false,
+			wantResult:                  scaleupstatus.ScaleUpLimitedByMaxNodesTotal,
+			wantPodsRemainUnschedulable: 1,
+			wantEnforcerCalls:           1,
+		},
+		{
+			name:              "max nodes reached, forced",
+			maxNodesTotal:     1,
+			unschedulablePods: []*apiv1.Pod{oldPod},
+			readyNodes:        []*apiv1.Node{readyNode},
+			forceScaleUp:      true,
+			wantShouldScaleUp: true,
+			wantEnforcerCalls: 1,
+		},
+		{
+			name:              "unschedulable pods are new, not forced",
+			maxNodesTotal:     10,
+			unschedulablePods: []*apiv1.Pod{newPod},
+			readyNodes:        []*apiv1.Node{readyNode},
+			forceScaleUp:      false,
+			wantShouldScaleUp: false,
+			wantResult:        scaleupstatus.ScaleUpInCooldown,
+			wantEnforcerCalls: 1,
+		},
+		{
+			name:              "unschedulable pods are new, forced",
+			maxNodesTotal:     10,
+			unschedulablePods: []*apiv1.Pod{newPod},
+			readyNodes:        []*apiv1.Node{readyNode},
+			forceScaleUp:      true,
+			wantShouldScaleUp: true,
+			wantEnforcerCalls: 1,
+		},
+		{
+			name:               "unschedulable pods are new, but bypassed schedulers configured",
+			maxNodesTotal:      10,
+			bypassedSchedulers: map[string]bool{"custom-scheduler": true},
+			unschedulablePods:  []*apiv1.Pod{newPod},
+			readyNodes:         []*apiv1.Node{readyNode},
+			wantShouldScaleUp:  true,
+			wantEnforcerCalls:  0,
+		},
+		{
+			name:              "both max nodes reached and pods are new, forced",
+			maxNodesTotal:     1,
+			unschedulablePods: []*apiv1.Pod{newPod},
+			readyNodes:        []*apiv1.Node{readyNode},
+			forceScaleUp:      true,
+			wantShouldScaleUp: true,
+			wantEnforcerCalls: 1,
+		},
+		{
+			name:              "normal scale-up eligible",
+			maxNodesTotal:     10,
+			unschedulablePods: []*apiv1.Pod{oldPod},
+			readyNodes:        []*apiv1.Node{readyNode},
+			wantShouldScaleUp: true,
+			wantEnforcerCalls: 0,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mocks := newCommonMocks()
+			setupConfig := &autoscalerSetupConfig{
+				autoscalingOptions: config.AutoscalingOptions{
+					MaxNodesTotal:              tc.maxNodesTotal,
+					GracefulDegradationEnabled: tc.gracefulDegradationEnabled,
+					BypassedSchedulers:         tc.bypassedSchedulers,
+				},
+				nodeGroups: []*nodeGroup{{
+					name:     "ng1",
+					min:      0,
+					max:      10,
+					nodes:    []*apiv1.Node{readyNode},
+					template: framework.NewTestNodeInfo(BuildTestNode("template-node", 1000, 1000)),
+				}},
+				nodeStateUpdateTime: now,
+				mocks:               mocks,
+			}
+
+			autoscaler, err := setupAutoscaler(setupConfig)
+			assert.NoError(t, err)
+			autoscaler.GracefulDegradationLoopCount = tc.gracefulDegradationLoopCount
+			enforcerMock := &mockScaleUpEnforcer{force: tc.forceScaleUp}
+			autoscaler.processors.ScaleUpEnforcer = enforcerMock
+
+			state := &loopState{
+				readyNodes:              tc.readyNodes,
+				unschedulablePodsToHelp: tc.unschedulablePods,
+				currentTime:             now,
+			}
+
+			shouldScaleUp, scaleUpStatus := autoscaler.shouldScaleUp(context.Background(), state)
+			assert.Equal(t, tc.wantShouldScaleUp, shouldScaleUp)
+			assert.Equal(t, tc.wantEnforcerCalls, enforcerMock.callCount, "enforcer call count mismatch")
+			if tc.wantShouldScaleUp {
+				assert.Nil(t, scaleUpStatus)
+			} else {
+				assert.NotNil(t, scaleUpStatus)
+				assert.Equal(t, tc.wantResult, scaleUpStatus.Result)
+				if tc.wantPodsRemainUnschedulable > 0 {
+					assert.Equal(t, tc.wantPodsRemainUnschedulable, len(scaleUpStatus.PodsRemainUnschedulable))
+					for i, info := range scaleUpStatus.PodsRemainUnschedulable {
+						assert.Equal(t, tc.unschedulablePods[i], info.Pod)
+					}
+				}
 			}
 		})
 	}
