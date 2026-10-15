@@ -259,7 +259,11 @@ func TestFilterOutNodesWithUnreadyCSIResources(t *testing.T) {
 				"ng1": createCSINode("ng1_template", []string{"driver1"}),
 			},
 			registryNodeInfos: map[string]*framework.NodeInfo{
-				"ng1": framework.NewNodeInfo(buildTestNode("ng1_registry_template", true), nil).SetCSINode(createCSINode("ng1_registry_template", []string{"driver1", "driver2"})),
+				"ng1": framework.NewNodeInfo(buildTestNode("ng1_registry_template", true), framework.NodeInfoConfig{
+					Slices:  nil,
+					Pods:    nil,
+					CSINode: createCSINode("ng1_registry_template", []string{"driver1", "driver2"}),
+				}),
 			},
 			nodesCSINode: map[string]*storagev1.CSINode{
 				"node_1": createCSINode("node_1", []string{"driver1"}),
@@ -316,8 +320,7 @@ func TestFilterOutNodesWithUnreadyCSIResources(t *testing.T) {
 			for ng, nodes := range tc.nodeGroupsAllNodes {
 				machineName := fmt.Sprintf("%s_machine_template", ng)
 				if csiNode, found := tc.nodeGroupsTemplatesCSINode[ng]; found {
-					machineTemplates[machineName] = framework.NewNodeInfo(buildTestNode(fmt.Sprintf("%s_template", ng), true), nil).
-						SetCSINode(csiNode)
+					machineTemplates[machineName] = framework.NewNodeInfo(buildTestNode(fmt.Sprintf("%s_template", ng), true), framework.NodeInfoConfig{CSINode: csiNode})
 				} else {
 					machineTemplates[machineName] = framework.NewTestNodeInfo(buildTestNode(fmt.Sprintf("%s_template", ng), true))
 				}

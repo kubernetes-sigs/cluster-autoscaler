@@ -71,7 +71,7 @@ func TestRegisterFailedScaleUpDirectCall(t *testing.T) {
 	provider := testprovider.NewTestCloudProviderBuilder().Build()
 	provider.AddNodeGroup("ng1", 1, 10, 1)
 	provider.SetMachineTemplates(map[string]*framework.NodeInfo{
-		"ng1": framework.NewNodeInfo(gpuNode, slices),
+		"ng1": framework.NewNodeInfo(gpuNode, framework.NodeInfoConfig{Slices: slices}),
 	})
 
 	mockMetricsObj := &mockMetrics{}
@@ -145,7 +145,7 @@ func TestRegisterScaleUpDirectCall(t *testing.T) {
 	provider := testprovider.NewTestCloudProviderBuilder().Build()
 	provider.AddNodeGroup("ng1", 1, 10, 1)
 	provider.SetMachineTemplates(map[string]*framework.NodeInfo{
-		"ng1": framework.NewNodeInfo(gpuNode, slices),
+		"ng1": framework.NewNodeInfo(gpuNode, framework.NodeInfoConfig{Slices: slices}),
 	})
 
 	mockMetricsObj := &mockMetrics{}
@@ -207,7 +207,7 @@ func TestRegisterScaleUpUsesNodeInfoRegistry(t *testing.T) {
 
 	registry := &testNodeInfoRegistry{
 		nodeInfos: map[string]*framework.NodeInfo{
-			"ng1": framework.NewNodeInfo(gpuNode, nil),
+			"ng1": framework.NewNodeInfo(gpuNode, framework.NodeInfoConfig{}),
 		},
 	}
 
