@@ -83,6 +83,13 @@ func (n *NodeDeletionTracker) StartDeletionWithDrain(nodeGroupId, nodeName strin
 	n.drainedNodeDeletions[nodeName] = true
 }
 
+// AddDeletionResult records a node deletion result without changing the deletions in progress counter.
+func (n *NodeDeletionTracker) AddDeletionResult(nodeName string, result status.NodeDeleteResult) {
+	n.Lock()
+	defer n.Unlock()
+	n.deletionResults.RegisterElement(&deletionResult{nodeName, result})
+}
+
 // EndDeletion decrements node deletion in progress counter for the given nodegroup.
 func (n *NodeDeletionTracker) EndDeletion(ctx context.Context, nodeGroupId, nodeName string, result status.NodeDeleteResult) {
 	logger := klog.FromContext(ctx)
