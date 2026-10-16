@@ -20,11 +20,14 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	resourceapi "k8s.io/api/resource/v1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/e2e-framework/klient"
@@ -304,4 +307,107 @@ func NewTestPodWithScheduler(name, namespace string, cpuFraction, memFraction fl
 	pod := NewTestPodWithResourceFraction(name, namespace, cpuFraction, memFraction)
 	pod.Spec.SchedulerName = schedulerName
 	return pod
+}
+
+// EnsureDeviceClass creates the DeviceClass that selects the devices of DRANodeGroup nodes, if it doesn't exist yet.
+func EnsureDeviceClass(ctx context.Context, client klient.Client) error {
+	deviceClass := &resourceapi.DeviceClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testCfg.DRADeviceClassName,
+		},
+		Spec: resourceapi.DeviceClassSpec{
+			Selectors: []resourceapi.DeviceSelector{
+				{
+					CEL: &resourceapi.CELDeviceSelector{
+						Expression: fmt.Sprintf("device.driver == %q", testCfg.DRADriverName),
+					},
+				},
+			},
+		},
+	}
+	err := client.Resources().Create(ctx, deviceClass)
+	if apierrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}
+
+// NewTestResourceClaimTemplate creates a ResourceClaimTemplate requesting the given number of devices
+// from the DRA DeviceClass.
+func NewTestResourceClaimTemplate(name, namespace string, devices int64) *resourceapi.ResourceClaimTemplate {
+	return &resourceapi.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: resourceapi.ResourceClaimTemplateSpec{
+			Spec: resourceapi.ResourceClaimSpec{
+				Devices: resourceapi.DeviceClaim{
+					Requests: []resourceapi.DeviceRequest{
+						{
+							Name: "devices",
+							Exactly: &resourceapi.ExactDeviceRequest{
+								DeviceClassName: testCfg.DRADeviceClassName,
+								AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
+								Count:           devices,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// NewTestDRAPod creates a baseline test pod that runs on DRANodeGroup and gets its devices from a
+// ResourceClaim created from the given ResourceClaimTemplate.
+func NewTestDRAPod(name, namespace, claimTemplateName string) *corev1.Pod {
+	pod := NewTestPod(name, namespace)
+	addDRAClaim(&pod.Spec, claimTemplateName)
+	return pod
+}
+
+// NewTestDRAReplicaSet creates a test ReplicaSet whose pods run on DRANodeGroup and each get their devices
+// from a ResourceClaim created from the given ResourceClaimTemplate. If antiAffinity is set, at most one
+// of its pods can run on a node.
+func NewTestDRAReplicaSet(name, namespace string, replicas int32, claimTemplateName string, antiAffinity bool) *appsv1.ReplicaSet {
+	rs := NewTestReplicaSet(name, namespace, replicas, 0.05, 0.02, "app", name)
+	addDRAClaim(&rs.Spec.Template.Spec, claimTemplateName)
+	if !antiAffinity {
+		return rs
+	}
+	rs.Spec.Template.Spec.Affinity = &corev1.Affinity{
+		PodAntiAffinity: &corev1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+				{
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"app": name,
+						},
+					},
+					TopologyKey: corev1.LabelHostname,
+				},
+			},
+		},
+	}
+	return rs
+}
+
+// addDRAClaim makes the pod run on DRANodeGroup and get its devices from a ResourceClaim created
+// from the given ResourceClaimTemplate.
+func addDRAClaim(spec *corev1.PodSpec, claimTemplateName string) {
+	spec.NodeSelector = map[string]string{
+		testCfg.NodeGroupLabelKey: testCfg.DRANodeGroup,
+	}
+	spec.ResourceClaims = []corev1.PodResourceClaim{
+		{
+			Name:                      "devices",
+			ResourceClaimTemplateName: &claimTemplateName,
+		},
+	}
+	spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{
+		{
+			Name: "devices",
+		},
+	}
 }

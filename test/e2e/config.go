@@ -57,6 +57,14 @@ type TestConfig struct {
 	// BypassedSchedulerName is a scheduler name that Cluster Autoscaler is configured to bypass
 	// (--bypassed-scheduler-names), so CA treats pods using it as pending without waiting for a scheduler.
 	BypassedSchedulerName string
+	// DRANodeGroup is the node group whose nodes expose DRA devices.
+	DRANodeGroup string
+	// DRADriverName is the name of the DRA driver that publishes the devices of DRANodeGroup nodes.
+	DRADriverName string
+	// DRADeviceClassName is the DeviceClass that selects the devices published by DRADriverName.
+	DRADeviceClassName string
+	// DRADevicesPerNode is how many DRA devices each DRANodeGroup node exposes.
+	DRADevicesPerNode int
 }
 
 // KwokTestConfig returns the TestConfig for running E2E tests against the local Kind + KWOK cluster.
@@ -86,6 +94,11 @@ func KwokTestConfig() *TestConfig {
 		NoScaleUpWindow: 30 * time.Second,
 		// Must match --bypassed-scheduler-names in the Makefile e2e-install-ca target.
 		BypassedSchedulerName: "non-existing-bypassed-scheduler",
+		// Must match the DRA annotations on the kind-worker-dra template node in kwok/charts/templates/configmap.yaml.
+		DRANodeGroup:       "kind-worker-dra",
+		DRADriverName:      "gpu.example.com",
+		DRADeviceClassName: "gpu",
+		DRADevicesPerNode:  4,
 	}
 }
 

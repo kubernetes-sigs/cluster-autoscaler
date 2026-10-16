@@ -85,11 +85,16 @@ func (nodeGroup *NodeGroup) IncreaseSize(ctx context.Context, delta int) error {
 		node.Labels["kubernetes.io/hostname"] = node.Name
 		node.Annotations["metrics.k8s.io/resource-metrics-path"] = fmt.Sprintf("/metrics/nodes/%s/metrics/resource", node.Name)
 		node.Spec.ProviderID = getProviderID(node.Name)
-		_, err := nodeGroup.kubeClient.CoreV1().Nodes().Create(context.Background(), node, v1.CreateOptions{})
+		createdNode, err := nodeGroup.kubeClient.CoreV1().Nodes().Create(context.Background(), node, v1.CreateOptions{})
 		if err != nil {
 			return fmt.Errorf("couldn't create new node '%s': %v", node.Name, err)
 		}
 		nodeGroup.targetSize += 1
+
+		err = nodeGroup.createResourceSlices(createdNode)
+		if err != nil {
+			return fmt.Errorf("couldn't create ResourceSlices for node '%s': %v", node.Name, err)
+		}
 	}
 
 	return nil
@@ -200,7 +205,11 @@ func (nodeGroup *NodeGroup) Nodes(ctx context.Context) ([]cloudprovider.Instance
 
 // TemplateNodeInfo returns a node template for this node group.
 func (nodeGroup *NodeGroup) TemplateNodeInfo(ctx context.Context) (*framework.NodeInfo, error) {
-	nodeInfo := framework.NewNodeInfo(nodeGroup.nodeTemplate, nil, framework.NewPodInfo(cloudprovider.BuildKubeProxy(nodeGroup.Id()), nil))
+	slices, err := nodeResourceSlices(nodeGroup.nodeTemplate)
+	if err != nil {
+		return nil, err
+	}
+	nodeInfo := framework.NewNodeInfo(nodeGroup.nodeTemplate, slices, framework.NewPodInfo(cloudprovider.BuildKubeProxy(nodeGroup.Id()), nil))
 	return nodeInfo, nil
 }
 

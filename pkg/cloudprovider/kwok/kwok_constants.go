@@ -28,6 +28,12 @@ const (
 	NGMaxSizeAnnotation = "cluster-autoscaler.kwok.nodegroup/max-count"
 	// NGDesiredSizeAnnotation is annotation on template nodes which specify desired size of the nodegroup
 	NGDesiredSizeAnnotation = "cluster-autoscaler.kwok.nodegroup/desired-count"
+	// NGDRADriverAnnotation is annotation on template nodes which specifies the DRA driver name
+	// of the devices that nodes in the nodegroup expose
+	NGDRADriverAnnotation = "cluster-autoscaler.kwok.nodegroup/dra-driver"
+	// NGDRADeviceCountAnnotation is annotation on template nodes which specifies how many DRA devices
+	// each node in the nodegroup exposes
+	NGDRADeviceCountAnnotation = "cluster-autoscaler.kwok.nodegroup/dra-device-count"
 
 	// KwokManagedAnnotation is the default annotation
 	// that kwok manages to decide if it should manage
