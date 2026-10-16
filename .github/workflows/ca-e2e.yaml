@@ -8,12 +8,14 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'kind-config.yaml'
+      - 'tools/**'
   pull_request:
     paths:
       - '**/*.go'
       - 'go.mod'
       - 'go.sum'
       - 'kind-config.yaml'
+      - 'tools/**'
 
 permissions:
   contents: read
@@ -31,9 +33,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-
-      - name: Install Dependencies
-        run: make install-dependencies
 
       - name: Test
         run: make run-e2e

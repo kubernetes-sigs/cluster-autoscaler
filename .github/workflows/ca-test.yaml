@@ -8,11 +8,13 @@ on:
       - '**/*.go'
       - 'go.mod'
       - 'go.sum'
+      - 'tools/**'
   pull_request:
     paths:
       - '**/*.go'
       - 'go.mod'
       - 'go.sum'
+      - 'tools/**'
 
 permissions:
   contents: read
@@ -33,9 +35,6 @@ jobs:
 
       - name: Apt-get
         run: sudo apt-get install libseccomp-dev -qq
-
-      - name: Setup-envtest
-        run: make install-dependencies
 
       - name: Test
         run: make test

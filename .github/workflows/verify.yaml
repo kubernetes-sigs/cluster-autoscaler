@@ -9,12 +9,14 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'hack/**'
+      - 'tools/**'
   pull_request:
     paths:
       - '**/*.go'
       - 'go.mod'
       - 'go.sum'
       - 'hack/**'
+      - 'tools/**'
 
 permissions:
   contents: read
