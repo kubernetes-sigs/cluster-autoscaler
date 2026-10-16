@@ -376,20 +376,22 @@ func (a *StaticAutoscaler) RunOnce(ctx context.Context, currentTime time.Time) c
 
 	a.filterUnschedulablePods(ctx, state)
 
-	_ = a.scaleUp(ctx, state)
-	// Error is ignored here as it is already logged internally by instrumentedScaleUp.
-	// We do not abort the loop to maintain legacy behavior and allow subsequent steps (like scaleDown) to be attempted.
+	scalingErr := a.scaleUp(ctx, state)
+	// Do not abort the loop on scaling errors. Subsequent scaling steps should still be attempted.
 
 	err = a.scaleDown(ctx, state)
-	if err != nil {
-		return err
+	if err != nil && scalingErr == nil {
+		scalingErr = err
 	}
 
-	_ = a.scaleUpMinNodes(ctx, state)
-	// Error is ignored here as it is already logged internally by instrumentedScaleUp.
-	// We do not abort the loop to maintain legacy behavior.
+	err = a.scaleUpMinNodes(ctx, state)
+	if err != nil && scalingErr == nil {
+		scalingErr = err
+	}
 
-	return nil
+	// Scaling methods log their own failures, but the loop must still report a failure so that
+	// errors_total is updated. If multiple scaling methods fail, return the first error.
+	return scalingErr
 }
 
 func (a *StaticAutoscaler) initializeLoopState(ctx context.Context, state *loopState) (bool, caerrors.AutoscalerError) {
