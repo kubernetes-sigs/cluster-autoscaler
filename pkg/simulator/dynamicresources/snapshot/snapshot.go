@@ -254,24 +254,12 @@ func (s *Snapshot) Fork() {
 
 // listDeviceClasses retrieves all effective DeviceClasses from the snapshot.
 func (s *Snapshot) listDeviceClasses() []*resourceapi.DeviceClass {
-	deviceClasses := s.deviceClasses.AsMap()
-	deviceClassesList := make([]*resourceapi.DeviceClass, 0, len(deviceClasses))
-	for _, class := range deviceClasses {
-		deviceClassesList = append(deviceClassesList, class)
-	}
-
-	return deviceClassesList
+	return s.deviceClasses.ValuesSlice()
 }
 
 // listResourceClaims retrieves all effective ResourceClaims from the snapshot.
 func (s *Snapshot) listResourceClaims() []*resourceapi.ResourceClaim {
-	claims := s.resourceClaims.AsMap()
-	claimsList := make([]*resourceapi.ResourceClaim, 0, len(claims))
-	for _, claim := range claims {
-		claimsList = append(claimsList, claim)
-	}
-
-	return claimsList
+	return s.resourceClaims.ValuesSlice()
 }
 
 // configureResourceClaim updates or adds a ResourceClaim in the current patch layer.
@@ -288,9 +276,10 @@ func (s *Snapshot) getResourceClaim(claimId ResourceClaimId) (*resourceapi.Resou
 
 // listResourceSlices retrieves all effective ResourceSlices from the snapshot.
 func (s *Snapshot) listResourceSlices() []*resourceapi.ResourceSlice {
-	resourceSlices := s.resourceSlices.AsMap()
-	resourceSlicesList := make([]*resourceapi.ResourceSlice, 0, len(resourceSlices))
-	for _, nodeSlices := range resourceSlices {
+	// Values are per-node lists of slices, so flatten them without
+	// materializing an intermediate map.
+	resourceSlicesList := make([]*resourceapi.ResourceSlice, 0, s.resourceSlices.Len())
+	for nodeSlices := range s.resourceSlices.Values() {
 		resourceSlicesList = append(resourceSlicesList, nodeSlices...)
 	}
 
