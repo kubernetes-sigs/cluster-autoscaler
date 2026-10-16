@@ -26,6 +26,7 @@ import (
 
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	schedulerinterface "k8s.io/kube-scheduler/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 
@@ -40,9 +41,10 @@ type SchedulerPluginRunner struct {
 	defaultNodeOrdering clustersnapshot.NodeOrderMapping
 	parallelism         int
 	verbosityOffset     int
+	extenders           []schedulerinterface.Extender
 }
 
-// NewSchedulerPluginRunner builds a SchedulerPluginRunner.
+// NewSchedulerPluginRunner builds a SchedulerPluginRunner using the extenders configured on fwHandle.
 func NewSchedulerPluginRunner(fwHandle *framework.Handle, snapshot clustersnapshot.ClusterSnapshot, parallelism int, verbosityOffset int) *SchedulerPluginRunner {
 	return &SchedulerPluginRunner{
 		fwHandle:            fwHandle,
@@ -50,7 +52,15 @@ func NewSchedulerPluginRunner(fwHandle *framework.Handle, snapshot clustersnapsh
 		defaultNodeOrdering: clustersnapshot.NewLastIndexOrderMapping(1),
 		parallelism:         parallelism,
 		verbosityOffset:     verbosityOffset,
+		extenders:           fwHandle.Extenders,
 	}
+}
+
+// nodeFilterResult holds the result of running framework Filter plugins on a node.
+type nodeFilterResult struct {
+	orderIndex int
+	nodeIndex  int
+	nodeInfo   *framework.NodeInfo
 }
 
 // RunFiltersUntilPassingNode runs the scheduler framework PreFilter phase once, and then keeps running the Filter phase for all nodes in the cluster that match the
@@ -80,12 +90,6 @@ func (p *SchedulerPluginRunner) RunFiltersUntilPassingNode(pod *apiv1.Pod, opts 
 		return nil, nil, clustersnapshot.NewFailingPredicateError(pod, preFilterStatus.Plugin(), preFilterStatus.Reasons(), "PreFilter failed", "")
 	}
 
-	var (
-		foundNode  *apiv1.Node
-		foundIndex int
-		mu         sync.Mutex
-	)
-
 	nodeOrdering := opts.NodeOrdering
 	if nodeOrdering == nil {
 		nodeOrdering = p.defaultNodeOrdering
@@ -93,9 +97,14 @@ func (p *SchedulerPluginRunner) RunFiltersUntilPassingNode(pod *apiv1.Pod, opts 
 
 	nodeOrdering.Reset(nodeInfosList)
 
+	shouldRunExtenders := p.hasInterestedFilterExtender(pod)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	earliestMatch := len(nodeInfosList)
+
+	var (
+		mu           sync.Mutex
+		passingNodes []nodeFilterResult
+	)
 
 	checkNode := func(i int) {
 		nodeIndex := nodeOrdering.At(i)
@@ -130,13 +139,11 @@ func (p *SchedulerPluginRunner) RunFiltersUntilPassingNode(pod *apiv1.Pod, opts 
 		if filterStatus.IsSuccess() {
 			// Filter passed for all plugins, so this pod can be scheduled on this Node.
 			mu.Lock()
-			defer mu.Unlock()
-			if i < earliestMatch {
-				earliestMatch = i
-				foundNode = nodeInfo.Node()
-				foundIndex = nodeIndex
+			passingNodes = append(passingNodes, nodeFilterResult{orderIndex: i, nodeIndex: nodeIndex, nodeInfo: nodeInfo})
+			if !shouldRunExtenders {
 				cancel()
 			}
+			mu.Unlock()
 		}
 		// Filter didn't pass for some plugin, so this Node won't work - move on to the next one.
 	}
@@ -147,12 +154,39 @@ func (p *SchedulerPluginRunner) RunFiltersUntilPassingNode(pod *apiv1.Pod, opts 
 		workqueue.ParallelizeUntil(ctx, p.parallelism, len(nodeInfosList), checkNode, workqueue.WithChunkSize(chunkSizeFor(len(nodeInfosList), p.parallelism)))
 	}
 
-	if foundNode != nil {
-		nodeOrdering.MarkMatch(foundIndex)
-		return foundNode, state, nil
+	if len(passingNodes) == 0 {
+		return nil, nil, clustersnapshot.NewNoNodesPassingPredicatesFoundError(pod)
 	}
 
-	return nil, nil, clustersnapshot.NewNoNodesPassingPredicatesFoundError(pod)
+	if shouldRunExtenders {
+		extenderFiltered, err := p.runExtenderFilters(pod, passingNodes)
+		if err != nil {
+			return nil, nil, err
+		}
+		passingNodes = extenderFiltered
+		if len(passingNodes) == 0 {
+			return nil, nil, clustersnapshot.NewNoNodesPassingPredicatesFoundError(pod)
+		}
+	}
+
+	earliest := passingNodes[0]
+	for _, result := range passingNodes[1:] {
+		if result.orderIndex < earliest.orderIndex {
+			earliest = result
+		}
+	}
+
+	nodeOrdering.MarkMatch(earliest.nodeIndex)
+	return earliest.nodeInfo.Node(), state, nil
+}
+
+func (p *SchedulerPluginRunner) hasInterestedFilterExtender(pod *apiv1.Pod) bool {
+	for _, extender := range p.extenders {
+		if extender.IsFilter() && extender.IsInterested(pod) {
+			return true
+		}
+	}
+	return false
 }
 
 // RunFiltersOnNode runs the scheduler framework PreFilter and Filter phases to check if the given pod can be scheduled on the given node.
@@ -196,6 +230,16 @@ func (p *SchedulerPluginRunner) RunFiltersOnNode(pod *apiv1.Pod, nodeName string
 		return nil, nil, clustersnapshot.NewFailingPredicateError(pod, filterName, filterReasons, unexpectedErrMsg, p.failingFilterDebugInfo(filterName, nodeInfo))
 	}
 
+	if len(p.extenders) > 0 {
+		passingNodes, schedErr := p.runExtenderFilters(pod, []nodeFilterResult{{nodeInfo: nodeInfo}})
+		if schedErr != nil {
+			return nil, nil, schedErr
+		}
+		if len(passingNodes) == 0 {
+			return nil, nil, clustersnapshot.NewFailingPredicateError(pod, "ExtenderFilter", nil, "extender(s) filtered out the node", "")
+		}
+	}
+
 	// PreFilter and Filter phases checked, this Pod can be scheduled on this Node.
 	return nodeInfo.Node(), state, nil
 }
@@ -210,6 +254,49 @@ func (p *SchedulerPluginRunner) RunReserveOnNode(pod *apiv1.Pod, nodeName string
 		return fmt.Errorf("couldn't reserve node %s for pod %s/%s: %v", nodeName, pod.Namespace, pod.Name, status.Message())
 	}
 	return nil
+}
+
+// runExtenderFilters calls each configured extender's Filter endpoint for the given pod and candidate nodes.
+// It returns the subset of nodes that pass all extender filters.
+func (p *SchedulerPluginRunner) runExtenderFilters(pod *apiv1.Pod, candidates []nodeFilterResult) ([]nodeFilterResult, clustersnapshot.SchedulingError) {
+	candidateNodes := make([]schedulerinterface.NodeInfo, len(candidates))
+	for i, candidate := range candidates {
+		candidateNodes[i] = candidate.nodeInfo
+	}
+
+	for _, extender := range p.extenders {
+		if !extender.IsFilter() || !extender.IsInterested(pod) {
+			continue
+		}
+
+		filteredNodes, _, _, err := extender.Filter(pod, candidateNodes)
+		if err != nil {
+			if extender.IsIgnorable() {
+				continue
+			}
+			return nil, clustersnapshot.NewFailingPredicateError(pod, "ExtenderFilter", nil,
+				fmt.Sprintf("extender %q filter failed: %v", extender.Name(), err), "")
+		}
+
+		filteredNodeNames := make(map[string]bool, len(filteredNodes))
+		for _, node := range filteredNodes {
+			filteredNodeNames[node.Node().Name] = true
+		}
+
+		newCandidates := make([]nodeFilterResult, 0, len(filteredNodes))
+		for _, candidate := range candidates {
+			if filteredNodeNames[candidate.nodeInfo.Node().Name] {
+				newCandidates = append(newCandidates, candidate)
+			}
+		}
+		candidates = newCandidates
+		candidateNodes = filteredNodes
+		if len(candidates) == 0 {
+			break
+		}
+	}
+
+	return candidates, nil
 }
 
 func (p *SchedulerPluginRunner) failingFilterDebugInfo(filterName string, nodeInfo *framework.NodeInfo) string {

@@ -115,7 +115,9 @@ func createSanitizedNodeInfo(ctx context.Context, nodeInfo *framework.NodeInfo, 
 		if err != nil {
 			return nil, err
 		}
-		result.AddPod(framework.NewPodInfo(freshPod, freshResourceClaims))
+		freshInfo := framework.NewPodInfo(freshPod, freshResourceClaims)
+		freshInfo.SimulatedPlacement = true
+		result.AddPod(freshInfo)
 	}
 	return result, nil
 }
@@ -208,7 +210,9 @@ func podsExpectedOnFreshNode(sanitizedExampleNodeInfo *framework.NodeInfo, daemo
 		}
 		// There's technically no need to sanitize these pods since they're created from scratch, but
 		// it's nice to have the same suffix for all names in one sanitized NodeInfo when debugging.
-		result = append(result, framework.NewPodInfo(createSanitizedPod(pod.Pod, sanitizedExampleNodeInfo.Node().Name, nameSuffix), nil))
+		freshInfo := framework.NewPodInfo(createSanitizedPod(pod.Pod, sanitizedExampleNodeInfo.Node().Name, nameSuffix), nil)
+		freshInfo.SimulatedPlacement = true
+		result = append(result, freshInfo)
 	}
 	return result, nil
 }
