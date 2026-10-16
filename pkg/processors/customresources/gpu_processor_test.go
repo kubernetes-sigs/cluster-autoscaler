@@ -28,7 +28,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	testprovider "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/test"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
+	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/gpu"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 )
 
 const (
@@ -68,6 +70,16 @@ func TestFilterOutNodesWithUnreadyResources(t *testing.T) {
 	nodeGpuReady.Status.Allocatable[gpu.ResourceNvidiaGPU] = *resource.NewQuantity(1, resource.DecimalSI)
 	nodeGpuReady.Status.Capacity[gpu.ResourceNvidiaGPU] = *resource.NewQuantity(1, resource.DecimalSI)
 	expectedReadiness[nodeGpuReady.Name] = true
+
+	nodeMigGpuReady := &apiv1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "nodeMigGpuReady", Labels: gpuLabels, CreationTimestamp: metav1.NewTime(start)},
+		Status: apiv1.NodeStatus{
+			Capacity:    apiv1.ResourceList{"nvidia.com/mig-2g.24gb": *resource.NewQuantity(1, resource.DecimalSI)},
+			Allocatable: apiv1.ResourceList{"nvidia.com/mig-2g.24gb": *resource.NewQuantity(1, resource.DecimalSI)},
+			Conditions:  []apiv1.NodeCondition{readyCondition},
+		},
+	}
+	expectedReadiness[nodeMigGpuReady.Name] = true
 
 	nodeGpuUnready := &apiv1.Node{
 		ObjectMeta: metav1.ObjectMeta{
@@ -169,6 +181,7 @@ func TestFilterOutNodesWithUnreadyResources(t *testing.T) {
 
 	initialReadyNodes := []*apiv1.Node{
 		nodeGpuReady,
+		nodeMigGpuReady,
 		nodeGpuUnready,
 		nodeGpuUnready2,
 		nodeDirectXReady,
@@ -178,6 +191,7 @@ func TestFilterOutNodesWithUnreadyResources(t *testing.T) {
 	}
 	initialAllNodes := []*apiv1.Node{
 		nodeGpuReady,
+		nodeMigGpuReady,
 		nodeGpuUnready,
 		nodeGpuUnready2,
 		nodeDirectXReady,
@@ -210,6 +224,44 @@ func TestFilterOutNodesWithUnreadyResources(t *testing.T) {
 			assert.Equal(t, node.Status.Conditions[0].Status, apiv1.ConditionFalse, fmt.Sprintf("Unexpected ready condition value for node %s", node.Name))
 		}
 	}
+}
+
+func TestGetNodeGpuTargetDoesNotCountMigDevicesAsPhysicalGpus(t *testing.T) {
+	node := &apiv1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "mig-node", Labels: map[string]string{GPULabel: "nvidia-h100"}},
+		Status: apiv1.NodeStatus{Allocatable: apiv1.ResourceList{
+			"nvidia.com/mig-2g.24gb": *resource.NewQuantity(32, resource.DecimalSI),
+		}},
+	}
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	templateNode := test.BuildTestNode("template-with-gpu", 1000, 1000)
+	templateNode.Status.Capacity[gpu.ResourceNvidiaGPU] = *resource.NewQuantity(4, resource.DecimalSI)
+	nodeGroup := provider.BuildNodeGroup("mig-group", 1, 10, 1, true, false, "machine", nil)
+	provider.SetMachineTemplates(map[string]*framework.NodeInfo{
+		nodeGroup.Id(): framework.NewNodeInfo(templateNode, nil),
+	})
+	autoscalingCtx := &ca_context.AutoscalingContext{CloudProvider: provider}
+
+	target, err := (&GpuCustomResourcesProcessor{}).GetNodeGpuTarget(context.Background(), autoscalingCtx, node, nodeGroup)
+
+	assert.NoError(t, err)
+	assert.Equal(t, CustomResourceTarget{ResourceType: "nvidia-h100", ResourceCount: 4}, target)
+}
+
+func TestGetNodeGpuTargetForUnmanagedMigNodeDoesNotCountMigDevices(t *testing.T) {
+	node := &apiv1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "unmanaged-mig-node", Labels: map[string]string{GPULabel: "nvidia-h100"}},
+		Status: apiv1.NodeStatus{Allocatable: apiv1.ResourceList{
+			"nvidia.com/mig-2g.24gb": *resource.NewQuantity(32, resource.DecimalSI),
+		}},
+	}
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	autoscalingCtx := &ca_context.AutoscalingContext{CloudProvider: provider}
+
+	target, err := (&GpuCustomResourcesProcessor{}).GetNodeGpuTarget(context.Background(), autoscalingCtx, node, nil)
+
+	assert.NoError(t, err)
+	assert.Equal(t, CustomResourceTarget{}, target)
 }
 
 func TestGetNodeGpuTargetForUnmanagedNodeWithoutGpuAllocatable(t *testing.T) {
