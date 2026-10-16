@@ -584,7 +584,7 @@ For a detailed explanation of the ProvisioningRequest API, please refer to the
 2. __Feature Flag__: Enable ProvisioningRequest support by setting the following flag in your Cluster Autoscaler configuration:
 `--enable-provisioning-requests=true`.
 
-4. __RBAC permissions__: Ensure your cluster-autoscaler pod has the necessary permissions to interact with ProvisioningRequests and PodTemplates:
+4. __RBAC permissions__: Ensure your cluster-autoscaler pod has the necessary permissions to interact with ProvisioningRequests, PodTemplates, and ResourceClaimTemplates:
 
 ```
 apiVersion: rbac.authorization.k8s.io/v1
@@ -600,6 +600,9 @@ rules:
     verbs: ["watch", "list", "get", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["podtemplates"]
+    verbs: ["watch", "list", "get"]
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaimtemplates"]
     verbs: ["watch", "list", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
