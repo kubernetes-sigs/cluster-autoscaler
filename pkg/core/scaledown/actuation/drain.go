@@ -147,7 +147,7 @@ func (e Evictor) waitPodsToDisappear(ctx context.Context, autoscalingCtx *ca_con
 	maxTermination int64) (map[string]status.PodEvictionResult, error) {
 	logger := klog.FromContext(ctx)
 	var allGone bool
-	for start := time.Now(); time.Now().Sub(start) < time.Duration(maxTermination)*time.Second+e.PodEvictionHeadroom; time.Sleep(5 * time.Second) {
+	for start := time.Now(); time.Since(start) < time.Duration(maxTermination)*time.Second+e.PodEvictionHeadroom; time.Sleep(5 * time.Second) {
 		allGone = true
 		for _, pod := range pods {
 			podReturned, err := autoscalingCtx.ClientSet.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
