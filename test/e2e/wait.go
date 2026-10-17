@@ -173,3 +173,20 @@ func WaitForPodsWithLabelScheduled(ctx context.Context, client klient.Client, na
 		return scheduledCount >= expectedCount, nil
 	}, wait.WithTimeout(timeout), wait.WithInterval(1*time.Second), wait.WithImmediate(), wait.WithContext(ctx))
 }
+
+// WaitForPodEvent waits until an event with the given reason is recorded for the pod.
+func WaitForPodEvent(ctx context.Context, client klient.Client, pod *corev1.Pod, reason string, timeout time.Duration) error {
+	return wait.For(func(ctx context.Context) (done bool, err error) {
+		events := &corev1.EventList{}
+		err = client.Resources(pod.Namespace).List(ctx, events)
+		if err != nil {
+			return false, err
+		}
+		for _, event := range events.Items {
+			if event.InvolvedObject.Name == pod.Name && event.Reason == reason {
+				return true, nil
+			}
+		}
+		return false, nil
+	}, wait.WithTimeout(timeout), wait.WithInterval(1*time.Second), wait.WithImmediate(), wait.WithContext(ctx))
+}

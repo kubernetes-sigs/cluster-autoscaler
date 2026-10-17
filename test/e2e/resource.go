@@ -241,3 +241,67 @@ func DeletePodsWithLabel(ctx context.Context, client klient.Client, namespace, l
 	}
 	return nil
 }
+
+// NewTestPodWithHostPort creates a baseline test pod that binds the given host port,
+// so that at most one such pod can run on a node.
+func NewTestPodWithHostPort(name, namespace string, hostPort int32) *corev1.Pod {
+	pod := NewTestPod(name, namespace)
+	pod.Spec.Containers[0].Ports = []corev1.ContainerPort{
+		{
+			ContainerPort: hostPort,
+			HostPort:      hostPort,
+		},
+	}
+	return pod
+}
+
+// NewTestPodWithAntiAffinity creates a baseline test pod labeled labelKey=labelVal with required
+// pod anti-affinity to other pods with the same label, so that at most one such pod can run on a node.
+func NewTestPodWithAntiAffinity(name, namespace, labelKey, labelVal string) *corev1.Pod {
+	pod := NewTestPod(name, namespace)
+	pod.Labels[labelKey] = labelVal
+	pod.Spec.Affinity = &corev1.Affinity{
+		PodAntiAffinity: &corev1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+				{
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							labelKey: labelVal,
+						},
+					},
+					TopologyKey: corev1.LabelHostname,
+				},
+			},
+		},
+	}
+	return pod
+}
+
+// NewTestPodWithEmptyDirAndAntiAffinity creates a test pod like NewTestPodWithAntiAffinity
+// that additionally mounts an EmptyDir volume.
+func NewTestPodWithEmptyDirAndAntiAffinity(name, namespace, labelKey, labelVal string) *corev1.Pod {
+	pod := NewTestPodWithAntiAffinity(name, namespace, labelKey, labelVal)
+	pod.Spec.Volumes = []corev1.Volume{
+		{
+			Name: "empty-volume",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+	}
+	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
+		{
+			Name:      "empty-volume",
+			MountPath: "/scratch",
+		},
+	}
+	return pod
+}
+
+// NewTestPodWithScheduler creates a test pod requesting the specified fractions of a single node's
+// available CPU and memory that is meant to be scheduled by the given scheduler.
+func NewTestPodWithScheduler(name, namespace string, cpuFraction, memFraction float64, schedulerName string) *corev1.Pod {
+	pod := NewTestPodWithResourceFraction(name, namespace, cpuFraction, memFraction)
+	pod.Spec.SchedulerName = schedulerName
+	return pod
+}
