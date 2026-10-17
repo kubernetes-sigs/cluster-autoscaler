@@ -50,6 +50,21 @@ type TestConfig struct {
 	// scale-down is expected to be blocked. It must be longer than the time CA needs to
 	// remove an unneeded node in this environment.
 	NoScaleDownWindow time.Duration
+	// NoScaleUpWindow is how long tests assert that the node count stays unchanged when
+	// scale-up is expected not to happen. It must be longer than the time CA needs to react
+	// to a pending pod and add a node in this environment.
+	NoScaleUpWindow time.Duration
+	// BypassedSchedulerName is a scheduler name that Cluster Autoscaler is configured to bypass
+	// (--bypassed-scheduler-names), so CA treats pods using it as pending without waiting for a scheduler.
+	BypassedSchedulerName string
+	// DRANodeGroup is the node group whose nodes expose DRA devices.
+	DRANodeGroup string
+	// DRADriverName is the name of the DRA driver that publishes the devices of DRANodeGroup nodes.
+	DRADriverName string
+	// DRADeviceClassName is the DeviceClass that selects the devices published by DRADriverName.
+	DRADeviceClassName string
+	// DRADevicesPerNode is how many DRA devices each DRANodeGroup node exposes.
+	DRADevicesPerNode int
 }
 
 // KwokTestConfig returns the TestConfig for running E2E tests against the local Kind + KWOK cluster.
@@ -74,6 +89,16 @@ func KwokTestConfig() *TestConfig {
 		// CA runs with --scale-down-unneeded-time=10s and the default 10s --scan-interval,
 		// so an unneeded node is removed within ~30s. 45s leaves margin on top of that.
 		NoScaleDownWindow: 45 * time.Second,
+		// CA triggers a scale-up within one 10s --scan-interval and KWOK nodes register within
+		// seconds, so an unwanted scale-up would show up well within 30s.
+		NoScaleUpWindow: 30 * time.Second,
+		// Must match --bypassed-scheduler-names in the Makefile e2e-install-ca target.
+		BypassedSchedulerName: "non-existing-bypassed-scheduler",
+		// Must match the DRA annotations on the kind-worker-dra template node in kwok/charts/templates/configmap.yaml.
+		DRANodeGroup:       "kind-worker-dra",
+		DRADriverName:      "gpu.example.com",
+		DRADeviceClassName: "gpu",
+		DRADevicesPerNode:  4,
 	}
 }
 

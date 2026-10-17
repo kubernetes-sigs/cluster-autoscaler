@@ -67,6 +67,12 @@ rules:
       - list
       - get
   - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceslices
+    verbs:
+      - create
+  - apiGroups:
       - ""
     resources:
       - namespaces
