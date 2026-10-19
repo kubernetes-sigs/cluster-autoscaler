@@ -1119,6 +1119,10 @@ func (csr *ClusterStateRegistry) GetIncorrectNodeGroupSize(nodeGroupName string)
 // GetUpcomingNodes returns how many new nodes will be added shortly to the node groups or should become ready soon.
 // The function may overestimate the number of nodes. The second return value contains the names of upcoming nodes
 // that are already registered in the cluster.
+//
+// Nodes that haven't registered in the cluster yet are only counted for node groups with an active scale-up request
+// that isn't backed off. Nodes that have already registered but aren't ready yet are always counted, regardless of
+// the scale-up request or backoff state of their node group.
 func (csr *ClusterStateRegistry) GetUpcomingNodes(ctx context.Context) (upcomingCounts map[string]int, registeredNodeNames map[string][]string) {
 	logger := klog.FromContext(ctx)
 	csr.Lock()
@@ -1143,25 +1147,28 @@ func (csr *ClusterStateRegistry) GetUpcomingNodes(ctx context.Context) (upcoming
 			// Negative value is unlikely but theoretically possible.
 			continue
 		}
-		// Don't count upcoming nodes for node groups that have upcoming nodes but no
-		// active scale-up request (the request was removed after instance creation
-		// failure or timeout) or are backed off. Otherwise, fake upcoming nodes
-		// injected into the cluster snapshot will make unschedulable pods appear
-		// schedulable, preventing ScaleUp from ever being called and considering
-		// alternative node groups.
+		// newNodes should include instances that have registered with k8s but aren't ready yet, instances that came up on the cloud provider side
+		// but haven't registered with k8s yet, and instances that haven't even come up on the cloud provider side yet (but are reflected in the target
+		// size). The first category is categorized as NotStarted in readiness, the other two aren't registered with k8s.
+		//
+		// Don't count the nodes that haven't registered yet for node groups that have no active scale-up request (the request was removed after
+		// instance creation failure or timeout) or are backed off. Such nodes may never arrive, and fake upcoming nodes injected into the cluster
+		// snapshot would make unschedulable pods appear schedulable, preventing ScaleUp from ever being called and considering alternative node
+		// groups. The nodes that have already registered are real though, and they're expected to become ready shortly, so they're always
+		// counted. Otherwise, they would neither be replaced by their templates in the cluster snapshot (hiding the resources they're expected to
+		// have, e.g. GPUs before the drivers are installed), nor excluded from scale-down candidates.
+		unregisteredNodes := max(newNodes-len(readiness.NotStarted), 0)
 		if _, hasScaleUpRequest := csr.scaleUpRequests[id]; !hasScaleUpRequest {
-			logger.V(4).Info("Skipping upcoming nodes for node group: no active scale-up request", "nodeCount", newNodes, "nodeGroupId", id)
-			continue
+			logger.V(4).Info("Skipping unregistered upcoming nodes for node group: no active scale-up request", "nodeCount", unregisteredNodes, "nodeGroupId", id)
+			newNodes = len(readiness.NotStarted)
+		} else if backoffStatus := csr.BackoffStatusForNodeGroup(ctx, nodeGroup, time.Now()); backoffStatus.IsBackedOff {
+			logger.V(4).Info("Skipping unregistered upcoming nodes for backed-off node group", "nodeCount", unregisteredNodes, "nodeGroupId", id, "errorMessage", backoffStatus.ErrorInfo.ErrorMessage)
+			newNodes = len(readiness.NotStarted)
 		}
-		if backoffStatus := csr.BackoffStatusForNodeGroup(ctx, nodeGroup, time.Now()); backoffStatus.IsBackedOff {
-			logger.V(4).Info("Skipping upcoming nodes for backed-off node group", "nodeCount", newNodes, "nodeGroupId", id, "errorMessage", backoffStatus.ErrorInfo.ErrorMessage)
+		if newNodes <= 0 {
 			continue
 		}
 		upcomingCounts[id] = newNodes
-		// newNodes should include instances that have registered with k8s but aren't ready yet, instances that came up on the cloud provider side
-		// but haven't registered with k8s yet, and instances that haven't even come up on the cloud provider side yet (but are reflected in the target
-		// size). The first category is categorized as NotStarted in readiness, the other two aren't registered with k8s, so they shouldn't be
-		// included.
 		registeredNodeNames[id] = readiness.NotStarted
 	}
 	return upcomingCounts, registeredNodeNames

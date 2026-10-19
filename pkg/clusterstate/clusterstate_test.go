@@ -1893,86 +1893,117 @@ func TestFailedScaleUpWithDraAndGpu(t *testing.T) {
 	mockMetrics.AssertCalled(t, "RegisterFailedNodeCreations", metrics.FailedScaleUpReason("RESOURCE_POOL_EXHAUSTED"), 1)
 }
 
-func TestGetUpcomingNodesSkipsWithoutScaleUpRequestOrBackoff(t *testing.T) {
+func TestGetUpcomingNodesWithoutScaleUpRequestOrBackoff(t *testing.T) {
 	now := time.Now()
 
-	// Setup: node group "ng1" with target=3 but only 1 ready node.
-	// This means newNodes = 2 in the upcoming calculation.
-	ng1_1 := BuildTestNode("ng1-1", 1000, 1000)
-	SetNodeReadyState(ng1_1, true, now.Add(-time.Minute))
-
-	provider := testprovider.NewTestCloudProviderBuilder().Build()
-	provider.AddNodeGroup("ng1", 1, 10, 3)
-	provider.AddNode("ng1", ng1_1)
+	// Setup: node group "ng1" with target=6 and 1 ready node. Depending on the test case,
+	// there are also 2 registered nodes that haven't become ready yet (NotStarted). The
+	// remaining nodes (3 or 5) haven't come up at all yet.
+	readyNode := BuildTestNode("ng1-1", 1000, 1000)
+	SetNodeReadyState(readyNode, true, now.Add(-time.Minute))
+	notStartedNode1 := BuildTestNode("ng1-2", 1000, 1000)
+	SetNodeReadyState(notStartedNode1, false, now.Add(-time.Minute))
+	notStartedNode1.CreationTimestamp = metav1.Time{Time: now.Add(-time.Minute)}
+	notStartedNode2 := BuildTestNode("ng1-3", 1000, 1000)
+	SetNodeReadyState(notStartedNode2, false, now.Add(-time.Minute))
+	notStartedNode2.CreationTimestamp = metav1.Time{Time: now.Add(-time.Minute)}
 
 	fakeClient := &fake.Clientset{}
 	fakeLogRecorder, _ := utils.NewStatusMapRecorder(fakeClient, "kube-system",
 		kube_record.NewFakeRecorder(5), false, "configmap-1")
 
-	t.Run("no scale-up request means no upcoming nodes", func(t *testing.T) {
-		clusterstate := NewClusterStateRegistry(provider, fakeLogRecorder, newBackoff(),
-			nodegroupconfig.NewDefaultNodeGroupConfigProcessor(
-				config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute}), &emptyTemplateNodeInfoRegistry{}, WithConfig(ClusterStateRegistryConfig{
-				MaxTotalUnreadyPercentage: 10,
-				OkTotalUnreadyCount:       1,
-			}))
+	registerScaleUp := func(csr *ClusterStateRegistry, nodeGroup cloudprovider.NodeGroup) {
+		csr.RegisterScaleUp(t.Context(), nodeGroup, 5, now)
+	}
+	// Simulates a partial stockout: some of the requested instances failed to be created,
+	// which puts the node group in backoff.
+	registerScaleUpAndBackOff := func(csr *ClusterStateRegistry, nodeGroup cloudprovider.NodeGroup) {
+		registerScaleUp(csr, nodeGroup)
+		csr.RegisterFailedScaleUp(t.Context(), nodeGroup, 3, cloudprovider.InstanceErrorInfo{
+			ErrorClass: cloudprovider.OutOfResourcesErrorClass,
+			ErrorCode:  "RESOURCE_POOL_EXHAUSTED",
+		}, now)
+	}
 
-		// NO RegisterScaleUp — simulates expired/removed request
-		err := clusterstate.UpdateNodes(context.Background(), []*apiv1.Node{ng1_1}, now)
-		assert.NoError(t, err)
+	testCases := []struct {
+		name                   string
+		nodes                  []*apiv1.Node
+		clusterStateSetup      func(csr *ClusterStateRegistry, nodeGroup cloudprovider.NodeGroup)
+		wantUpcomingNodes      int
+		wantUpcomingRegistered []string
+	}{
+		{
+			name:              "with active scale-up request all upcoming nodes are counted",
+			nodes:             []*apiv1.Node{readyNode},
+			clusterStateSetup: registerScaleUp,
+			wantUpcomingNodes: 5,
+		},
+		{
+			// Without a scale-up request (e.g. it was removed after instance creation failure
+			// or timeout), nodes that haven't registered yet may never arrive.
+			name:              "without scale-up request no upcoming nodes are counted",
+			nodes:             []*apiv1.Node{readyNode},
+			wantUpcomingNodes: 0,
+		},
+		{
+			name:              "for backed-off node group no upcoming nodes are counted",
+			nodes:             []*apiv1.Node{readyNode},
+			clusterStateSetup: registerScaleUpAndBackOff,
+			wantUpcomingNodes: 0,
+		},
+		{
+			name:                   "with active scale-up request all upcoming nodes including not started ones are counted",
+			nodes:                  []*apiv1.Node{readyNode, notStartedNode1, notStartedNode2},
+			clusterStateSetup:      registerScaleUp,
+			wantUpcomingNodes:      5,
+			wantUpcomingRegistered: []string{"ng1-2", "ng1-3"},
+		},
+		{
+			// Registered nodes are real and expected to become ready shortly, so they are counted
+			// even without a scale-up request (e.g. after a Cluster Autoscaler restart).
+			name:                   "without scale-up request only registered not started nodes are counted",
+			nodes:                  []*apiv1.Node{readyNode, notStartedNode1, notStartedNode2},
+			wantUpcomingNodes:      2,
+			wantUpcomingRegistered: []string{"ng1-2", "ng1-3"},
+		},
+		{
+			name:                   "for backed-off node group only registered not started nodes are counted",
+			nodes:                  []*apiv1.Node{readyNode, notStartedNode1, notStartedNode2},
+			clusterStateSetup:      registerScaleUpAndBackOff,
+			wantUpcomingNodes:      2,
+			wantUpcomingRegistered: []string{"ng1-2", "ng1-3"},
+		},
+	}
 
-		upcomingNodes, _ := clusterstate.GetUpcomingNodes(context.Background())
-		// Bug fix: without a scale-up request, upcoming should be 0
-		// even though target (3) > ready nodes (1).
-		assert.Equal(t, 0, upcomingNodes["ng1"])
-	})
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := testprovider.NewTestCloudProviderBuilder().Build()
+			provider.AddNodeGroup("ng1", 1, 10, 6)
+			for _, node := range tc.nodes {
+				provider.AddNode("ng1", node)
+			}
+			// Backoff requires the template node info of the node group to be available.
+			registry := newMockTemplateNodeInfoRegistry(map[string]*framework.NodeInfo{
+				"ng1": framework.NewNodeInfo(readyNode, nil),
+			})
+			clusterstate := NewClusterStateRegistry(provider, fakeLogRecorder, newBackoff(),
+				nodegroupconfig.NewDefaultNodeGroupConfigProcessor(
+					config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute, MaxNodeStartupTime: 15 * time.Minute}),
+				registry, WithConfig(ClusterStateRegistryConfig{
+					MaxTotalUnreadyPercentage: 10,
+					OkTotalUnreadyCount:       1,
+				}))
+			if tc.clusterStateSetup != nil {
+				tc.clusterStateSetup(clusterstate, provider.GetNodeGroup("ng1"))
+			}
+			err := clusterstate.UpdateNodes(t.Context(), tc.nodes, now)
+			assert.NoError(t, err)
 
-	t.Run("with active scale-up request upcoming nodes are counted", func(t *testing.T) {
-		clusterstate := NewClusterStateRegistry(provider, fakeLogRecorder, newBackoff(),
-			nodegroupconfig.NewDefaultNodeGroupConfigProcessor(
-				config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute}), &emptyTemplateNodeInfoRegistry{},
-			WithConfig(ClusterStateRegistryConfig{
-				MaxTotalUnreadyPercentage: 10,
-				OkTotalUnreadyCount:       1,
-			}))
-
-		clusterstate.RegisterScaleUp(context.Background(), provider.GetNodeGroup("ng1"), 2, now)
-		err := clusterstate.UpdateNodes(context.Background(), []*apiv1.Node{ng1_1}, now)
-		assert.NoError(t, err)
-
-		upcomingNodes, _ := clusterstate.GetUpcomingNodes(context.Background())
-		assert.Equal(t, 2, upcomingNodes["ng1"])
-	})
-
-	t.Run("backed-off node group means no upcoming nodes", func(t *testing.T) {
-		// Use short MaxNodeProvisionTime so the scale-up times out
-		// and puts the group in backoff.
-		mockMetrics := &mockMetrics{}
-		mockMetrics.On("RegisterFailedScaleUp", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
-		mockMetrics.On("RegisterFailedNodeCreations", mock.Anything, mock.Anything).Return()
-
-		nodeInfos := map[string]*framework.NodeInfo{
-			"ng1": framework.NewNodeInfo(ng1_1, nil),
-		}
-		registry := newMockTemplateNodeInfoRegistry(nodeInfos)
-		nodeGroupConfigProcessor := nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 2 * time.Minute})
-		clusterstate := NewNotifiedClusterStateRegistry(provider, fakeLogRecorder, newBackoff(), nodeGroupConfigProcessor, registry, withMetrics(mockMetrics, provider), WithConfig(ClusterStateRegistryConfig{
-			MaxTotalUnreadyPercentage: 10,
-			OkTotalUnreadyCount:       1,
-		}))
-
-		// Register scale-up 3 minutes ago with 2-minute provision time → will timeout
-		clusterstate.RegisterScaleUp(context.Background(), provider.GetNodeGroup("ng1"), 2, now.Add(-3*time.Minute))
-		err := clusterstate.UpdateNodes(context.Background(), []*apiv1.Node{ng1_1}, now)
-		assert.NoError(t, err)
-
-		// After timeout, group is in backoff. Register a new scale-up request.
-		clusterstate.RegisterScaleUp(context.Background(), provider.GetNodeGroup("ng1"), 2, now)
-
-		upcomingNodes, _ := clusterstate.GetUpcomingNodes(context.Background())
-		// Bug fix: backed-off group should not report upcoming nodes.
-		assert.Equal(t, 0, upcomingNodes["ng1"])
-	})
+			upcomingNodes, upcomingRegistered := clusterstate.GetUpcomingNodes(t.Context())
+			assert.Equal(t, tc.wantUpcomingNodes, upcomingNodes["ng1"])
+			assert.ElementsMatch(t, tc.wantUpcomingRegistered, upcomingRegistered["ng1"])
+		})
+	}
 }
 
 type mockMetrics struct {
