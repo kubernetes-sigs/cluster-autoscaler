@@ -383,3 +383,43 @@ func TestConsumeQuota(t *testing.T) {
 		})
 	}
 }
+
+func TestTrackerDeepCopy(t *testing.T) {
+	provider := cptest.NewTestCloudProviderBuilder().Build()
+	ctx := &context.AutoscalingContext{CloudProvider: provider}
+	node := test.BuildTestNode("n1", 1000, 200)
+
+	original := newTracker([]*quotaStatus{
+		{
+			quota:      &FakeQuota{Name: "shared", AppliesToFn: MatchEveryNode},
+			limitsLeft: resourceList{"cpu": 10, "nodes": 10},
+		},
+	}, newNodeResourcesCache(&fakeCustomResourcesProcessor{}))
+	clone := original.DeepCopy()
+
+	// Consuming on the clone must leave the original untouched.
+	if _, err := clone.ConsumeQuota(t.Context(), ctx, nil, node, 4); err != nil {
+		t.Fatalf("ConsumeQuota() on clone error = %v", err)
+	}
+	wantOriginal := resourceList{"cpu": 10, "nodes": 10}
+	if diff := cmp.Diff(wantOriginal, original.quotaStatuses[0].limitsLeft); diff != "" {
+		t.Errorf("original changed after mutating the clone (-want +got):\n%s", diff)
+	}
+	wantClone := resourceList{"cpu": 6, "nodes": 6}
+	if diff := cmp.Diff(wantClone, clone.quotaStatuses[0].limitsLeft); diff != "" {
+		t.Errorf("clone limitsLeft (-want +got):\n%s", diff)
+	}
+
+	// Consuming on the original must leave the clone untouched too.
+	if _, err := original.ConsumeQuota(t.Context(), ctx, nil, node, 1); err != nil {
+		t.Fatalf("ConsumeQuota() on original error = %v", err)
+	}
+	if diff := cmp.Diff(wantClone, clone.quotaStatuses[0].limitsLeft); diff != "" {
+		t.Errorf("clone changed after mutating the original (-want +got):\n%s", diff)
+	}
+
+	// The node resources cache is a per-node-group memoization and is shared by contract.
+	if original.nodeCache != clone.nodeCache {
+		t.Errorf("DeepCopy() did not share the node resources cache")
+	}
+}

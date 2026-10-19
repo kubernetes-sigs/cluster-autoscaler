@@ -204,19 +204,54 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 	}, nil
 }
 
-func (o *ScaleUpOrchestrator) applyLimits(ctx context.Context, newNodes int, tracker *resourcequotas.Tracker, nodeGroup cloudprovider.NodeGroup, nodeInfos map[string]*framework.NodeInfo) (int, errors.AutoscalerError) {
+// applyLimits caps newNodes to the quota headroom shared across the node group and
+// the similar groups the scale-up will balance into. Each group reserves what it can
+// take on a copy of the tracker, so a quota shared between them is counted once and the
+// live tracker stays untouched.
+func (o *ScaleUpOrchestrator) applyLimits(ctx context.Context, newNodes int, tracker *resourcequotas.Tracker, nodeGroup cloudprovider.NodeGroup, similarNodeGroups []cloudprovider.NodeGroup, nodeInfos map[string]*framework.NodeInfo) (int, errors.AutoscalerError) {
 	logger := klog.FromContext(ctx)
-	nodeInfo, found := nodeInfos[nodeGroup.Id()]
-	if !found {
+	if _, found := nodeInfos[nodeGroup.Id()]; !found {
 		// This should never happen, as we already should have retrieved nodeInfo for any considered nodegroup.
 		logger.Error(nil, "No node info for best expansion option", "nodeGroupId", nodeGroup.Id())
 		return 0, errors.NewAutoscalerError(errors.CloudProviderError, "No node info for best expansion option!")
 	}
-	checkResult, err := tracker.CheckQuota(ctx, o.autoscalingCtx, nodeGroup, nodeInfo.Node(), newNodes)
-	if err != nil {
-		return 0, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to check resource quotas: ")
+	clone := tracker.DeepCopy()
+	allowed := 0
+	groups := append([]cloudprovider.NodeGroup{nodeGroup}, similarNodeGroups...)
+	for i, ng := range groups {
+		if allowed >= newNodes {
+			break
+		}
+		nodeInfo, found := nodeInfos[ng.Id()]
+		if !found {
+			continue
+		}
+		// ConsumeQuota only reserves a delta that fits in full, so ask CheckQuota what
+		// fits and reserve exactly that. Reserving spends the shared quota for the groups
+		// that come after, which is what keeps it from being counted more than once.
+		checkResult, err := clone.CheckQuota(ctx, o.autoscalingCtx, ng, nodeInfo.Node(), newNodes-allowed)
+		if err != nil {
+			if i == 0 {
+				return 0, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to check resource quotas: ")
+			}
+			// A similar group we cannot evaluate is skipped, as it is when balancing.
+			logger.Error(err, "Ignoring similar node group for quota limit", "nodeGroupId", ng.Id())
+			continue
+		}
+		grant := checkResult.AllowedDelta
+		if grant <= 0 {
+			continue
+		}
+		if _, err := clone.ConsumeQuota(ctx, o.autoscalingCtx, ng, nodeInfo.Node(), grant); err != nil {
+			if i == 0 {
+				return 0, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to check resource quotas: ")
+			}
+			logger.Error(err, "Ignoring similar node group for quota limit", "nodeGroupId", ng.Id())
+			continue
+		}
+		allowed += grant
 	}
-	return checkResult.AllowedDelta, nil
+	return allowed, nil
 }
 
 // ScaleUpToNodeGroupMinSize tries to scale up node groups that have less nodes
@@ -721,16 +756,34 @@ func (o *ScaleUpOrchestrator) balanceScaleUps(
 	if aErr != nil {
 		return nil, aErr
 	}
+	// BalanceScaleUpBetweenGroups returns only the groups it grew. Add back the other
+	// valid targets with a zero delta so capScaleUpsByQuota can redistribute quota-freed
+	// capacity to a group the balancer left alone; it drops the ones still at zero.
+	planned := make(map[string]bool, len(scaleUpInfos))
+	for i := range scaleUpInfos {
+		planned[scaleUpInfos[i].Group.Id()] = true
+	}
+	for _, ng := range targetNodeGroups {
+		if planned[ng.Id()] {
+			continue
+		}
+		currentSize, err := ng.TargetSize(ctx)
+		if err != nil {
+			logger.V(2).Info("Skipping balanced node group with no target size when redistributing quota", "nodeGroupId", ng.Id())
+			continue
+		}
+		if maxSize := ng.MaxSize(ctx); maxSize > currentSize {
+			scaleUpInfos = append(scaleUpInfos, nodegroupset.ScaleUpInfo{Group: ng, CurrentSize: currentSize, NewSize: currentSize, MaxSize: maxSize})
+		}
+	}
 	return o.capScaleUpsByQuota(ctx, scaleUpInfos, nodeInfos, tracker)
 }
 
-// capScaleUpsByQuota caps each group's scale-up delta by its available quota and filters
-// out groups capped to zero. Uses ConsumeQuota to commit consumed quota so subsequent groups
-// sharing the same quota see the updated limits. A quota that cannot be evaluated is an error
-// rather than an unlimited group, as it already is in applyLimits.
-// Note: unclaimed capacity from a capped group is not redistributed to other groups;
-// a group capped below its balanced delta may leave some pods unschedulable until the
-// next autoscaler cycle.
+// capScaleUpsByQuota fits the balanced plan within the resource quotas. If every delta already
+// fits, the balancer's plan is kept. Otherwise the same number of nodes is re-allocated one at a
+// time to the smallest planned group with room and quota, so a shared quota is split evenly rather
+// than taken by whichever group comes first. Groups left at zero are dropped; a quota that cannot
+// be evaluated is an error.
 func (o *ScaleUpOrchestrator) capScaleUpsByQuota(
 	ctx context.Context,
 	scaleUpInfos []nodegroupset.ScaleUpInfo,
@@ -738,6 +791,12 @@ func (o *ScaleUpOrchestrator) capScaleUpsByQuota(
 	tracker *resourcequotas.Tracker,
 ) ([]nodegroupset.ScaleUpInfo, errors.AutoscalerError) {
 	logger := klog.FromContext(ctx)
+
+	// Fast path: reserve each balanced delta on a copy. If they all fit, the plan is within
+	// quota, so keep it as the balancer produced it, which also preserves a custom processor's
+	// distribution when quota does not bind.
+	clone := tracker.DeepCopy()
+	withinQuota := true
 	for i := range scaleUpInfos {
 		sui := &scaleUpInfos[i]
 		delta := sui.NewSize - sui.CurrentSize
@@ -748,24 +807,90 @@ func (o *ScaleUpOrchestrator) capScaleUpsByQuota(
 		if !found {
 			return nil, errors.NewAutoscalerErrorf(errors.CloudProviderError, "no node info for balanced node group %s", sui.Group.Id())
 		}
-		checkResult, err := tracker.CheckQuota(ctx, o.autoscalingCtx, sui.Group, nodeInfo.Node(), delta)
+		checkResult, err := clone.CheckQuota(ctx, o.autoscalingCtx, sui.Group, nodeInfo.Node(), delta)
 		if err != nil {
 			return nil, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to check resource quotas for node group %s: ", sui.Group.Id())
 		}
-		allowedDelta := checkResult.AllowedDelta
-		if allowedDelta < delta {
-			logger.V(1).Info("Capping scale-up of node group due to quota", "nodeGroupId", sui.Group.Id(), "wantedNodesCount", delta, "allowedNodesCount", allowedDelta)
-			sui.NewSize = sui.CurrentSize + allowedDelta
+		if checkResult.AllowedDelta < delta {
+			withinQuota = false
+			break
 		}
-		if allowedDelta > 0 {
-			// Leaving the quota unreserved would let the groups after this one read stale headroom.
-			if _, err := tracker.ConsumeQuota(ctx, o.autoscalingCtx, sui.Group, nodeInfo.Node(), allowedDelta); err != nil {
-				return nil, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to reserve resource quota for node group %s: ", sui.Group.Id())
-			}
+		if _, err := clone.ConsumeQuota(ctx, o.autoscalingCtx, sui.Group, nodeInfo.Node(), delta); err != nil {
+			return nil, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to reserve resource quota for node group %s: ", sui.Group.Id())
 		}
 	}
 
-	// Filter out groups that were capped to zero additional nodes by quota.
+	if withinQuota {
+		// The balancer's plan fits. Reserve it on the live tracker; each delta fit on the copy
+		// above from the same state, so these reservations succeed.
+		for i := range scaleUpInfos {
+			sui := &scaleUpInfos[i]
+			delta := sui.NewSize - sui.CurrentSize
+			if delta <= 0 {
+				continue
+			}
+			nodeInfo, found := nodeInfos[sui.Group.Id()]
+			if !found {
+				return nil, errors.NewAutoscalerErrorf(errors.CloudProviderError, "no node info for balanced node group %s", sui.Group.Id())
+			}
+			if _, err := tracker.ConsumeQuota(ctx, o.autoscalingCtx, sui.Group, nodeInfo.Node(), delta); err != nil {
+				return nil, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to reserve resource quota for node group %s: ", sui.Group.Id())
+			}
+		}
+	} else {
+		// Quota cuts the balanced plan. Re-allocate the same number of nodes on the live tracker
+		// (untouched above), each to the smallest planned group that still has room and quota.
+		budget := 0
+		for i := range scaleUpInfos {
+			if delta := scaleUpInfos[i].NewSize - scaleUpInfos[i].CurrentSize; delta > 0 {
+				budget += delta
+			}
+			scaleUpInfos[i].NewSize = scaleUpInfos[i].CurrentSize
+		}
+		logger.V(1).Info("Re-allocating balanced scale-up within quota", "nodeCount", budget)
+		done := make([]bool, len(scaleUpInfos))
+		for budget > 0 {
+			best := -1
+			for i := range scaleUpInfos {
+				if done[i] {
+					continue
+				}
+				sui := &scaleUpInfos[i]
+				nodeInfo, found := nodeInfos[sui.Group.Id()]
+				if !found || sui.NewSize >= sui.MaxSize {
+					done[i] = true
+					continue
+				}
+				checkResult, err := tracker.CheckQuota(ctx, o.autoscalingCtx, sui.Group, nodeInfo.Node(), 1)
+				if err != nil {
+					return nil, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to check resource quotas for node group %s: ", sui.Group.Id())
+				}
+				if checkResult.AllowedDelta < 1 {
+					// Quota for this group is spent and only ever shrinks, so stop checking it.
+					done[i] = true
+					continue
+				}
+				// Smallest planned size first; break ties by group id so the result does not
+				// depend on the non-deterministic order of scaleUpInfos.
+				if best < 0 || sui.NewSize < scaleUpInfos[best].NewSize ||
+					(sui.NewSize == scaleUpInfos[best].NewSize && sui.Group.Id() < scaleUpInfos[best].Group.Id()) {
+					best = i
+				}
+			}
+			if best < 0 {
+				break
+			}
+			sui := &scaleUpInfos[best]
+			nodeInfo := nodeInfos[sui.Group.Id()]
+			if _, err := tracker.ConsumeQuota(ctx, o.autoscalingCtx, sui.Group, nodeInfo.Node(), 1); err != nil {
+				return nil, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to reserve resource quota for node group %s: ", sui.Group.Id())
+			}
+			sui.NewSize++
+			budget--
+		}
+	}
+
+	// Drop groups left without any additional nodes.
 	filtered := make([]nodegroupset.ScaleUpInfo, 0, len(scaleUpInfos))
 	for _, sui := range scaleUpInfos {
 		if sui.NewSize != sui.CurrentSize {
@@ -1134,7 +1259,7 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 		return scaleUpPlan{}, st, err
 	}
 
-	newNodes, aErr = o.applyLimits(ctx, newNodes, args.tracker, bestOption.NodeGroup, args.nodeInfos)
+	newNodes, aErr = o.applyLimits(ctx, newNodes, args.tracker, bestOption.NodeGroup, bestOption.SimilarNodeGroups, args.nodeInfos)
 	if aErr != nil {
 		markedEquivalenceGroups := markAllGroupsAsUnschedulable(args.podEquivalenceGroups, ScaleUpExecutionErrorReason)
 		st, err := status.UpdateScaleUpError(
