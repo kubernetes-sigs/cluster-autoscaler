@@ -115,9 +115,17 @@ func TestUpdateLatencyCalculation(t *testing.T) {
 			wantLatency:            150 * time.Millisecond,
 		},
 		{
-			description:            "Some nodes fails to taint before timeout",
+			description:            "Some nodes fail to taint before timeout",
 			nodes:                  []string{"n1", "n3"},
 			nodeTaintAfterDuration: map[string]time.Duration{"n1": 100 * time.Millisecond, "n3": 250 * time.Millisecond},
+			wantLatency:            100 * time.Millisecond,
+			wantErr:                true,
+		},
+		{
+			description:            "All nodes fail to taint before timeout",
+			nodes:                  []string{"n1", "n2"},
+			nodeTaintAfterDuration: map[string]time.Duration{"n1": 250 * time.Millisecond, "n2": 300 * time.Millisecond},
+			wantLatency:            0,
 			wantErr:                true,
 		},
 	}
@@ -128,17 +136,22 @@ func TestUpdateLatencyCalculation(t *testing.T) {
 				nodeLister := NewTestCustomNodeLister(tc.nodes, tc.nodeTaintAfterDuration)
 				tracker := NewUpdateLatencyTrackerForTesting(nodeLister, len(tc.nodes))
 				startTime := time.Now()
-				go tracker.Start(t.Context())
+				go tracker.start(t.Context())
 				for _, name := range tc.nodes {
 					tracker.RecordStartTime(name, startTime)
 				}
-				latency, err := tracker.WaitForLatency()
+				latency, err := tracker.waitForLatency()
 				if tc.wantErr {
 					assert.Error(t, err)
-					return
+				} else {
+					assert.NoError(t, err)
 				}
-				assert.NoError(t, err)
 				assert.Equal(t, tc.wantLatency, latency)
+
+				// Calling waitForLatency a second time should return the same result without panicking.
+				latency2, err2 := tracker.waitForLatency()
+				assert.Equal(t, err, err2)
+				assert.Equal(t, latency, latency2)
 			})
 		})
 	}
@@ -153,9 +166,9 @@ func TestUpdateLatencyTrackerContextCancellation(t *testing.T) {
 			nodeLister := NewTestCustomNodeLister(nil, nil)
 			tracker := NewUpdateLatencyTrackerForTesting(nodeLister, 1)
 
-			go tracker.Start(ctx)
+			go tracker.start(ctx)
 
-			// Cancel ctx without ever starting or dropping "n1". Start() must return.
+			// Cancel ctx without ever starting or dropping "n1". start() must return.
 			cancel()
 			select {
 			case <-tracker.done:
@@ -175,13 +188,13 @@ func TestUpdateLatencyTrackerContextCancellation(t *testing.T) {
 			tracker := NewUpdateLatencyTrackerForTesting(nodeLister, 1)
 			tracker.RecordStartTime("n1", time.Now())
 
-			go tracker.Start(ctx)
+			go tracker.start(ctx)
 			go func() {
 				time.Sleep(50 * time.Millisecond)
 				cancel()
 			}()
 
-			_, err := tracker.WaitForLatency()
+			_, err := tracker.waitForLatency()
 			assert.ErrorIs(t, err, context.Canceled)
 		})
 	})
@@ -194,7 +207,9 @@ func TestUpdateLatencyTrackerAbort(t *testing.T) {
 		tracker := NewUpdateLatencyTrackerForTesting(nodeLister, 1)
 		tracker.RecordStartTime("n1", time.Now())
 
-		go tracker.Start(t.Context())
+		go tracker.start(t.Context())
+		tracker.Abort()
+		// Calling Abort a second time should not panic.
 		tracker.Abort()
 
 		select {
@@ -202,7 +217,7 @@ func TestUpdateLatencyTrackerAbort(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("tracker did not finish after Abort")
 		}
-		_, err := tracker.WaitForLatency()
+		_, err := tracker.waitForLatency()
 		assert.Error(t, err)
 	})
 }
@@ -223,14 +238,182 @@ func TestUpdateLatencyTrackerTimeoutStartsWhenAllNodesStarted(t *testing.T) {
 		nodeLister := NewTestCustomNodeLister(nodes, map[string]time.Duration{"n1": 0, "n2": 350 * time.Millisecond})
 		tracker := NewUpdateLatencyTrackerForTesting(nodeLister, len(nodes))
 		tracker.RecordStartTime("n1", time.Now())
-		go tracker.Start(t.Context())
+		go tracker.start(t.Context())
 
 		time.Sleep(300 * time.Millisecond)
 		tracker.RecordStartTime("n2", time.Now())
 
-		latency, err := tracker.WaitForLatency()
+		latency, err := tracker.waitForLatency()
 		assert.NoError(t, err)
 		// n1: 0ms. n2: started at 300ms, taint seen at 350ms.
 		assert.Equal(t, 50*time.Millisecond, latency)
 	})
+}
+
+func TestNodeDelayAfterTaintCalculator(t *testing.T) {
+	const staticDelay = 5 * time.Second
+
+	type loop struct {
+		waitBefore time.Duration
+		nodes      []string
+		// if a node from `nodes` has no entry in `nodeTaintAfterDuration`, waiting for the node's taint will time out.
+		nodeTaintAfterDuration map[string]time.Duration
+		abort                  bool
+		wantDelay              time.Duration
+	}
+
+	testCases := []struct {
+		name                string
+		dynamicDelayEnabled bool
+		loops               []loop
+	}{
+		{
+			name:                "dynamic delay disabled returns static delay",
+			dynamicDelayEnabled: false,
+			loops: []loop{
+				{
+					nodes:                  []string{"n1"},
+					nodeTaintAfterDuration: map[string]time.Duration{"n1": 50 * time.Millisecond},
+					wantDelay:              staticDelay,
+				},
+			},
+		},
+		{
+			name:                "multiple loops within 1 hour keep the maximum latency",
+			dynamicDelayEnabled: true,
+			loops: []loop{
+				{
+					nodes:                  []string{"n1", "n2"},
+					nodeTaintAfterDuration: map[string]time.Duration{"n1": 50 * time.Millisecond, "n2": 150 * time.Millisecond},
+					wantDelay:              300 * time.Millisecond,
+				},
+				{
+					waitBefore:             10 * time.Minute,
+					nodes:                  []string{"n3"},
+					nodeTaintAfterDuration: map[string]time.Duration{"n3": 100 * time.Millisecond},
+					wantDelay:              300 * time.Millisecond,
+				},
+				{
+					waitBefore:             10 * time.Minute,
+					nodes:                  []string{"n4"},
+					nodeTaintAfterDuration: map[string]time.Duration{"n4": 200 * time.Millisecond},
+					wantDelay:              400 * time.Millisecond,
+				},
+			},
+		},
+		{
+			name:                "loop 2 runs more than 1 hour after loop 1 so old sample expires",
+			dynamicDelayEnabled: true,
+			loops: []loop{
+				{
+					nodes:                  []string{"n1"},
+					nodeTaintAfterDuration: map[string]time.Duration{"n1": 150 * time.Millisecond},
+					wantDelay:              300 * time.Millisecond,
+				},
+				{
+					waitBefore:             pastLatencyExpireDuration + time.Minute,
+					nodes:                  []string{"n2"},
+					nodeTaintAfterDuration: map[string]time.Duration{"n2": 50 * time.Millisecond},
+					wantDelay:              100 * time.Millisecond,
+				},
+			},
+		},
+		{
+			name:                "aborted loop does not affect subsequent loops",
+			dynamicDelayEnabled: true,
+			loops: []loop{
+				{
+					nodes:                  []string{"n1"},
+					nodeTaintAfterDuration: map[string]time.Duration{"n1": 100 * time.Millisecond},
+					wantDelay:              200 * time.Millisecond,
+				},
+				{
+					// n2 would take 200ms (raising delay to 400ms), but the tracker is aborted without calling ComputeDelay.
+					nodes:                  []string{"n2"},
+					nodeTaintAfterDuration: map[string]time.Duration{"n2": 200 * time.Millisecond},
+					abort:                  true,
+				},
+				{
+					waitBefore:             time.Second,
+					nodes:                  []string{"n3"},
+					nodeTaintAfterDuration: map[string]time.Duration{"n3": 50 * time.Millisecond},
+					wantDelay:              200 * time.Millisecond,
+				},
+			},
+		},
+		{
+			name:                "partial timeout in a loop uses the available latency instead of static delay",
+			dynamicDelayEnabled: true,
+			loops: []loop{
+				{
+					// n1 propagates in 100ms, n2 never propagates and times out.
+					nodes:                  []string{"n1", "n2"},
+					nodeTaintAfterDuration: map[string]time.Duration{"n1": 100 * time.Millisecond},
+					wantDelay:              200 * time.Millisecond,
+				},
+			},
+		},
+		{
+			name:                "full timeout with no prior latency in the past hour falls back to static delay",
+			dynamicDelayEnabled: true,
+			loops: []loop{
+				{
+					nodes:     []string{"n1"}, // times out
+					wantDelay: staticDelay,
+				},
+			},
+		},
+		{
+			name:                "full timeout reuses prior latency within 1 hour then falls back to static delay after expiry",
+			dynamicDelayEnabled: true,
+			loops: []loop{
+				{
+					nodes:                  []string{"n1"},
+					nodeTaintAfterDuration: map[string]time.Duration{"n1": 150 * time.Millisecond},
+					wantDelay:              300 * time.Millisecond,
+				},
+				{
+					waitBefore: 10 * time.Minute,
+					nodes:      []string{"n2"}, // times out
+					wantDelay:  300 * time.Millisecond,
+				},
+				{
+					waitBefore: 51 * time.Minute,
+					nodes:      []string{"n3"}, // times out
+					wantDelay:  staticDelay,
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				delayCalculator := NewNodeDelayAfterTaintCalculator(staticDelay, tc.dynamicDelayEnabled)
+
+				for i, l := range tc.loops {
+					if l.waitBefore > 0 {
+						time.Sleep(l.waitBefore)
+					}
+					nodeLister := NewTestCustomNodeLister(l.nodes, l.nodeTaintAfterDuration)
+					tracker := delayCalculator.StartLatencyTracker(t.Context(), nodeLister, len(l.nodes))
+					startTime := time.Now()
+					for _, name := range l.nodes {
+						tracker.RecordStartTime(name, startTime)
+					}
+					if l.abort {
+						tracker.Abort()
+						select {
+						case <-tracker.done:
+						case <-time.After(time.Second):
+							t.Fatalf("loop %d: tracker did not finish after Abort", i)
+						}
+						continue
+					}
+					gotDelay := delayCalculator.ComputeDelay(t.Context(), tracker)
+					assert.Equal(t, l.wantDelay, gotDelay, "loop %d delay", i)
+				}
+			})
+		})
+	}
 }

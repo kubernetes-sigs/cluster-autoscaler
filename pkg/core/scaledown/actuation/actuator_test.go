@@ -48,7 +48,6 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupconfig"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/utilization"
-	"sigs.k8s.io/cluster-autoscaler/pkg/utils/expiring"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
@@ -88,8 +87,8 @@ type startDeletionTestCase struct {
 	wantDeletedNodes          []string
 	wantTaintUpdates          map[string][][]apiv1.Taint
 	wantNodeDeleteResults     map[string]status.NodeDeleteResult
-	dynamicDeleteDelayEnabled bool // Set to true to enable DynamicNodeDeleteDelayAfterTaintEnabled.
-	wantLatencySamples        int  // Number of latencies the actuator should add to pastLatencies.
+	dynamicDeleteDelayEnabled bool          // Set to true to enable DynamicNodeDeleteDelayAfterTaintEnabled.
+	nodeDeleteDelayAfterTaint time.Duration // Static NodeDeleteDelayAfterTaint in AutoscalingOptions.
 }
 
 func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suffix string) map[string]startDeletionTestCase {
@@ -1217,6 +1216,7 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 		MaxConcurrentNodesTainting:              5,
 		MaxPodEvictionTime:                      0,
 		DaemonSetEvictionForEmptyNodes:          true,
+		NodeDeleteDelayAfterTaint:               tc.nodeDeleteDelayAfterTaint,
 		DynamicNodeDeleteDelayAfterTaintEnabled: tc.dynamicDeleteDelayEnabled,
 	}
 
@@ -1280,10 +1280,10 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 	evictor := Evictor{EvictionRetryTime: 0, PodEvictionHeadroom: DefaultPodEvictionHeadroom, shutdownGracePeriodByPodPriority: legacyFlagDrainConfig, fullDsEviction: force}
 	actuator := Actuator{
 		autoscalingCtx: &autoscalingCtx, nodeDeletionTracker: ndt,
-		nodeDeletionScheduler: NewGroupDeletionScheduler(&autoscalingCtx, ndt, ndb, evictor),
-		pastLatencies:         expiring.NewList(),
-		budgetProcessor:       budgets.NewScaleDownBudgetProcessor(&autoscalingCtx),
-		configGetter:          nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.NodeGroupDefaults),
+		nodeDeletionScheduler:    NewGroupDeletionScheduler(&autoscalingCtx, ndt, ndb, evictor),
+		budgetProcessor:          budgets.NewScaleDownBudgetProcessor(&autoscalingCtx),
+		configGetter:             nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.NodeGroupDefaults),
+		scaledownDelayCalculator: NewNodeDelayAfterTaintCalculator(autoscalingCtx.NodeDeleteDelayAfterTaint, autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled),
 	}
 
 	var gotResult status.ScaleDownResult
@@ -1302,11 +1302,6 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 	// Verify ScaleDownResult looks as expected.
 	if diff := cmp.Diff(tc.wantStatus.result, gotResult); diff != "" {
 		t.Errorf("StartDeletion result diff (-want +got):\n%s", diff)
-	}
-
-	// Verify the number of taint latency samples. With the dynamic delay enabled, every successful taintNodesSync call adds one.
-	if got := len(actuator.pastLatencies.ToSlice()); got != tc.wantLatencySamples {
-		t.Errorf("pastLatencies: want %d samples, got %d", tc.wantLatencySamples, got)
 	}
 
 	// Verify ScaleDownNodes looks as expected.
@@ -1406,26 +1401,24 @@ func TestStartDeletion(t *testing.T) {
 
 func TestStartDeletionWithDynamicNodeDeleteDelay(t *testing.T) {
 	testCases := getStartDeletionTestCases(false, false, "testNgDyn")
-	testsToRun := []struct {
-		name               string
-		wantLatencySamples int
-	}{
-		{name: "empty node deletion testNgDyn", wantLatencySamples: 1},
+	testsToRun := []string{
+		"empty node deletion testNgDyn",
 		// Empty and drain nodes are tainted by separate taintNodesSync calls, so this runs two trackers.
-		{name: "empty and drain deletion work correctly together testNgDyn", wantLatencySamples: 2},
-		{name: "failure to taint empty node stops deletion and cleans already applied taints testNgDyn", wantLatencySamples: 0},
-		// Only the empty side records a sample, the drain side fails to taint.
-		{name: "failure to taint drain node stops further deletion and cleans already applied taints testNgDyn", wantLatencySamples: 1},
+		"empty and drain deletion work correctly together testNgDyn",
+		"failure to taint empty node stops deletion and cleans already applied taints testNgDyn",
+		"failure to taint drain node stops further deletion and cleans already applied taints testNgDyn",
 	}
 
-	for _, tt := range testsToRun {
-		tc, ok := testCases[tt.name]
+	for _, name := range testsToRun {
+		tc, ok := testCases[name]
 		if !ok {
-			t.Fatalf("test case %q not found", tt.name)
+			t.Fatalf("test case %q not found", name)
 		}
 		tc.dynamicDeleteDelayEnabled = true
-		tc.wantLatencySamples = tt.wantLatencySamples
-		t.Run(tt.name, func(t *testing.T) {
+		// Set static delay longer than the 3s deletion timeout in runStartDeletionTest so the test
+		// only passes if the dynamic delay overrides the static delay.
+		tc.nodeDeleteDelayAfterTaint = 10 * time.Second
+		t.Run(name, func(t *testing.T) {
 			runStartDeletionTest(t, tc, false)
 		})
 	}
@@ -1592,8 +1585,9 @@ func TestStartDeletionInBatchBasic(t *testing.T) {
 			evictor := Evictor{EvictionRetryTime: 0, PodEvictionHeadroom: DefaultPodEvictionHeadroom, shutdownGracePeriodByPodPriority: legacyFlagDrainConfig}
 			actuator := Actuator{
 				autoscalingCtx: &autoscalingCtx, nodeDeletionTracker: ndt,
-				nodeDeletionScheduler: NewGroupDeletionScheduler(&autoscalingCtx, ndt, ndb, evictor),
-				budgetProcessor:       budgets.NewScaleDownBudgetProcessor(&autoscalingCtx),
+				nodeDeletionScheduler:    NewGroupDeletionScheduler(&autoscalingCtx, ndt, ndb, evictor),
+				budgetProcessor:          budgets.NewScaleDownBudgetProcessor(&autoscalingCtx),
+				scaledownDelayCalculator: NewNodeDelayAfterTaintCalculator(autoscalingCtx.NodeDeleteDelayAfterTaint, autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled),
 			}
 
 			for _, nodes := range deleteNodes {
