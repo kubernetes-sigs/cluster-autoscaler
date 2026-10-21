@@ -4001,3 +4001,54 @@ func TestShouldScaleDown(t *testing.T) {
 		})
 	}
 }
+
+func TestCountsByReason(t *testing.T) {
+	n1 := BuildTestNode("n1", 1000, 1000)
+	n2 := BuildTestNode("n2", 1000, 1000)
+	n3 := BuildTestNode("n3", 1000, 1000)
+
+	testCases := []struct {
+		name  string
+		nodes []*simulator.UnremovableNode
+		// want holds the non-zero counts; every other known reason must be 0.
+		want map[simulator.UnremovableReason]int
+	}{
+		{
+			name:  "no unremovable nodes",
+			nodes: nil,
+		},
+		{
+			name: "single reason",
+			nodes: []*simulator.UnremovableNode{
+				{Node: n1, Reason: simulator.BlockedByPod},
+			},
+			want: map[simulator.UnremovableReason]int{simulator.BlockedByPod: 1},
+		},
+		{
+			name: "multiple reasons",
+			nodes: []*simulator.UnremovableNode{
+				{Node: n1, Reason: simulator.BlockedByPod},
+				{Node: n2, Reason: simulator.BlockedByPod},
+				{Node: n3, Reason: simulator.NotUnderutilized},
+			},
+			want: map[simulator.UnremovableReason]int{
+				simulator.BlockedByPod:     2,
+				simulator.NotUnderutilized: 1,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Every known reason (all values up to the "Unknown" sentinel, except
+			// NoReason) must be reported, so that its gauge drops to 0 instead of
+			// keeping a stale value. Iterating up to "Unknown" also catches new
+			// reasons that countsByReason does not zero-fill yet.
+			want := make(map[simulator.UnremovableReason]int)
+			for r := simulator.ScaleDownDisabledAnnotation; r.String() != "Unknown"; r++ {
+				want[r] = tc.want[r]
+			}
+			assert.Equal(t, want, countsByReason(tc.nodes))
+		})
+	}
+}

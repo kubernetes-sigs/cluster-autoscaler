@@ -1499,6 +1499,11 @@ func calculateCoresMemoryTotal(nodes []*apiv1.Node, timestamp time.Time) (int64,
 
 func countsByReason(nodes []*simulator.UnremovableNode) map[simulator.UnremovableReason]int {
 	counts := make(map[simulator.UnremovableReason]int)
+	// Report every known reason, including those with no nodes in this loop, so
+	// that the per-reason gauge drops to 0 instead of keeping a stale value.
+	for r := simulator.ScaleDownDisabledAnnotation; r <= simulator.BlockedByOnCompletionPod; r++ {
+		counts[r] = 0
+	}
 
 	for _, node := range nodes {
 		counts[node.Reason]++
