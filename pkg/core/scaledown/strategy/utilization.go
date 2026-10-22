@@ -41,27 +41,20 @@ func (d *UtilizationDimension) Name() string {
 	return "Utilization"
 }
 
-// Score returns the raw score for a specific Node as its CPU utilization percentage (float in range <0,1>).
+// Score inverts the utilization value to interpret higher utilization as lower preference score
+// High raw util (85) -> low score (15); low raw util (05)  -> high score (95)
+// utilization.CalculateUtilizationOfResource returns the raw util as Node CPU utilization percentage (float in range <0,1>).
 func (d *UtilizationDimension) Score(nodeInfo *framework.NodeInfo) (float64, error) {
-	util, err := utilization.CalculateUtilizationOfResource(nodeInfo, apiv1.ResourceCPU, true, true, time.Now())
+	rawUtil, err := utilization.CalculateUtilizationOfResource(nodeInfo, apiv1.ResourceCPU, true, true, time.Now())
 	if err != nil {
 		return 0, err
 	}
-	return util, nil
-}
-
-// Normalize normalizes raw scores into the allowed range and inverts the value to correctly interpret higher utilization as lower preference score
-// High raw score (85) -> low normalized score (15); low raw score (05)  -> high normalized score (95)
-func (d *UtilizationDimension) Normalize(scores NodeDimensionScoreList) error {
-	for i := range scores {
-		rawUtil := scores[i].Score * 100
-		if rawUtil < 0 {
-			rawUtil = 0
-		}
-		if rawUtil > 100 {
-			rawUtil = 1
-		}
-		scores[i].Score = 100 - rawUtil
+	util := rawUtil * 100
+	if util < MinDimensionScore {
+		util = MinDimensionScore
 	}
-	return nil
+	if util > MaxDimensionScore {
+		util = MaxDimensionScore
+	}
+	return MaxDimensionScore - util, nil
 }
