@@ -18,6 +18,7 @@ package strategy
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
@@ -51,37 +52,18 @@ func NewRankingSession(strategy *Strategy) *RankingSession {
 }
 
 // ScoreNode evaluates a single node against all configured Dimensions.
-// Both NodeRank and NodeDimensionScoreList are filled with data.
 func (rs *RankingSession) ScoreNode(nodeInfo *framework.NodeInfo) error {
-	nodeName := nodeInfo.Node().Name
-
-	rank := &NodeRank{
-		Name:      nodeName,
-		RawScores: []DimensionScore{},
-		Scores:    []DimensionScore{},
-	}
-
-	// If Dimensions are empty, no scoring happens and no structs are populated.
 	for _, dim := range rs.strategy.Dimensions {
 		dimName := dim.Name()
 		score, err := dim.Score(nodeInfo)
 		if err != nil {
 			return err
 		}
-
-		// Store node raw score inside its NodeRank struct.
-		rank.RawScores = append(rank.RawScores, DimensionScore{
-			DimensionName: dimName,
-			Score:         score,
-		})
-
-		// Store node raw score inside Dimension struct for later normalization.
 		rs.DimensionScores[dimName] = append(rs.DimensionScores[dimName], NodeDimensionScore{
-			NodeName: nodeName,
+			NodeName: nodeInfo.Node().Name,
 			Score:    score,
 		})
 	}
-	rs.Rankings[nodeName] = rank
 	return nil
 }
 
@@ -104,18 +86,23 @@ func (rs *RankingSession) WeightTotal() error {
 	for dimName, scoresList := range rs.DimensionScores {
 		weight := rs.strategy.Weights[dimName]
 		for _, dimensionScore := range scoresList {
-			rank := rs.Rankings[dimensionScore.NodeName]
-			if rank != nil {
-				if dimensionScore.Score > MaxDimensionScore || dimensionScore.Score < MinDimensionScore {
-					return fmt.Errorf("normalized dimension %s score not in range, should be in <%1.f,%1f>", dimName, MinDimensionScore, MaxDimensionScore)
+			rank, ok := rs.Rankings[dimensionScore.NodeName]
+			if !ok {
+				rank = &NodeRank{
+					Name:   dimensionScore.NodeName,
+					Scores: []DimensionScore{},
 				}
-				weightedScore := dimensionScore.Score * weight
-				rank.Scores = append(rank.Scores, DimensionScore{
-					DimensionName: dimName,
-					Score:         weightedScore,
-				})
-				rank.TotalScore += weightedScore
+				rs.Rankings[dimensionScore.NodeName] = rank
 			}
+			if dimensionScore.Score > MaxDimensionScore || dimensionScore.Score < MinDimensionScore {
+				return fmt.Errorf("normalized dimension %s score not in range, should be in <%1.f,%1.f>", dimName, MinDimensionScore, MaxDimensionScore)
+			}
+			weightedScore := dimensionScore.Score * weight
+			rank.Scores = append(rank.Scores, DimensionScore{
+				DimensionName: dimName,
+				Score:         weightedScore,
+			})
+			rank.TotalScore += weightedScore
 		}
 	}
 	return nil
@@ -123,7 +110,7 @@ func (rs *RankingSession) WeightTotal() error {
 
 // Sort returns a sorted copy of unneeded node names according to their TotalScore in descending order.
 func (rs *RankingSession) Sort(nodeNames []string) []string {
-	sorted := append([]string(nil), nodeNames...)
+	sorted := slices.Clone(nodeNames)
 	sort.Slice(sorted, func(i, j int) bool {
 		rankI := rs.Rankings[sorted[i]]
 		rankJ := rs.Rankings[sorted[j]]

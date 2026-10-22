@@ -40,8 +40,6 @@ type DimensionScore struct {
 // NodeRank holds for node Name scores across all Dimensions.
 type NodeRank struct {
 	Name string
-	// RawScores hold Score() output before normalization for each Dimension.
-	RawScores []DimensionScore
 	// Scores are normalized weighted scores for each Dimension.
 	Scores     []DimensionScore
 	TotalScore float64
