@@ -65,6 +65,9 @@ func (s *Strategy) parse(strategyStr string) error {
 		if !ok {
 			return fmt.Errorf("unknown scoring dimension '%s' configured", dimName)
 		}
+		if _, duplicate := s.Weights[dimName]; duplicate {
+			return fmt.Errorf("duplicate scoring dimension '%s' configured", dimName)
+		}
 		s.Dimensions = append(s.Dimensions, d)
 		s.Weights[dimName] = weight
 	}
