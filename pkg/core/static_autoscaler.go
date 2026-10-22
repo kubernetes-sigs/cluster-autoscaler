@@ -973,6 +973,8 @@ func (a *StaticAutoscaler) scaleDown(ctx context.Context, state *loopState) caer
 		logger.V(4).Info("Starting scale down: no scale down candidates. skipping...")
 		state.scaleDownStatus.Result = scaledownstatus.ScaleDownNoCandidates
 		metrics.UpdateLastTime(metrics.ScaleDown, time.Now())
+		// No nodes were evaluated, so every reason is 0. Report it so that values from earlier loops don't stick.
+		metrics.UpdateUnremovableNodesCount(countsByReason(a.scaleDownPlanner.UnremovableNodes()))
 		a.updateSoftDeletionTaints(ctx, state.allNodes)
 	} else {
 		logger.V(4).Info("Starting scale down")
@@ -1499,11 +1501,6 @@ func calculateCoresMemoryTotal(nodes []*apiv1.Node, timestamp time.Time) (int64,
 
 func countsByReason(nodes []*simulator.UnremovableNode) map[simulator.UnremovableReason]int {
 	counts := make(map[simulator.UnremovableReason]int)
-	// Report every known reason, including those with no nodes in this loop, so
-	// that the per-reason gauge drops to 0 instead of keeping a stale value.
-	for r := simulator.ScaleDownDisabledAnnotation; r <= simulator.BlockedByOnCompletionPod; r++ {
-		counts[r] = 0
-	}
 
 	for _, node := range nodes {
 		counts[node.Reason]++
