@@ -22,8 +22,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/strategy"
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
+	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 
 	"github.com/stretchr/testify/assert"
 
@@ -1305,4 +1307,141 @@ func TestAtomicScaleDownNodeNilGroup(t *testing.T) {
 
 	result := p.atomicScaleDownNode(context.Background(), node)
 	assert.False(t, result)
+}
+
+// fakeScoringDimension is a strategy.ScoringDimension returning preconfigured raw scores keyed by node name.
+type fakeScoringDimension struct {
+	name   string
+	scores map[string]float64
+	err    error
+}
+
+func (d *fakeScoringDimension) Name() string { return d.name }
+
+func (d *fakeScoringDimension) Score(nodeInfo *framework.NodeInfo) (float64, error) {
+	if d.err != nil {
+		return 0, d.err
+	}
+	return d.scores[nodeInfo.Node().Name], nil
+}
+
+// newStrategyTestPlanner builds a Planner over the given nodes and pods with all nodes eligible for scale down.
+func newStrategyTestPlanner(t *testing.T, nodes []*apiv1.Node, pods []*apiv1.Pod, sdStrategy *strategy.Strategy) *Planner {
+	t.Helper()
+	rsLister, err := kube_util.NewTestReplicaSetLister(generateReplicaSets("rs", 5))
+	assert.NoError(t, err)
+	registry := kube_util.NewListerRegistry(nil, nil, nil, nil, nil, nil, nil, rsLister, nil)
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	provider.AddNodeGroup("ng1", 0, 0, 0)
+	eligible := make(map[string]bool)
+	for _, node := range nodes {
+		provider.AddNode("ng1", node)
+		eligible[node.Name] = true
+	}
+	autoscalingOpts := config.AutoscalingOptions{
+		NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+			ScaleDownUnneededTime: 10 * time.Minute,
+		},
+		ScaleDownSimulationTimeout: 10 * time.Second,
+		MaxScaleDownParallelism:    10,
+	}
+	processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(autoscalingOpts)
+	autoscalingCtx, err := NewScaleTestAutoscalingContext(autoscalingOpts, &fake.Clientset{}, registry, provider, nil, nil, templateNodeInfoRegistry)
+	assert.NoError(t, err)
+	clustersnapshot.InitializeClusterSnapshotOrDie(t, autoscalingCtx.ClusterSnapshot, nodes, pods)
+	factory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{CustomResourcesProcessor: processors.CustomResourcesProcessor, QuotaProvider: resourcequotas.NewCloudMinProvider(provider)})
+	p := New(&autoscalingCtx, processors, options.NodeDeleteOptions{}, nil, factory, sdStrategy)
+	p.eligibilityChecker = &fakeEligibilityChecker{eligible: eligible}
+	return p
+}
+
+func TestRankNodes(t *testing.T) {
+	utilizationStrategy, err := strategy.NewStrategy("Utilization=1")
+	assert.NoError(t, err)
+	emptyStrategy, err := strategy.NewStrategy("")
+	assert.NoError(t, err)
+
+	nodes := []*apiv1.Node{
+		BuildTestNode("n1", 1000, 10),
+		BuildTestNode("n2", 1000, 10),
+		BuildTestNode("n3", 1000, 10),
+		BuildTestNode("empty-b", 1000, 10),
+		BuildTestNode("empty-a", 1000, 10),
+	}
+	pods := []*apiv1.Pod{
+		SetRSPodSpec(BuildScheduledTestPod("p1", 800, 1, "n1"), "rs"),
+		SetRSPodSpec(BuildScheduledTestPod("p2", 100, 1, "n2"), "rs"),
+		SetRSPodSpec(BuildScheduledTestPod("p3", 500, 1, "n3"), "rs"),
+	}
+
+	testCases := []struct {
+		name       string
+		sdStrategy *strategy.Strategy
+		input      []string
+		want       []string
+	}{
+		{
+			name:       "empty strategy keeps candidate order",
+			sdStrategy: emptyStrategy,
+			input:      []string{"n1", "n2", "n3"},
+			want:       []string{"n1", "n2", "n3"},
+		},
+		{
+			name:       "lowest utilization ranked first",
+			sdStrategy: utilizationStrategy,
+			input:      []string{"n1", "n2", "n3"},
+			want:       []string{"n2", "n3", "n1"},
+		},
+		{
+			name:       "equal utilization sorted by name",
+			sdStrategy: utilizationStrategy,
+			input:      []string{"n1", "empty-b", "empty-a"},
+			want:       []string{"empty-a", "empty-b", "n1"},
+		},
+		{
+			name:       "empty input",
+			sdStrategy: utilizationStrategy,
+			input:      []string{},
+			want:       []string{},
+		},
+		{
+			name: "scoring error returns original order",
+			sdStrategy: &strategy.Strategy{
+				Dimensions: []strategy.ScoringDimension{&fakeScoringDimension{name: "Failing", err: fmt.Errorf("a scoring error occurred")}},
+				Weights:    map[string]float64{"Failing": 1},
+			},
+			input: []string{"n1", "n2", "n3"},
+			want:  []string{"n1", "n2", "n3"},
+		},
+		{
+			name: "out of range score returns original order",
+			sdStrategy: &strategy.Strategy{
+				Dimensions: []strategy.ScoringDimension{&fakeScoringDimension{name: "OutOfRange", scores: map[string]float64{"n1": 1, "n2": 150, "n3": 2}}},
+				Weights:    map[string]float64{"OutOfRange": 1},
+			},
+			input: []string{"n1", "n2", "n3"},
+			want:  []string{"n1", "n2", "n3"},
+		},
+		{
+			name: "multiple weighted dimensions",
+			sdStrategy: &strategy.Strategy{
+				Dimensions: []strategy.ScoringDimension{
+					&fakeScoringDimension{name: "A", scores: map[string]float64{"n1": 100, "n2": 0, "n3": 50}},
+					&fakeScoringDimension{name: "B", scores: map[string]float64{"n1": 0, "n2": 100, "n3": 50}},
+				},
+				// n1: 10, n2: 100, n3: 55.
+				Weights: map[string]float64{"A": 0.1, "B": 1},
+			},
+			input: []string{"n1", "n2", "n3"},
+			want:  []string{"n2", "n3", "n1"},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newStrategyTestPlanner(t, nodes, pods, tc.sdStrategy)
+			if diff := cmp.Diff(tc.want, p.rankNodes(tc.input)); diff != "" {
+				t.Errorf("rankNodes(%v) mismatch (-want +got):\n%s", tc.input, diff)
+			}
+		})
+	}
 }

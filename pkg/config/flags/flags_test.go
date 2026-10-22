@@ -241,6 +241,28 @@ func TestAutoscalingFlagsAllPossible(t *testing.T) {
 				}
 			},
 		},
+		"ScaleDownStrategy_NotProvided_DefaultsToEmpty": {
+			Flags: []string{},
+			Validate: func(t *testing.T, opts config.AutoscalingOptions) {
+				assert.Equal(t, "", opts.ScaleDownStrategy)
+			},
+		},
+		"ScaleDownStrategy_SingleDimension": {
+			Flags: []string{
+				"--scaledown-strategy=Utilization=0.5",
+			},
+			Validate: func(t *testing.T, opts config.AutoscalingOptions) {
+				assert.Equal(t, "Utilization=0.5", opts.ScaleDownStrategy)
+			},
+		},
+		"ScaleDownStrategy_MultipleDimensions_PassedThroughUnparsed": {
+			Flags: []string{
+				"--scaledown-strategy=Utilization=0.3,Other=2",
+			},
+			Validate: func(t *testing.T, opts config.AutoscalingOptions) {
+				assert.Equal(t, "Utilization=0.3,Other=2", opts.ScaleDownStrategy)
+			},
+		},
 		"MaxStartupTime_Defaulting_MaxInactivityTime": {
 			Flags: []string{
 				"--max-inactivity=15m",
