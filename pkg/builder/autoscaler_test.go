@@ -77,3 +77,111 @@ func TestAutoscalerBuilderNoError(t *testing.T) {
 		time.Sleep(1 * time.Second)
 	})
 }
+
+func TestAutoscalerBuilderScaleDownStrategy(t *testing.T) {
+	testCases := []struct {
+		name              string
+		scaleDownStrategy string
+		wantErr           bool
+	}{
+		{
+			name:              "strategy not configured",
+			scaleDownStrategy: "",
+		},
+		{
+			name:              "whitespaces only, strategy not configured",
+			scaleDownStrategy: "      ",
+		},
+		{
+			name:              "valid strategy",
+			scaleDownStrategy: "Utilization=1",
+		},
+		{
+			name:              "valid strategy trim whitespaces",
+			scaleDownStrategy: "Utilization  =  1  ",
+		},
+		{
+			name:              "float weight",
+			scaleDownStrategy: "Utilization=4.2",
+		},
+		{
+			name:              "unknown dimension",
+			scaleDownStrategy: "Unknown=1",
+			wantErr:           true,
+		},
+		{
+			name:              "duplicate dimension",
+			scaleDownStrategy: "Utilization=1,Utilization=2",
+			wantErr:           true,
+		},
+		{
+			name:              "missing weights",
+			scaleDownStrategy: "Utilization",
+			wantErr:           true,
+		},
+		{
+			name:              "invalid negative weight",
+			scaleDownStrategy: "Utilization=-42",
+			wantErr:           true,
+		},
+		{
+			name:              "invalid zero weight",
+			scaleDownStrategy: "Utilization=0",
+			wantErr:           true,
+		},
+		{
+			name:              "invalid weight format",
+			scaleDownStrategy: "Utilization=4.5.6",
+			wantErr:           true,
+		},
+		{
+			name:              "trailing comma produces empty part",
+			scaleDownStrategy: "Utilization=42,",
+			wantErr:           true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := testutils.GetTestContextWithCancel(t)
+
+				options := config.AutoscalingOptions{
+					CloudProviderName: "gce",
+					EstimatorName:     estimator.BinpackingEstimatorName,
+					ExpanderNames:     expander.LeastWasteExpanderName,
+					ScaleDownStrategy: tc.scaleDownStrategy,
+				}
+
+				kubeClient := fake.NewClientset()
+				mgr, err := manager.New(&rest.Config{}, manager.Options{
+					Metrics: metricsserver.Options{
+						BindAddress: "0",
+					},
+					HealthProbeBindAddress: "0",
+				})
+				assert.NoError(t, err)
+
+				autoscaler, trigger, err := New(options).
+					WithDebuggingSnapshotter(debuggingsnapshot.NewDebuggingSnapshotter(false)).
+					WithManager(mgr).
+					WithKubeClient(kubeClient).
+					WithInformerFactory(informers.NewSharedInformerFactory(kubeClient, 0)).
+					WithCloudProvider(test.NewCloudProvider(nil)).
+					WithPodObserver(&loop.UnschedulablePodObserver{}).
+					Build(ctx)
+
+				if tc.wantErr {
+					assert.Error(t, err)
+					assert.Nil(t, autoscaler)
+					assert.Nil(t, trigger)
+				} else {
+					assert.NoError(t, err)
+					assert.NotNil(t, autoscaler)
+					assert.NotNil(t, trigger)
+				}
+				cancel()
+				time.Sleep(1 * time.Second)
+			})
+		})
+	}
+}
