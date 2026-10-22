@@ -336,7 +336,7 @@ func (p *Planner) categorizeNodes(ctx context.Context, podDestinations map[strin
 	timer := time.NewTimer(p.autoscalingCtx.ScaleDownSimulationTimeout)
 	var skippedNodes []string
 
-	if len(p.scaleDownStrategy.Dimensions) > 0 {
+	if p.scaleDownStrategy != nil && len(p.scaleDownStrategy.Dimensions) > 0 {
 		currentlyUnneededNodeNames = p.rankNodes(currentlyUnneededNodeNames)
 	}
 	for i, node := range currentlyUnneededNodeNames {
