@@ -182,6 +182,9 @@ func TestReasonsMessage(t *testing.T) {
 		"2 max limit reached",
 		"1 not ready",
 	}
+	messages := ReasonsMessages(context.Background(), ScaleUpNoOptionsAvailable, NoScaleUpInfo{nil, rejected, skipped}, considered)
+	assert.ElementsMatch(t, expected, messages)
+
 	result := ReasonsMessage(context.Background(), ScaleUpNoOptionsAvailable, NoScaleUpInfo{nil, rejected, skipped}, considered)
 
 	for _, part := range expected {

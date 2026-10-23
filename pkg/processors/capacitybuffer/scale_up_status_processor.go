@@ -18,10 +18,10 @@ package capacitybufferpodlister
 
 import (
 	"context"
-	gocontext "context"
 	"strings"
 
 	apiv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/fakepods"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
@@ -37,7 +37,7 @@ type FakePodsScaleUpStatusProcessor struct {
 type bufferInfo struct {
 	buffer         *v1beta1.CapacityBuffer
 	numberOfPods   int
-	reasonMessages []string
+	reasonMessages sets.Set[string]
 }
 
 // NewFakePodsScaleUpStatusProcessor return an instance of FakePodsScaleUpStatusProcessor
@@ -47,7 +47,7 @@ func NewFakePodsScaleUpStatusProcessor(buffersRegistry *fakepods.Registry) *Fake
 
 // Process updates scaleupStatus to remove all capacity buffer fake pods from
 // PodsRemainUnschedulable, PodsAwaitEvaluation & PodsTriggeredScaleup
-func (p *FakePodsScaleUpStatusProcessor) Process(ctx gocontext.Context, autoscalingCtx *ca_context.AutoscalingContext, scaleUpStatus *status.ScaleUpStatus) {
+func (p *FakePodsScaleUpStatusProcessor) Process(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, scaleUpStatus *status.ScaleUpStatus) {
 	var fakePodsRemainUnschedulable []status.NoScaleUpInfo
 	var fakePodsTriggeredScaleUp []*apiv1.Pod
 
@@ -60,7 +60,7 @@ func (p *FakePodsScaleUpStatusProcessor) Process(ctx gocontext.Context, autoscal
 }
 
 func (p *FakePodsScaleUpStatusProcessor) createBuffersNoScaleUpEvents(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, scaleUpStatus *status.ScaleUpStatus, fakePodsRemainUnschedulable []status.NoScaleUpInfo) {
-	if scaleUpStatus.Result != status.ScaleUpSuccessful && scaleUpStatus.Result != status.ScaleUpError {
+	if len(fakePodsRemainUnschedulable) > 0 && scaleUpStatus.Result != status.ScaleUpSuccessful && scaleUpStatus.Result != status.ScaleUpError {
 		consideredNodeGroupsMap := cloudprovider.NodeGroupListToMapById(scaleUpStatus.ConsideredNodeGroups)
 		buffersInfo := map[string]*bufferInfo{}
 		for _, noScaleUpInfo := range fakePodsRemainUnschedulable {
@@ -69,19 +69,23 @@ func (p *FakePodsScaleUpStatusProcessor) createBuffersNoScaleUpEvents(ctx contex
 				bufferUID := string(parentCapacityBuffer.UID)
 				if _, found := buffersInfo[bufferUID]; !found {
 					buffersInfo[bufferUID] = &bufferInfo{
-						buffer: parentCapacityBuffer,
+						buffer:         parentCapacityBuffer,
+						reasonMessages: sets.New[string](),
 					}
 				}
 				buffersInfo[bufferUID].numberOfPods += 1
-				buffersInfo[bufferUID].reasonMessages = append(buffersInfo[bufferUID].reasonMessages,
-					status.ReasonsMessage(ctx, scaleUpStatus.Result, noScaleUpInfo, consideredNodeGroupsMap))
+				buffersInfo[bufferUID].reasonMessages.Insert(status.ReasonsMessages(ctx, scaleUpStatus.Result, noScaleUpInfo, consideredNodeGroupsMap)...)
 			}
 		}
 
 		for _, bufferInfo := range buffersInfo {
+			reasons := "no scale-up options available"
+			if bufferInfo.reasonMessages.Len() > 0 {
+				reasons = strings.Join(sets.List(bufferInfo.reasonMessages), ", ")
+			}
 			autoscalingCtx.Recorder.Eventf(bufferInfo.buffer, apiv1.EventTypeNormal, "NotTriggerScaleUp",
 				"capacity buffer %d fake pods didn't trigger scale-up: %s",
-				bufferInfo.numberOfPods, strings.Join(bufferInfo.reasonMessages, ","))
+				bufferInfo.numberOfPods, reasons)
 		}
 	}
 }
