@@ -2380,7 +2380,8 @@ func TestStaticAutoscalerInstanceCreationErrorsForZeroOrMaxScaling(t *testing.T)
 }
 
 type candidateTrackingFakePlanner struct {
-	lastCandidateNodes map[string]bool
+	lastCandidateNodes    map[string]bool
+	unremovableNodesCalls int
 }
 
 func (f *candidateTrackingFakePlanner) UpdateClusterState(ctx context.Context, podDestinations, scaleDownCandidates []*apiv1.Node, as scaledown.ActuationStatus, currentTime time.Time) errors.AutoscalerError {
@@ -2403,6 +2404,7 @@ func (f *candidateTrackingFakePlanner) UnneededNodes() []*scaledown.UnneededNode
 }
 
 func (f *candidateTrackingFakePlanner) UnremovableNodes() []*simulator.UnremovableNode {
+	f.unremovableNodesCalls++
 	return nil
 }
 
@@ -4020,6 +4022,84 @@ func TestShouldScaleDown(t *testing.T) {
 			} else {
 				mocks.onScaleDown.AssertNotCalled(t, "ScaleDown", "ng1", underutilizedNode.Name)
 			}
+		})
+	}
+}
+
+func TestScaleDownUpdatesUnremovableNodesCount(t *testing.T) {
+	now := time.Now()
+	n1 := BuildTestNode("n1", 1000, 1000)
+	SetNodeReadyState(n1, true, now)
+
+	testCases := []struct {
+		name             string
+		lastScaleUpTime  time.Time
+		allNodes         []*apiv1.Node
+		wantResult       status.ScaleDownResult
+		wantMetricUpdate bool
+	}{
+		{
+			// Some reasons are only computed by NodesToDelete, which doesn't run during cooldown.
+			name:             "scale down in cooldown",
+			lastScaleUpTime:  now,
+			allNodes:         []*apiv1.Node{n1},
+			wantResult:       status.ScaleDownInCooldown,
+			wantMetricUpdate: false,
+		},
+		{
+			name:             "no scale down candidates",
+			lastScaleUpTime:  now.Add(-time.Hour),
+			allNodes:         []*apiv1.Node{},
+			wantResult:       status.ScaleDownNoCandidates,
+			wantMetricUpdate: true,
+		},
+		{
+			name:             "scale down attempted",
+			lastScaleUpTime:  now.Add(-time.Hour),
+			allNodes:         []*apiv1.Node{n1},
+			wantResult:       status.ScaleDownNoNodeDeleted,
+			wantMetricUpdate: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupConfig := &autoscalerSetupConfig{
+				autoscalingOptions: config.AutoscalingOptions{
+					ScaleDownEnabled:       true,
+					ScaleDownDelayAfterAdd: 10 * time.Minute,
+					NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+						ScaleDownUnneededTime:         time.Minute,
+						ScaleDownUtilizationThreshold: 0.5,
+					},
+					MaxNodesTotal: 10,
+				},
+				nodeGroups: []*nodeGroup{},
+				mocks:      newCommonMocks(),
+			}
+			autoscaler, err := setupAutoscaler(setupConfig)
+			assert.NoError(t, err)
+			planner := &candidateTrackingFakePlanner{}
+			autoscaler.scaleDownPlanner = planner
+			autoscaler.processors.ScaleDownStatusProcessor = nil
+			autoscaler.lastScaleUpTime = tc.lastScaleUpTime
+
+			state := &loopState{
+				currentTime:              now,
+				allNodes:                 tc.allNodes,
+				readyNodes:               tc.allNodes,
+				scaleDownStatus:          &status.ScaleDownStatus{},
+				scaleDownActuationStatus: deletiontracker.NewNodeDeletionTracker(0),
+			}
+
+			assert.Nil(t, autoscaler.scaleDown(t.Context(), state))
+			assert.Equal(t, tc.wantResult, state.scaleDownStatus.Result)
+			// scaleDown only reads UnremovableNodes to update the unremovable nodes metric.
+			wantCalls := 0
+			if tc.wantMetricUpdate {
+				wantCalls = 1
+			}
+			assert.Equal(t, wantCalls, planner.unremovableNodesCalls)
 		})
 	}
 }

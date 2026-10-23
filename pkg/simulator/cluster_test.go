@@ -244,3 +244,12 @@ func testDeleteOptions() options.NodeDeleteOptions {
 		SkipNodesWithCustomControllerPods: true,
 	}
 }
+
+func TestUnremovableReasons(t *testing.T) {
+	count := 0
+	for r := range UnremovableReasons() {
+		assert.NotEqual(t, "Unknown", r.String(), "UnremovableReason %d has no name in String()", int(r))
+		count++
+	}
+	assert.Equal(t, int(unremovableReasonCount), count)
+}

@@ -973,6 +973,8 @@ func (a *StaticAutoscaler) scaleDown(ctx context.Context, state *loopState) caer
 		logger.V(4).Info("Starting scale down: no scale down candidates. skipping...")
 		state.scaleDownStatus.Result = scaledownstatus.ScaleDownNoCandidates
 		metrics.UpdateLastTime(metrics.ScaleDown, time.Now())
+		// No nodes were evaluated, so every reason is 0. Report it so that values from earlier loops don't stick.
+		metrics.UpdateUnremovableNodesCount(countsByReason(a.scaleDownPlanner.UnremovableNodes()))
 		a.updateSoftDeletionTaints(ctx, state.allNodes)
 	} else {
 		logger.V(4).Info("Starting scale down")
