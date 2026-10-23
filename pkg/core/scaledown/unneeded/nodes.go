@@ -25,6 +25,7 @@ import (
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/eligibility"
+	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodes"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
@@ -188,9 +189,14 @@ func (n *Nodes) AsList() []*scaledown.UnneededNode {
 	if n.cachedList == nil {
 		n.cachedList = make([]*scaledown.UnneededNode, 0, len(n.byName))
 		for _, v := range n.byName {
+			scaleDownReason := metrics.Empty
+			if len(v.ntbr.PodsToReschedule) > 0 {
+				scaleDownReason = metrics.Underutilized
+			}
 			n.cachedList = append(n.cachedList, &scaledown.UnneededNode{
 				Node:             v.ntbr.Node,
 				RemovalThreshold: v.removalThreshold,
+				ScaleDownReason:  scaleDownReason,
 			})
 		}
 	}

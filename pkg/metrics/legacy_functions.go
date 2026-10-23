@@ -258,8 +258,8 @@ func ObserveBinpackingHeterogeneity(instanceType, cpuCount, namespaceCount strin
 
 // UpdateScaleDownNodeRemovalLatency records the time after which node was deleted/needed
 // again after being marked unneeded
-func UpdateScaleDownNodeRemovalLatency(deleted bool, delayReason string, duration time.Duration) {
-	DefaultMetrics.UpdateScaleDownNodeRemovalLatency(deleted, delayReason, duration)
+func UpdateScaleDownNodeRemovalLatency(deleted bool, delayReason string, scaleDownReason NodeScaleDownReason, duration time.Duration) {
+	DefaultMetrics.UpdateScaleDownNodeRemovalLatency(deleted, delayReason, scaleDownReason, duration)
 }
 
 // ObserveMaxNodeSkipEvalDurationSeconds records the longest time during which node was skipped during ScaleDown.
