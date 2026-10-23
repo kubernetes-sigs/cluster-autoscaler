@@ -42,16 +42,11 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/options"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/utilization"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
-	"sigs.k8s.io/cluster-autoscaler/pkg/utils/expiring"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
-)
-
-const (
-	pastLatencyExpireDuration = time.Hour
 )
 
 // Actuator is responsible for draining and deleting nodes.
@@ -64,10 +59,9 @@ type Actuator struct {
 	// TODO: Move budget processor to scaledown planner, potentially merge into PostFilteringScaleDownNodeProcessor
 	// This is a larger change to the code structure which impacts some existing actuator unit tests
 	// as well as Cluster Autoscaler implementations that may override ScaleDownSetProcessor
-	budgetProcessor           *budgets.ScaleDownBudgetProcessor
-	configGetter              actuatorNodeGroupConfigGetter
-	nodeDeleteDelayAfterTaint time.Duration
-	pastLatencies             *expiring.List
+	budgetProcessor          *budgets.ScaleDownBudgetProcessor
+	configGetter             actuatorNodeGroupConfigGetter
+	scaledownDelayCalculator *NodeDelayAfterTaintCalculator
 }
 
 // actuatorNodeGroupConfigGetter is an interface to limit the functions that can be used
@@ -88,15 +82,14 @@ func NewActuator(autoscalingCtx *ca_context.AutoscalingContext, scaleStateNotifi
 		evictor = NewEvictor(ndt, legacyFlagDrainConfig, false)
 	}
 	return &Actuator{
-		autoscalingCtx:            autoscalingCtx,
-		nodeDeletionTracker:       ndt,
-		nodeDeletionScheduler:     NewGroupDeletionScheduler(autoscalingCtx, ndt, ndb, evictor),
-		budgetProcessor:           budgets.NewScaleDownBudgetProcessor(autoscalingCtx),
-		deleteOptions:             deleteOptions,
-		drainabilityRules:         drainabilityRules,
-		configGetter:              configGetter,
-		nodeDeleteDelayAfterTaint: autoscalingCtx.NodeDeleteDelayAfterTaint,
-		pastLatencies:             expiring.NewList(),
+		autoscalingCtx:           autoscalingCtx,
+		nodeDeletionTracker:      ndt,
+		nodeDeletionScheduler:    NewGroupDeletionScheduler(autoscalingCtx, ndt, ndb, evictor),
+		budgetProcessor:          budgets.NewScaleDownBudgetProcessor(autoscalingCtx),
+		deleteOptions:            deleteOptions,
+		drainabilityRules:        drainabilityRules,
+		configGetter:             configGetter,
+		scaledownDelayCalculator: NewNodeDelayAfterTaintCalculator(autoscalingCtx.NodeDeleteDelayAfterTaint, autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled),
 	}
 }
 
@@ -197,21 +190,15 @@ func (a *Actuator) deleteAsyncEmpty(ctx context.Context, NodeGroupViews []*budge
 // applied taints are cleaned up.
 func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets.NodeGroupView) (time.Duration, errors.AutoscalerError) {
 	nodesToTaint := make([]*apiv1.Node, 0)
-	var updateLatencyTracker *UpdateLatencyTracker
-	nodeDeleteDelayAfterTaint := a.nodeDeleteDelayAfterTaint
-	if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
-		updateLatencyTracker = NewUpdateLatencyTracker(a.autoscalingCtx.AutoscalingKubeClients.ListerRegistry.AllNodeLister())
-		go updateLatencyTracker.Start(ctx)
-	}
 
 	for _, bucket := range NodeGroupViews {
 		for _, node := range bucket.Nodes {
-			if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
-				updateLatencyTracker.StartTimeChan <- nodeTaintStartTime{node.Name, time.Now()}
-			}
 			nodesToTaint = append(nodesToTaint, node)
 		}
 	}
+
+	updateLatencyTracker := a.scaledownDelayCalculator.StartLatencyTracker(ctx, a.autoscalingCtx.AutoscalingKubeClients.ListerRegistry.AllNodeLister(), len(nodesToTaint))
+
 	failedTaintedNodes := make(chan struct {
 		node *apiv1.Node
 		err  error
@@ -219,6 +206,8 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 	taintedNodes := make(chan *apiv1.Node, len(nodesToTaint))
 	workqueue.ParallelizeUntil(context.Background(), a.autoscalingCtx.MaxConcurrentNodesTainting, len(nodesToTaint), func(piece int) {
 		node := nodesToTaint[piece]
+		// Capture the start time here rather than when the node is queued, so time spent waiting for a free worker doesn't inflate the latency.
+		startTime := time.Now()
 		err := a.taintNode(ctx, node)
 		if err != nil {
 			failedTaintedNodes <- struct {
@@ -226,12 +215,15 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 				err  error
 			}{node: node, err: err}
 		} else {
+			updateLatencyTracker.RecordStartTime(node.Name, startTime)
 			taintedNodes <- node
 		}
 	})
 	close(failedTaintedNodes)
 	close(taintedNodes)
+
 	if len(failedTaintedNodes) > 0 {
+		updateLatencyTracker.Abort()
 		for nodeWithError := range failedTaintedNodes {
 			a.autoscalingCtx.Recorder.Eventf(nodeWithError.node, apiv1.EventTypeWarning, "ScaleDownFailed", "failed to mark the node as toBeDeleted/unschedulable: %v", nodeWithError.err)
 		}
@@ -239,24 +231,10 @@ func (a *Actuator) taintNodesSync(ctx context.Context, NodeGroupViews []*budgets
 		for taintedNode := range taintedNodes {
 			_, _ = taints.CleanToBeDeleted(ctx, taintedNode, a.autoscalingCtx.ClientSet, a.autoscalingCtx.CordonNodeBeforeTerminate)
 		}
-		if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
-			close(updateLatencyTracker.AwaitOrStopChan)
-		}
-		return nodeDeleteDelayAfterTaint, errors.NewAutoscalerErrorf(errors.ApiCallError, "couldn't taint %d nodes with ToBeDeleted", len(failedTaintedNodes))
+		return 0, errors.NewAutoscalerErrorf(errors.ApiCallError, "couldn't taint %d nodes with ToBeDeleted", len(failedTaintedNodes))
 	}
 
-	if a.autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled {
-		updateLatencyTracker.AwaitOrStopChan <- true
-		latency, ok := <-updateLatencyTracker.ResultChan
-		if ok {
-			a.pastLatencies.RegisterElement(latency)
-			a.pastLatencies.DropNotNewerThan(time.Now().Add(-1 * pastLatencyExpireDuration))
-			// CA is expected to wait 3 times the round-trip time between CA and the api-server.
-			// At this point, we have already tainted all the nodes.
-			// Therefore, the nodeDeleteDelayAfterTaint is set 2 times the maximum latency observed during the last hour.
-			nodeDeleteDelayAfterTaint = 2 * maxLatency(a.pastLatencies.ToSlice())
-		}
-	}
+	nodeDeleteDelayAfterTaint := a.scaledownDelayCalculator.ComputeDelay(ctx, updateLatencyTracker)
 	return nodeDeleteDelayAfterTaint, nil
 }
 
