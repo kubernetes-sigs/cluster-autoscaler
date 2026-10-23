@@ -118,6 +118,139 @@ func TestScaleUp_ResourceLimits(t *testing.T) {
 	})
 }
 
+func TestScaleUp_EnforceMinimumResourceLimits(t *testing.T) {
+	t.Run("groups share the remaining cores", func(t *testing.T) {
+		testConfig := integration.NewTestConfig().
+			WithOverrides(
+				integration.WithEnforceNodeGroupMinSize(),
+			)
+
+		options := testConfig.ResolveOptions()
+		infra := integration.SetupInfrastructure(t)
+		fakes := infra.Fakes
+
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := test.GetTestContextWithCancel(t)
+			defer synctestutils.TearDown(cancel)
+
+			autoscaler, _, err := integration.DefaultAutoscalingBuilder(options, infra).Build(ctx)
+			assert.NoError(t, err)
+
+			// Configure two groups below their minimum sizes with one core left.
+			template := test.BuildTestNode("template", 1000, 1000, test.IsReady(true))
+			for _, id := range []string{"ng1", "ng2"} {
+				fakes.CloudProvider.AddNodeGroup(id, fakecloudprovider.WithNodes(template, 1), fakecloudprovider.WithNGSize(3, 4))
+				fakes.K8s.AddPod(test.BuildScheduledTestPod(id+"-pod", 600, 100, id+"-node-0"))
+			}
+			fakes.CloudProvider.SetResourceLimit(cloudprovider.ResourceNameCores, 0, 3)
+
+			// Run a loop, CA should share the remaining core between the groups.
+			synctestutils.MustRunOnceAfter(ctx, t, autoscaler, 10*time.Second)
+			assert.Equal(t, 3, len(fakes.K8s.Nodes().Items), "new nodes must fit the resource limit")
+		})
+	})
+}
+
+func TestScaleUp_EnforceMinimumMaxNodesTotal(t *testing.T) {
+	t.Run("one group", func(t *testing.T) {
+		testConfig := integration.NewTestConfig().
+			WithOverrides(
+				integration.WithEnforceNodeGroupMinSize(),
+				integration.WithMaxNodesTotal(3),
+			)
+
+		options := testConfig.ResolveOptions()
+		infra := integration.SetupInfrastructure(t)
+		fakes := infra.Fakes
+
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := test.GetTestContextWithCancel(t)
+			defer synctestutils.TearDown(cancel)
+
+			autoscaler, _, err := integration.DefaultAutoscalingBuilder(options, infra).Build(ctx)
+			assert.NoError(t, err)
+
+			// Configure a group below its minimum size and an unmanaged Node.
+			n := test.BuildTestNode("ng1-node-0", 1000, 1000, test.IsReady(true))
+			fakes.CloudProvider.AddNodeGroup("ng1", fakecloudprovider.WithNode(n), fakecloudprovider.WithNGSize(3, 4))
+			fakes.K8s.AddPod(test.BuildScheduledTestPod("p1", 600, 100, n.Name))
+			fakes.K8s.AddNode(test.BuildTestNode("unmanaged", 1000, 1000, test.IsReady(true)))
+
+			// Run a loop, CA should count the unmanaged Node against the cluster limit.
+			synctestutils.MustRunOnceAfter(ctx, t, autoscaler, 10*time.Second)
+			assert.Equal(t, 3, len(fakes.K8s.Nodes().Items), "new nodes must fit the cluster allowance")
+		})
+	})
+
+	t.Run("groups share the allowance", func(t *testing.T) {
+		testConfig := integration.NewTestConfig().
+			WithOverrides(
+				integration.WithEnforceNodeGroupMinSize(),
+				integration.WithMaxNodesTotal(3),
+			)
+
+		options := testConfig.ResolveOptions()
+		infra := integration.SetupInfrastructure(t)
+		fakes := infra.Fakes
+
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := test.GetTestContextWithCancel(t)
+			defer synctestutils.TearDown(cancel)
+
+			autoscaler, _, err := integration.DefaultAutoscalingBuilder(options, infra).Build(ctx)
+			assert.NoError(t, err)
+
+			// Configure two groups below their minimum sizes with one Node left.
+			template := test.BuildTestNode("template", 1000, 1000, test.IsReady(true))
+			for _, id := range []string{"ng1", "ng2"} {
+				fakes.CloudProvider.AddNodeGroup(id, fakecloudprovider.WithNodes(template, 1), fakecloudprovider.WithNGSize(3, 4))
+				fakes.K8s.AddPod(test.BuildScheduledTestPod(id+"-pod", 600, 100, id+"-node-0"))
+			}
+
+			// Run a loop, CA should share the remaining allowance between the groups.
+			synctestutils.MustRunOnceAfter(ctx, t, autoscaler, 10*time.Second)
+			assert.Equal(t, 3, len(fakes.K8s.Nodes().Items), "new nodes must fit the cluster allowance")
+		})
+	})
+
+	t.Run("existing upcoming node counts once", func(t *testing.T) {
+		testConfig := integration.NewTestConfig().
+			WithOverrides(
+				integration.WithEnforceNodeGroupMinSize(),
+				integration.WithMaxNodesTotal(5),
+				integration.WithMaxNodeStartupTime(time.Minute),
+			)
+
+		options := testConfig.ResolveOptions()
+		infra := integration.SetupInfrastructure(t)
+		fakes := infra.Fakes
+
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := test.GetTestContextWithCancel(t)
+			defer synctestutils.TearDown(cancel)
+
+			autoscaler, _, err := integration.DefaultAutoscalingBuilder(options, infra).Build(ctx)
+			assert.NoError(t, err)
+
+			// Configure ng1 with a registered starting Node and a Ready Node.
+			startingNode := test.BuildTestNode("ng1-node-1", 1000, 1000, test.IsReady(false))
+			startingNode.CreationTimestamp.Time = time.Now()
+			n1 := test.BuildTestNode("ng1-node-0", 1000, 1000, test.IsReady(true))
+			fakes.CloudProvider.AddNodeGroup("ng1", fakecloudprovider.WithNode(startingNode), fakecloudprovider.WithNode(n1), fakecloudprovider.WithNGSize(3, 4))
+			fakes.K8s.AddPod(test.BuildScheduledTestPod("p1", 600, 100, n1.Name))
+
+			// Configure ng2 with one Ready Node, leaving room for two more Nodes.
+			n2 := test.BuildTestNode("ng2-node-0", 1000, 1000, test.IsReady(true))
+			fakes.CloudProvider.AddNodeGroup("ng2", fakecloudprovider.WithNode(n2), fakecloudprovider.WithNGSize(3, 4))
+			fakes.K8s.AddPod(test.BuildScheduledTestPod("p2", 600, 100, n2.Name))
+
+			// Run a loop, CA should count the starting Node once and add two Nodes.
+			synctestutils.MustRunOnceAfter(ctx, t, autoscaler, 10*time.Second)
+			assert.Equal(t, 5, len(fakes.K8s.Nodes().Items), "the starting node must count once against the cluster allowance")
+		})
+	})
+}
+
 // TestFixNodeGroupSize_ZeroOrMaxNodeScaling verifies that fixNodeGroupSize skips
 // attempting DecreaseTargetSize on ZeroOrMaxNodeScaling node groups when registered
 // nodes mismatch the target size after MaxNodeProvisionTime.

@@ -111,6 +111,20 @@ func WithScaleDownUnneededTime(d time.Duration) AutoscalingOptionOverride {
 	}
 }
 
+// WithEnforceNodeGroupMinSize enables node group minimum size enforcement.
+func WithEnforceNodeGroupMinSize() AutoscalingOptionOverride {
+	return func(o *config.AutoscalingOptions) {
+		o.EnforceNodeGroupMinSize = true
+	}
+}
+
+// WithMaxNodesTotal sets the maximum number of nodes in the cluster.
+func WithMaxNodesTotal(n int) AutoscalingOptionOverride {
+	return func(o *config.AutoscalingOptions) {
+		o.MaxNodesTotal = n
+	}
+}
+
 // WithProvisioningRequestEnabled enables ProvisioningRequest support.
 func WithProvisioningRequestEnabled() AutoscalingOptionOverride {
 	return func(o *config.AutoscalingOptions) {
