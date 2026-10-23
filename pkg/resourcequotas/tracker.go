@@ -66,6 +66,22 @@ func newTracker(quotaStatuses []*quotaStatus, nodeCache *nodeResourcesCache) *Tr
 	}
 }
 
+// DeepCopy returns a Tracker whose consumption can be advanced without touching the
+// receiver. Each quota's remaining limits are copied. The Quota values and the node
+// resources cache are shared; the cache only memoizes per node group, so sharing it is
+// safe.
+func (t *Tracker) DeepCopy() *Tracker {
+	statuses := make([]*quotaStatus, len(t.quotaStatuses))
+	for i, qs := range t.quotaStatuses {
+		limitsLeft := make(resourceList, len(qs.limitsLeft))
+		for resource, left := range qs.limitsLeft {
+			limitsLeft[resource] = left
+		}
+		statuses[i] = &quotaStatus{quota: qs.quota, limitsLeft: limitsLeft}
+	}
+	return newTracker(statuses, t.nodeCache)
+}
+
 // ConsumeQuota checks if a delta is within limits and applies it. Delta is applied only if it can be applied entirely.
 // See CheckQuota documentation for more information.
 //
