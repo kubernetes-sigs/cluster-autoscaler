@@ -156,6 +156,9 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := fwHandle.ConfigureExtenderOccupancy(autoscalingOptions.SchedulerConfig, autoscalingOptions.ExtenderOccupancyURLs); err != nil {
+		return nil, nil, err
+	}
 	deleteOptions := options.NewNodeDeleteOptions(autoscalingOptions)
 	drainabilityRules := rules.Default(deleteOptions)
 
