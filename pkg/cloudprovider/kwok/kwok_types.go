@@ -17,6 +17,8 @@ limitations under the License.
 package kwok
 
 import (
+	"sync"
+
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	listersv1 "k8s.io/client-go/listers/core/v1"
@@ -57,8 +59,13 @@ type NodeGroup struct {
 	lister       kube_util.NodeLister
 	nodeTemplate *apiv1.Node
 	minSize      int
-	targetSize   int
 	maxSize      int
+
+	// mu guards targetSize. Cluster Autoscaler calls DeleteNodes()
+	// asynchronously (e.g. from the node deletion batcher) while the main
+	// loop calls Refresh(), TargetSize() and IncreaseSize().
+	mu         sync.Mutex
+	targetSize int
 }
 
 // NodegroupsConfig defines options for creating nodegroups
