@@ -122,7 +122,7 @@ func (s *AsyncNodeGroupInitializer) InitializeNodeGroup(result nodegroups.AsyncN
 	}
 
 	klog.Infof("Starting scale-up for async created node groups. Scale ups: %v", scaleUpInfos)
-	err, failedNodeGroups := s.scaleUpExecutor.ExecuteScaleUps(context.TODO(), scaleUpInfos, time.Now(), s.atomicScaleUp)
+	err, failedNodeGroups, failedResizeErrors := s.scaleUpExecutor.ExecuteScaleUps(context.TODO(), scaleUpInfos, time.Now(), s.atomicScaleUp)
 	if err != nil {
 		var failedNodeGroupIds []string
 		for _, failedNodeGroup := range failedNodeGroups {
@@ -132,6 +132,7 @@ func (s *AsyncNodeGroupInitializer) InitializeNodeGroup(result nodegroups.AsyncN
 		s.emitScaleUpStatus(&status.ScaleUpStatus{
 			CreateNodeGroupResults: []nodegroups.CreateNodeGroupResult{result.CreationResult},
 			FailedResizeNodeGroups: failedNodeGroups,
+			FailedResizeErrors:     failedResizeErrors,
 			PodsTriggeredScaleUp:   s.triggeringPods,
 		}, err)
 		return
