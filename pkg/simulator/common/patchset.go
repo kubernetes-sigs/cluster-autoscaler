@@ -16,6 +16,11 @@ limitations under the License.
 
 package common
 
+import (
+	"iter"
+	"maps"
+)
+
 // PatchSet manages a stack of patches, allowing for fork/revert/commit operations.
 // It provides a view of the data as if all patches were applied sequentially.
 //
@@ -26,10 +31,11 @@ package common
 //   - Revert(): O(P), where P is the number of modified/deleted entries
 //     in the topmost patch or no-op for PatchSet with a single patch.
 //   - FindValue(key): O(1) for cached keys, O(N * P) - otherwise.
-//   - AsMap(): O(N * P) as it needs to iterate through all the layers
-//     modifications and deletions to get the latest state. Best case -
-//     if the cache is currently in sync with the PatchSet data complexity becomes
-//     O(C), where C is the actual number key/value pairs in flattened PatchSet.
+//   - AsMap(), ValuesSlice(), Values(), Len(): O(N * P) as they need to iterate
+//     through all the layers modifications and deletions to get the latest state.
+//     Best case - if the cache is currently in sync with the PatchSet data
+//     complexity becomes O(C), where C is the number of entries in the cache
+//     (key/value pairs in flattened PatchSet plus cached negative lookups).
 //   - SetCurrent(key, value): O(1).
 //   - DeleteCurrent(key): O(1).
 //   - InCurrentPatch(key): O(1).
@@ -158,23 +164,83 @@ func (p *PatchSet[K, V]) FindValue(key K) (value V, found bool) {
 // It iterates through all patches from bottom to top, applying modifications and deletions.
 // The cache is populated with the results during this process.
 func (p *PatchSet[K, V]) AsMap() map[K]V {
-	if p.cacheInSync {
-		patchSetMap := make(map[K]V, len(p.cache))
-		for key, value := range p.cache {
-			if value != nil {
-				patchSetMap[key] = *value
-			}
-		}
-		return patchSetMap
+	if !p.cacheInSync {
+		return p.rebuildCache()
 	}
 
+	patchSetMap := make(map[K]V, len(p.cache))
+	for key, value := range p.cache {
+		if value != nil {
+			patchSetMap[key] = *value
+		}
+	}
+	return patchSetMap
+}
+
+// ValuesSlice returns a newly allocated slice with all the effective values
+// of the PatchSet, in no particular order. Unlike AsMap it doesn't allocate
+// an intermediate map.
+func (p *PatchSet[K, V]) ValuesSlice() []V {
+	p.syncCache()
+
+	// The cache may contain negative (nil) entries, so its size is
+	// only an upper bound for the number of values.
+	values := make([]V, 0, len(p.cache))
+	for _, value := range p.cache {
+		if value != nil {
+			values = append(values, *value)
+		}
+	}
+	return values
+}
+
+// Values returns an iterator over all the effective values of the PatchSet,
+// in no particular order. The PatchSet must not be modified while iterating.
+func (p *PatchSet[K, V]) Values() iter.Seq[V] {
+	return func(yield func(V) bool) {
+		p.syncCache()
+		for _, value := range p.cache {
+			if value == nil {
+				continue
+			}
+			if !yield(*value) {
+				return
+			}
+		}
+	}
+}
+
+// Len returns the number of effective key/value pairs in the PatchSet.
+// It needs to skip negative (nil) entries in the cache, so its complexity
+// is O(C) rather than O(1) - see the PatchSet complexity notes.
+func (p *PatchSet[K, V]) Len() int {
+	p.syncCache()
+
+	count := 0
+	for _, value := range p.cache {
+		if value != nil {
+			count++
+		}
+	}
+	return count
+}
+
+// syncCache rebuilds the cache from all the patch layers if it's not in sync.
+func (p *PatchSet[K, V]) syncCache() {
+	if !p.cacheInSync {
+		p.rebuildCache()
+	}
+}
+
+// rebuildCache merges all patches into a single map representing the current
+// effective state, populates the cache with it and marks the cache as in sync.
+// The returned map is owned by the caller.
+func (p *PatchSet[K, V]) rebuildCache() map[K]V {
 	keysCount := p.totalKeyCount()
 	patchSetMap := make(map[K]V, keysCount)
 
 	for _, patch := range p.patches {
-		for key, value := range patch.modified {
-			patchSetMap[key] = value
-		}
+		maps.Copy(patchSetMap, patch.modified)
 
 		for key := range patch.deleted {
 			delete(patchSetMap, key)

@@ -47,12 +47,7 @@ func NewSnapshot(csiNodes map[string]*storagev1.CSINode) *Snapshot {
 }
 
 func (s *Snapshot) listCSINodes() []*storagev1.CSINode {
-	csiNodes := s.csiNodes.AsMap()
-	csiNodesList := make([]*storagev1.CSINode, 0, len(csiNodes))
-	for _, csiNode := range csiNodes {
-		csiNodesList = append(csiNodesList, csiNode)
-	}
-	return csiNodesList
+	return s.csiNodes.ValuesSlice()
 }
 
 // CSINodes returns a CSI node lister for the snapshot.
