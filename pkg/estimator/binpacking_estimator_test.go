@@ -393,7 +393,9 @@ func TestBinpackingEstimatePlacementOnAddedNodes(t *testing.T) {
 				assert.NoError(t, err)
 
 				podsPerNode := map[string]int{}
-				recordPodsPerNode := func(snapshot clustersnapshot.ClusterSnapshot, _ cloudprovider.NodeGroup, _ map[string]bool) {
+				var analysedNodeTemplate *framework.NodeInfo
+				recordPodsPerNode := func(snapshot clustersnapshot.ClusterSnapshot, _ cloudprovider.NodeGroup, nodeTemplate *framework.NodeInfo, _ map[string]bool) {
+					analysedNodeTemplate = nodeTemplate
 					nodeInfos, err := snapshot.ListNodeInfos()
 					assert.NoError(t, err)
 					for _, nodeInfo := range nodeInfos {
@@ -410,6 +412,7 @@ func TestBinpackingEstimatePlacementOnAddedNodes(t *testing.T) {
 				assert.Equal(t, tc.expectNodeCount, estimatedNodes)
 				assert.Equal(t, tc.expectPodCount, len(estimatedPods))
 				assert.Equal(t, tc.expectPodsPerNode, podsPerNode)
+				assert.Same(t, nodeInfo, analysedNodeTemplate)
 			})
 		}
 	}
