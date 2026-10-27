@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/status"
+	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/utilization"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
@@ -97,4 +98,7 @@ type UnneededNode struct {
 	// This value is derived from either --scale-down-unneeded-time or
 	// --scale-down-unready-time, depending on the node's readiness state.
 	RemovalThreshold time.Duration
+
+	// ScaleDownReason describes why the unneeded node is considered for removal (empty or underutilized).
+	ScaleDownReason metrics.NodeScaleDownReason
 }
