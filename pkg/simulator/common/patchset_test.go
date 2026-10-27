@@ -17,7 +17,9 @@ limitations under the License.
 package common
 
 import (
+	"fmt"
 	"maps"
+	"slices"
 	"testing"
 
 	"k8s.io/utils/ptr"
@@ -705,4 +707,248 @@ func buildTestPatchSet[K comparable, V any](t *testing.T, patchLayers []map[K]*V
 	}
 
 	return NewPatchSet(patches...)
+}
+
+func TestPatchSetValuesSliceAndLen(t *testing.T) {
+	tests := map[string]struct {
+		patchLayers    []map[string]*int
+		mutatePatchSet func(ps *PatchSet[string, int])
+		wantValues     []int
+	}{
+		"Empty_NoLayers": {
+			patchLayers:    []map[string]*int{},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {},
+			wantValues:     []int{},
+		},
+		"Empty_SingleEmptyLayer": {
+			patchLayers:    []map[string]*int{{}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {},
+			wantValues:     []int{},
+		},
+		"Populated_MultipleLayers": {
+			patchLayers:    []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2)}, {"b": nil, "c": ptr.To(3)}, {"a": ptr.To(11)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {},
+			wantValues:     []int{3, 11},
+		},
+		"Populated_AfterSetAndDeleteOnSyncedCache": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.AsMap()
+				ps.Fork()
+				ps.SetCurrent("c", 3)
+				ps.DeleteCurrent("a")
+			},
+			wantValues: []int{2, 3},
+		},
+		"Reverted_OnSyncedCache": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.AsMap()
+				ps.Fork()
+				ps.SetCurrent("c", 3)
+				ps.DeleteCurrent("a")
+				ps.Revert()
+			},
+			wantValues: []int{1, 2},
+		},
+		"Reverted_OnNotSyncedCache": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2)}, {"a": nil, "c": ptr.To(3)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.FindValue("a")
+				ps.FindValue("c")
+				ps.Revert()
+			},
+			wantValues: []int{1, 2},
+		},
+		"NegativeCacheEntry_FindValueMiss_OnNotSyncedCache": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1), "b": nil}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.FindValue("b")
+				ps.FindValue("missing")
+			},
+			wantValues: []int{1},
+		},
+		"NegativeCacheEntry_FindValueMiss_OnSyncedCache": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.AsMap()
+				ps.FindValue("missing")
+			},
+			wantValues: []int{1},
+		},
+		"NegativeCacheEntry_DeleteCurrent_OnNotSyncedCache": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.Fork()
+				ps.DeleteCurrent("a")
+				ps.DeleteCurrent("missing")
+			},
+			wantValues: []int{2},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			ps := buildTestPatchSet(t, tc.patchLayers)
+			tc.mutatePatchSet(ps)
+
+			if got := ps.Len(); got != len(tc.wantValues) {
+				t.Errorf("Len() got %d, want %d", got, len(tc.wantValues))
+			}
+			gotValues := ps.ValuesSlice()
+			if gotValues == nil {
+				t.Errorf("ValuesSlice() got nil, want non-nil slice")
+			}
+			slices.Sort(gotValues)
+			if !slices.Equal(gotValues, tc.wantValues) {
+				t.Errorf("ValuesSlice() got %v, want %v", gotValues, tc.wantValues)
+			}
+			if iterValues := slices.Sorted(ps.Values()); !slices.Equal(iterValues, tc.wantValues) {
+				t.Errorf("Values() got %v, want %v", iterValues, tc.wantValues)
+			}
+		})
+	}
+}
+
+func TestPatchSetValuesEarlyBreak(t *testing.T) {
+	ps := buildTestPatchSet(t, []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2), "c": ptr.To(3)}})
+	count := 0
+	for range ps.Values() {
+		count++
+		if count == 2 {
+			break
+		}
+	}
+	if count != 2 {
+		t.Errorf("Values() early break: got %d iterations, want 2", count)
+	}
+}
+
+var benchSizes = []int{10000}
+
+func newBenchPatchSet(n int) *PatchSet[int, *int] {
+	base := make(map[int]*int, n)
+	for i := range n {
+		base[i] = &i
+	}
+	ps := NewPatchSet(NewPatchFromMap(base))
+	ps.AsMap() // sync the cache, as happens after the first List in a loop
+	return ps
+}
+
+func listViaAsMap(ps *PatchSet[int, *int]) []*int {
+	m := ps.AsMap()
+	res := make([]*int, 0, len(m))
+	for _, v := range m {
+		res = append(res, v)
+	}
+	return res
+}
+
+var benchSink []*int
+var benchFoundSink bool
+
+// BenchmarkPatchSetRevert measures a typical simulation cycle:
+// Fork -> modify a handful of keys -> Revert -> (optionally) list all values.
+func BenchmarkPatchSetRevert(b *testing.B) {
+	modify := func(ps *PatchSet[int, *int], i, n int) {
+		ps.Fork()
+		for k := range 5 {
+			ps.SetCurrent((i+k)%n, &k)
+		}
+		ps.DeleteCurrent((i + 7) % n)
+	}
+	for _, n := range benchSizes {
+		b.Run(fmt.Sprintf("N=%d/ForkModifyRevert", n), func(b *testing.B) {
+			ps := newBenchPatchSet(n)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				modify(ps, i, n)
+				ps.Revert()
+			}
+		})
+		b.Run(fmt.Sprintf("N=%d/ForkModifyRevertAsMapList", n), func(b *testing.B) {
+			ps := newBenchPatchSet(n)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				modify(ps, i, n)
+				ps.Revert()
+				benchSink = listViaAsMap(ps)
+			}
+		})
+		b.Run(fmt.Sprintf("N=%d/ForkModifyRevertValuesSlice", n), func(b *testing.B) {
+			ps := newBenchPatchSet(n)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				modify(ps, i, n)
+				ps.Revert()
+				benchSink = ps.ValuesSlice()
+			}
+		})
+	}
+}
+
+// BenchmarkPatchSetValuesSlice compares listing values through AsMap() vs ValuesSlice() / Values().
+func BenchmarkPatchSetValuesSlice(b *testing.B) {
+	for _, n := range benchSizes {
+		b.Run(fmt.Sprintf("N=%d/AsMapToSlice", n), func(b *testing.B) {
+			ps := newBenchPatchSet(n)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				benchSink = listViaAsMap(ps)
+			}
+		})
+		b.Run(fmt.Sprintf("N=%d/ValuesSlice", n), func(b *testing.B) {
+			ps := newBenchPatchSet(n)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				benchSink = ps.ValuesSlice()
+			}
+		})
+		b.Run(fmt.Sprintf("N=%d/ValuesIter", n), func(b *testing.B) {
+			ps := newBenchPatchSet(n)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				count := 0
+				for range ps.Values() {
+					count++
+				}
+				benchFoundSink = count == n
+			}
+		})
+	}
+}
+
+// BenchmarkPatchSetColdAsMap measures the first full read of a freshly created PatchSet,
+// which needs to build the cache from scratch.
+func BenchmarkPatchSetColdAsMap(b *testing.B) {
+	for _, n := range benchSizes {
+		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
+			base := make(map[int]*int, n)
+			for i := range n {
+				base[i] = &i
+			}
+			patch := NewPatchFromMap(base)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				ps := NewPatchSet(patch)
+				benchSink = listViaAsMap(ps)
+			}
+		})
+	}
+}
+
+// BenchmarkPatchSetFindValueMiss measures lookups of keys absent from the PatchSet.
+func BenchmarkPatchSetFindValueMiss(b *testing.B) {
+	for _, n := range benchSizes {
+		b.Run(fmt.Sprintf("N=%d/Forked", n), func(b *testing.B) {
+			ps := newBenchPatchSet(n)
+			ps.Fork()
+			ps.Fork()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_, benchFoundSink = ps.FindValue(n + i)
+			}
+		})
+	}
 }
