@@ -38,11 +38,11 @@ func (m *nodeCountMetric) Compute(clusterState ClusterState) (float64, error) {
 func (m *nodeCountMetric) Summarize(metricValues []float64) map[string]float64 {
 	first := metricValues[0]
 	last := metricValues[len(metricValues)-1]
-	nodesDiff := last - first
+	diff := last - first
 	r := map[string]float64{
 		fmt.Sprintf("%s_init", m.Name()):  first,
 		fmt.Sprintf("%s_final", m.Name()): last,
-		fmt.Sprintf("%s_diff", m.Name()):  nodesDiff,
+		fmt.Sprintf("%s_diff", m.Name()):  diff,
 	}
 	return r
 }

@@ -56,9 +56,6 @@ func resourceAllocatableRequested(resourceName apiv1.ResourceName, nodeInfo *fra
 func (m *resourceUtilizationMetric) computeResourceUtilization(clusterState ClusterState) (float64, error) {
 	var totalRequested, totalAllocatable, ratio float64
 	for _, nodeInfo := range clusterState.nodeInfos {
-		if nodeInfo == nil || nodeInfo.Node() == nil {
-			continue
-		}
 		res, err := resourceAllocatableRequested(m.resourceName, nodeInfo, clusterState.currentTime)
 		if err != nil {
 			return 0, err
