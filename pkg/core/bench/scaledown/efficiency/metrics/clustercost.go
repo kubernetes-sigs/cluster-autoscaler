@@ -25,7 +25,7 @@ import (
 // clusterCostMetric computes cluster cost for every loop.
 type clusterCostMetric struct{}
 
-// NewClusterCostMetric creates a new instance of nodeCostMetric.
+// NewClusterCostMetric creates a new instance of clusterCostMetric.
 func NewClusterCostMetric() *clusterCostMetric {
 	return &clusterCostMetric{}
 }
@@ -37,32 +37,31 @@ func (m *clusterCostMetric) Name() string {
 func (m *clusterCostMetric) Compute(clusterState ClusterState) (float64, error) {
 	var totalClusterCost float64
 	for _, nodeInfo := range clusterState.nodeInfos {
-		if nodeInfo == nil || nodeInfo.Node() == nil {
+		cost, err := calculateNodeCost(nodeInfo.Node())
+		if err != nil {
+			klog.Infof("Metric: %s, cost of node %s excluded from total cluster cost, err: %s", m.Name(), nodeInfo.GetName(), err.Error())
 			continue
 		}
-		cost, err := calculateNodeCost(nodeInfo.Node())
-		if err == nil {
-			totalClusterCost += cost
-		}
+		totalClusterCost += cost
 	}
 	klog.V(5).Infof("Metric: %s, Total hourly: $%.5f", m.Name(), totalClusterCost)
 	return totalClusterCost, nil
 }
 
-// Summarize reports diff < 0 if total cost decreased. If total cost increased, diff > 0.
+// Summarize reports the initial and final total cluster cost and their difference.
+// diff < 0 means total cost decreased, diff > 0 means it increased.
+// The percentage difference is omitted when the init cost = 0, because a relative change from 0 is undefined.
 func (m *clusterCostMetric) Summarize(metricValues []float64) map[string]float64 {
 	first := metricValues[0]
 	last := metricValues[len(metricValues)-1]
-	costDiff := last - first
-	costDiffPerc := 0.0
-	if first > 0 {
-		costDiffPerc = (costDiff / first) * 100
-	}
+	diff := last - first
 	r := map[string]float64{
-		fmt.Sprintf("%s_init", m.Name()):    first,
-		fmt.Sprintf("%s_final", m.Name()):   last,
-		fmt.Sprintf("%s_diff", m.Name()):    costDiff,
-		fmt.Sprintf("%s_%%_diff", m.Name()): costDiffPerc,
+		fmt.Sprintf("%s_init", m.Name()):  first,
+		fmt.Sprintf("%s_final", m.Name()): last,
+		fmt.Sprintf("%s_diff", m.Name()):  diff,
+	}
+	if first > 0 {
+		r[fmt.Sprintf("%s_%%_diff", m.Name())] = diff / first * 100
 	}
 	return r
 }

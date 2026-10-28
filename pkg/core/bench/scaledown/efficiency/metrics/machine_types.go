@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	apiv1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/units"
 )
 
 type pricingInfo struct {
@@ -28,13 +29,13 @@ type pricingInfo struct {
 	MemoryPerHourPerGB float64
 }
 
-// getCPUPrice returns the CPU core hourly price.
-func (p pricingInfo) getCPUPrice() float64 {
+// cpuPrice returns the CPU core hourly price.
+func (p pricingInfo) cpuPrice() float64 {
 	return p.CPUPerHour
 }
 
-// getMemoryPrice returns the memory GiB hourly price.
-func (p pricingInfo) getMemoryPrice() float64 {
+// memoryPrice returns the memory GiB hourly price.
+func (p pricingInfo) memoryPrice() float64 {
 	return p.MemoryPerHourPerGB
 }
 
@@ -88,13 +89,9 @@ func getMachineFamily(node *apiv1.Node) (*machineFamily, error) {
 		}
 	}
 	chunks := strings.Split(instanceType, "-")
-	if len(chunks) == 0 {
-		return nil, fmt.Errorf("invalid instance type label value: %s for node %s", instanceType, node.Name)
-	}
-	familyName := chunks[0]
-	family, ok := machineFamilies[familyName]
+	family, ok := machineFamilies[chunks[0]]
 	if !ok {
-		return nil, fmt.Errorf("unknown pricing for machine family %s parsed from instance type %s, node %s", familyName, instanceType, node.Name)
+		return nil, fmt.Errorf("unknown pricing for machine family %s parsed from instance type %s, node %s", chunks[0], instanceType, node.Name)
 	}
 	return family, nil
 }
@@ -108,8 +105,8 @@ func calculateNodeCost(node *apiv1.Node) (float64, error) {
 	nodeAllocatableCPU := node.Status.Allocatable[apiv1.ResourceCPU]
 	nodeAllocatableMem := node.Status.Allocatable[apiv1.ResourceMemory]
 	cpuCores := float64(nodeAllocatableCPU.MilliValue()) / 1000.0
-	memGiB := float64(nodeAllocatableMem.MilliValue()) / (1024.0 * 1024.0 * 1024.0)
-	cpuCost := cpuCores * family.PricingInfo.getCPUPrice()
-	memCost := memGiB * family.PricingInfo.getMemoryPrice()
+	memGiB := float64(nodeAllocatableMem.Value()) / float64(units.GiB)
+	cpuCost := cpuCores * family.PricingInfo.cpuPrice()
+	memCost := memGiB * family.PricingInfo.memoryPrice()
 	return cpuCost + memCost, nil
 }
