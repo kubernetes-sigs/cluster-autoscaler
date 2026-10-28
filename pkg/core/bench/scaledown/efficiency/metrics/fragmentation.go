@@ -24,44 +24,55 @@ import (
 )
 
 func (m *resourceFragmentationMetric) computeResourceFragmentation(clusterState ClusterState) (float64, error) {
-	var totalFree, hhi float64
-	nodesFree := make(map[string]float64)
+	var unallocatedTotal, hhi float64
+	unallocatedPerNode := make([]float64, 0, len(clusterState.nodeInfos))
 	for _, nodeInfo := range clusterState.nodeInfos {
-		if nodeInfo == nil || nodeInfo.Node() == nil {
-			continue
-		}
-		nodeName := nodeInfo.Node().Name
 		res, err := resourceAllocatableRequested(m.resourceName, nodeInfo, clusterState.currentTime)
 		if err != nil {
 			return 0, err
 		}
-		freeOnNode := res.allocatable - res.utilization*res.allocatable
+		unallocatedOnNode := res.allocatable - res.utilization*res.allocatable
 		// may signal overcommit, where packing may be dangerous and add to the node throttling
-		if freeOnNode < 0 {
-			freeOnNode = 0
+		if unallocatedOnNode < 0 {
+			unallocatedOnNode = 0
 		}
-		nodesFree[nodeName] = freeOnNode
-		totalFree += freeOnNode
+		unallocatedPerNode = append(unallocatedPerNode, unallocatedOnNode)
+		unallocatedTotal += unallocatedOnNode
 	}
-	frag := -1.0
-	if totalFree <= 0 {
-		klog.V(5).Infof("Metric %s, Total free: 0.00, HHI: N/A, Fragmentation: Undefined (cluster fully allocated)", m.Name())
-		return frag, nil
+	if unallocatedTotal <= 0 {
+		klog.V(5).Infof("Metric %s, Total unallocated: 0.00, HHI: N/A, Fragmentation: 0.0 (cluster fully allocated)", m.Name())
+		return 0.0, nil
 	}
-	for _, freeOnNode := range nodesFree {
-		nodeShare := freeOnNode / totalFree
+	for _, unallocatedOnN := range unallocatedPerNode {
+		nodeShare := unallocatedOnN / unallocatedTotal
 		hhi += nodeShare * nodeShare
 	}
-	frag = 1.0 - hhi
-	klog.V(5).Infof("Metric: %s, Total free: %.2f, HHI: %.2f, Fragmentation: %.2f", m.Name(), totalFree, hhi, frag)
+	frag := 1.0 - hhi
+	klog.V(5).Infof("Metric: %s, Total unallocated: %.2f, HHI: %.2f, Fragmentation: %.2f", m.Name(), unallocatedTotal, hhi, frag)
 	return frag, nil
 }
 
-// resourceFragmentationMetric computes fragmentation for given resource of generic ResourceName using Herfindahl-Hirschman Index.
-// HHI originally measures market concentration and competitiveness, here repurposed to measure consolidation of free resource in the cluster.
-// If HHI is lower, it indicates more competition, if higher it indicates consolidation.
-// In this context, higher values mean free resource are consolidated to fewer nodes, meaning lower fragmentation.
-// Fragmentation is therefore computed as 1-HHI.
+// resourceFragmentationMetric measures how evenly the unallocated capacity of
+// one resource is spread across nodes. It is defined as 1 - HHI, where HHI is
+// the Herfindahl-Hirschman Index of each node's share of the cluster's total
+// unallocated capacity:
+//
+//	share_i       = unallocated_i / sum(unallocated)
+//	fragmentation = 1 - sum(share_i^2)
+//
+// Overcommitted nodes count as having no unallocated capacity.
+//
+// The value lies in [0, 1 - 1/k], where k is the number of nodes with
+// unallocated capacity. The maximum is reached when the unallocated capacity
+// is spread evenly over k nodes; because it depends on k, removing nodes lowers
+// the maximum even if the remaining capacity stays evenly spread.
+//
+// A value of 0 is ambiguous and must be read together with the
+// <resource>_utilization_% metric:
+//
+//	0, utilization >= 100%  no unallocated capacity at all
+//	0, utilization <  100%  all unallocated capacity is on a single node
+//	> 0                     unallocated capacity is on two or more nodes
 type resourceFragmentationMetric struct {
 	resourceName apiv1.ResourceName
 }
@@ -83,25 +94,18 @@ func (m *resourceFragmentationMetric) Compute(clusterState ClusterState) (float6
 	return frag, nil
 }
 
-// Summarize for resourceFragmentationMetric has to handle edge cases (fully allocated cluster).
-// For initial and final states -1 denotes fully allocated cluster - in such case, delta is reset to 0.
-// If -1 < finalDelta < 0 = fragmentation decreased. If finalDelta > 0 = fragmentation increased.
+// Summarize reports the fragmentation of initial and final cluster state and their difference.
+// diff < 0 means unallocated capacity became more consolidated (or became fully allocated).
+// diff > 0 means unallocated capacity became more fragmented.
+// diff == 0 means fragmentation is unchanged.
 func (m *resourceFragmentationMetric) Summarize(metricValues []float64) map[string]float64 {
 	first := metricValues[0]
 	last := metricValues[len(metricValues)-1]
-	initialDelta := first
-	finalDelta := last
-	if initialDelta == -1.0 {
-		initialDelta = 0.0
-	}
-	if finalDelta == -1.0 {
-		finalDelta = 0.0
-	}
-	fragDelta := finalDelta - initialDelta
+	diff := last - first
 	r := map[string]float64{
 		fmt.Sprintf("%s_init", m.Name()):  first,
 		fmt.Sprintf("%s_final", m.Name()): last,
-		fmt.Sprintf("%s_diff", m.Name()):  fragDelta,
+		fmt.Sprintf("%s_diff", m.Name()):  diff,
 	}
 	return r
 }
