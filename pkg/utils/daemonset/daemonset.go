@@ -24,9 +24,15 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	v1helper "k8s.io/component-helpers/scheduling/corev1"
+	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
 	"k8s.io/klog/v2"
-	"k8s.io/kubernetes/pkg/controller/daemon"
-	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
+	daemonutil "k8s.io/kubernetes/pkg/controller/daemon/util"
+	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/labels"
 )
 
 const (
@@ -35,23 +41,81 @@ const (
 	EnableDsEvictionKey = "cluster-autoscaler.kubernetes.io/enable-ds-eviction"
 )
 
-// GetDaemonSetPodsForNode returns daemonset nodes for the given pod.
-func GetDaemonSetPodsForNode(nodeInfo *framework.NodeInfo, daemonsets []*appsv1.DaemonSet) ([]*framework.PodInfo, error) {
-	logger := klog.FromContext(context.Background())
-	result := make([]*framework.PodInfo, 0)
-	for _, ds := range daemonsets {
-		shouldRun, _ := daemon.NodeShouldRunDaemonPod(logger, nodeInfo.Node(), ds)
-		if shouldRun {
-			pod := daemon.NewPod(ds, nodeInfo.Node().Name)
-			pod.Name = fmt.Sprintf("%s-pod-%d", ds.Name, rand.Int63())
-			ptrVal := true
-			pod.ObjectMeta.OwnerReferences = []metav1.OwnerReference{
-				{Kind: "DaemonSet", UID: ds.UID, Name: ds.Name, Controller: &ptrVal},
-			}
-			result = append(result, framework.NewPodInfo(pod, nil))
+// CompiledDaemonSet is a DaemonSet with its node affinity parsed and its pod built once, so it can
+// be matched against many node groups cheaply. It must not be reused across autoscaling loops.
+type CompiledDaemonSet struct {
+	daemonSet            *appsv1.DaemonSet
+	requiredNodeAffinity nodeaffinity.RequiredNodeAffinity
+	templatePod          *apiv1.Pod
+}
+
+// CompileDaemonSets compiles daemonsets for matching against many node groups.
+func CompileDaemonSets(daemonsets []*appsv1.DaemonSet) []*CompiledDaemonSet {
+	compiled := make([]*CompiledDaemonSet, len(daemonsets))
+	for i, ds := range daemonsets {
+		compiled[i] = &CompiledDaemonSet{
+			daemonSet:            ds,
+			requiredNodeAffinity: nodeaffinity.NewRequiredNodeAffinity(ds.Spec.Template.Spec.NodeSelector, ds.Spec.Template.Spec.Affinity),
+			templatePod:          newTemplatePod(ds),
 		}
 	}
-	return result, nil
+	return compiled
+}
+
+// newTemplatePod builds the pod ds would create, with default tolerations added.
+func newTemplatePod(ds *appsv1.DaemonSet) *apiv1.Pod {
+	template := ds.Spec.Template.DeepCopy()
+	pod := &apiv1.Pod{ObjectMeta: template.ObjectMeta, Spec: template.Spec}
+	pod.Name = fmt.Sprintf("%s-pod-%d", ds.Name, rand.Int63())
+	pod.Namespace = ds.Namespace
+	pod.OwnerReferences = []metav1.OwnerReference{
+		{Kind: "DaemonSet", UID: ds.UID, Name: ds.Name, Controller: ptr.To(true)},
+	}
+	daemonutil.AddOrUpdateDaemonPodTolerations(&pod.Spec)
+	return pod
+}
+
+// TemplatePod returns the pod the DaemonSet would create. Callers must copy it before modifying it.
+func (c *CompiledDaemonSet) TemplatePod() *apiv1.Pod {
+	return c.templatePod
+}
+
+// UID returns the UID of the DaemonSet.
+func (c *CompiledDaemonSet) UID() types.UID {
+	return c.daemonSet.UID
+}
+
+// IsPreemptingSystemNodeCritical reports whether the DaemonSet pods have system-node-critical
+// priority and preempt lower-priority pods.
+func (c *CompiledDaemonSet) IsPreemptingSystemNodeCritical() bool {
+	spec := &c.daemonSet.Spec.Template.Spec
+	if spec.PriorityClassName != labels.SystemNodeCriticalLabel {
+		return false
+	}
+	return spec.PreemptionPolicy == nil || *spec.PreemptionPolicy == apiv1.PreemptLowerPriority
+}
+
+// ShouldRunOnNode reports whether the DaemonSet would run a pod on the node.
+//
+// TODO: Call efficient version of nodeShouldRunDaemonPod from k8s.io/kubernetes/pkg/controller/daemon
+// instead, once it is exported (see https://github.com/kubernetes/kubernetes/pull/143792).
+//
+// NodeShouldRunDaemonPod function that is currently available repeatedly builds DaemonSet tolerations and
+// requiredNodeAffinity which are both costly. We'd like to build them once per DaemonSet and efficiently
+// check against multiple nodes. Until the efficient helper function is available, ShoudRunOnNode copies
+// the shouldRun logic and TestCompiledDaemonSetMatchesDaemonController checks that the copy matches
+// NodeShouldRunDaemonPod.
+func (c *CompiledDaemonSet) ShouldRunOnNode(ctx context.Context, node *apiv1.Node) bool {
+	if nodeName := c.daemonSet.Spec.Template.Spec.NodeName; nodeName != "" && nodeName != node.Name {
+		return false
+	}
+	if fits, _ := c.requiredNodeAffinity.Match(node); !fits {
+		return false
+	}
+	_, untolerated := v1helper.FindMatchingUntoleratedTaint(klog.FromContext(ctx), node.Spec.Taints, c.templatePod.Spec.Tolerations, func(t *apiv1.Taint) bool {
+		return t.Effect == apiv1.TaintEffectNoExecute || t.Effect == apiv1.TaintEffectNoSchedule
+	}, utilfeature.DefaultFeatureGate.Enabled(features.TaintTolerationComparisonOperators))
+	return !untolerated
 }
 
 // PodsToEvict returns a list of DaemonSet pods that should be evicted during scale down.
