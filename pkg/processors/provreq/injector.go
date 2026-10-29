@@ -463,16 +463,33 @@ func (p *ProvisioningRequestPodsInjector) collectBatch(ctx context.Context, prov
 // are ignored because workload controllers stamp per-workload identity on them (Kueue, for
 // example, copies each Job's batch.kubernetes.io/job-name label into its request's PodTemplate),
 // and the scale-up simulation evaluates every pod with its own labels anyway.
+// Container command and args are ignored too: batch workloads often pass per-workload input and
+// output paths in them, and they don't affect where a pod can be scheduled.
 func sameSchedulingRequirements(first, second *provreqwrapper.ProvisioningRequest) bool {
 	if first.Namespace != second.Namespace || len(first.PodTemplates) != len(second.PodTemplates) {
 		return false
 	}
 	for index, firstTemplate := range first.PodTemplates {
-		if !utils.PodSpecSemanticallyEqual(*firstTemplate.Template.Spec.DeepCopy(), *second.PodTemplates[index].Template.Spec.DeepCopy()) {
+		firstSpec := podSpecForBatchComparison(&firstTemplate.Template.Spec)
+		secondSpec := podSpecForBatchComparison(&second.PodTemplates[index].Template.Spec)
+		if !utils.PodSpecSemanticallyEqual(firstSpec, secondSpec) {
 			return false
 		}
 	}
 	return true
+}
+
+// podSpecForBatchComparison returns a copy of spec without container command and args. The copy
+// must be deep: PodSpecSemanticallyEqual modifies the containers of the specs it compares.
+func podSpecForBatchComparison(spec *apiv1.PodSpec) apiv1.PodSpec {
+	normalized := spec.DeepCopy()
+	for _, containers := range [][]apiv1.Container{normalized.Containers, normalized.InitContainers} {
+		for i := range containers {
+			containers[i].Command = nil
+			containers[i].Args = nil
+		}
+	}
+	return *normalized
 }
 
 // MarkBatchAsAccepted marks every ProvisioningRequest in the batch as accepted, in parallel,

@@ -772,9 +772,18 @@ and can produce one infrastructure resize per workload.
 Batch processing lets Cluster Autoscaler combine compatible BestEffortAtomicScaleUp
 ProvisioningRequests into one all-or-nothing scale-up calculation. Requests are
 compatible when they are in the same namespace and their pod sets have the same pod
-specs. Pod labels and annotations are ignored, so the requests that a workload
-orchestrator creates for identical workloads can share a batch even when it labels
-each of them with its workload's name. Individual ProvisioningRequests remain
+specs, apart from these fields, which workload orchestrators often set per workload:
+
+- pod labels and annotations
+- the `command`, `args`, and `env` of regular and init containers
+- the pod's `hostname`
+- projected volumes, such as service account tokens, and their mounts
+
+Requests for otherwise identical workloads can therefore share a batch even when a
+workload orchestrator labels each of them with its workload's name, or passes
+per-workload input and output paths as arguments or environment variables. These
+fields are ignored only when choosing a batch: the scale-up simulation still evaluates
+every pod with its own spec and metadata. Individual ProvisioningRequests remain
 indivisible. Cluster Autoscaler can spread the resulting scale-up across similar node
 groups when similar-node-group balancing is enabled, but it does not split
 incompatible pod sets across unrelated node groups within one flattened batch.
@@ -813,8 +822,8 @@ interrupt an attempt in progress. These limits are set with
 `--best-effort-atomic-provisioning-request-batch-timebox`.
 
 So that later iterations don't restart the search at the configured maximum, CA
-remembers a batch size, counted in pods, for requests with the same scheduling
-requirements. A batch always includes the oldest eligible request, even if that request
+remembers a batch size, counted in pods, for each set of compatible requests. A batch
+always includes the oldest eligible request, even if that request
 alone has more pods, and stays oldest first, so it ends at the first request that
 doesn't fit. A batch counts as successful once CA finds capacity for it, whether it fits
 existing capacity or needs a scale-up:

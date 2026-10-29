@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	apiv1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -33,6 +34,7 @@ import (
 	clock "k8s.io/utils/clock/testing"
 	"k8s.io/utils/lru"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest"
+	provreqpods "sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/pods"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqclient"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqwrapper"
 )
@@ -694,6 +696,20 @@ func TestBestEffortAtomicBatchMultiplePodSets(t *testing.T) {
 			wantBatch: 2,
 		},
 		{
+			name: "second pod set command",
+			mutate: func(request *provreqwrapper.ProvisioningRequest) {
+				request.PodTemplates[1].Template.Spec.Containers[0].Command = []string{"worker", "--fast"}
+			},
+			wantBatch: 2,
+		},
+		{
+			name: "second pod set args",
+			mutate: func(request *provreqwrapper.ProvisioningRequest) {
+				request.PodTemplates[1].Template.Spec.Containers[0].Args = []string{"--input", "other"}
+			},
+			wantBatch: 2,
+		},
+		{
 			name: "different second pod set",
 			mutate: func(request *provreqwrapper.ProvisioningRequest) {
 				request.PodTemplates[1].Template.Spec.NodeSelector = map[string]string{"hardware": "gpu"}
@@ -827,6 +843,89 @@ func TestBestEffortAtomicBatchIgnoresWorkloadIdentity(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestSameSchedulingRequirementsIgnoresCommandAndArgs(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*apiv1.PodSpec)
+		want   bool
+	}{
+		{name: "container command", want: true, mutate: func(spec *apiv1.PodSpec) { spec.Containers[0].Command = []string{"worker", "--fast"} }},
+		{name: "container args", want: true, mutate: func(spec *apiv1.PodSpec) { spec.Containers[0].Args = []string{"--input", "other"} }},
+		{name: "second container command", want: true, mutate: func(spec *apiv1.PodSpec) { spec.Containers[1].Command = []string{"worker", "--fast"} }},
+		{name: "second container args", want: true, mutate: func(spec *apiv1.PodSpec) { spec.Containers[1].Args = []string{"--input", "other"} }},
+		{name: "unset container args", want: true, mutate: func(spec *apiv1.PodSpec) { spec.Containers[0].Args = nil }},
+		{name: "init container command", want: true, mutate: func(spec *apiv1.PodSpec) { spec.InitContainers[0].Command = []string{"setup", "--fast"} }},
+		{name: "init container args", want: true, mutate: func(spec *apiv1.PodSpec) { spec.InitContainers[0].Args = []string{"--input", "other"} }},
+		{name: "second init container command", want: true, mutate: func(spec *apiv1.PodSpec) { spec.InitContainers[1].Command = []string{"setup", "--fast"} }},
+		{name: "second init container args", want: true, mutate: func(spec *apiv1.PodSpec) { spec.InitContainers[1].Args = []string{"--input", "other"} }},
+		{
+			name: "container args and CPU requests",
+			mutate: func(spec *apiv1.PodSpec) {
+				spec.Containers[0].Args = []string{"--input", "other"}
+				spec.Containers[0].Resources.Requests[apiv1.ResourceCPU] = resource.MustParse("5")
+			},
+			want: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			first := testProvisioningRequestWithCondition("first", 1, v1.ProvisioningClassBestEffortAtomicScaleUp)
+			second := testProvisioningRequestWithCondition("second", 3, v1.ProvisioningClassBestEffortAtomicScaleUp)
+			for _, request := range []*provreqwrapper.ProvisioningRequest{first, second} {
+				spec := &request.PodTemplates[0].Template.Spec
+				spec.Containers[0].Args = []string{"--input", "common"}
+				spec.Containers = append(spec.Containers, apiv1.Container{
+					Name: "other", Image: "worker", Command: []string{"worker"}, Args: []string{"--input", "common"},
+				})
+				spec.InitContainers = []apiv1.Container{
+					{Name: "setup", Image: "setup", Command: []string{"setup"}, Args: []string{"--input", "common"}},
+					{Name: "other-setup", Image: "setup", Command: []string{"setup"}, Args: []string{"--input", "common"}},
+				}
+			}
+			test.mutate(&second.PodTemplates[0].Template.Spec)
+			firstBefore, secondBefore := first.PodTemplates[0].DeepCopy(), second.PodTemplates[0].DeepCopy()
+
+			assert.Equal(t, test.want, sameSchedulingRequirements(first, second))
+			assert.Equal(t, test.want, sameSchedulingRequirements(second, first))
+			assert.Equal(t, firstBefore, first.PodTemplates[0], "the comparison must not modify templates")
+			assert.Equal(t, secondBefore, second.PodTemplates[0], "the comparison must not modify templates")
+		})
+	}
+}
+
+func TestBestEffortAtomicBatchIgnoresContainerCommandAndArgs(t *testing.T) {
+	ctx := t.Context()
+	now := time.Now()
+	var requests []*provreqwrapper.ProvisioningRequest
+	var wantPods []*apiv1.Pod
+	for i, name := range []string{"first", "second"} {
+		request := testProvisioningRequestWithCondition(name, i+1, v1.ProvisioningClassBestEffortAtomicScaleUp)
+		request.UID = types.UID(name)
+		request.CreationTimestamp = metav1.NewTime(now.Add(time.Duration(i) * time.Minute))
+		spec := &request.PodTemplates[0].Template.Spec
+		spec.Containers[0].Command = []string{"worker", name}
+		spec.Containers[0].Args = []string{"--input", name}
+		spec.InitContainers = []apiv1.Container{{Name: "setup", Image: "setup", Command: []string{"setup", name}, Args: []string{"--output", name}}}
+		pods, err := provreqpods.PodsForProvisioningRequest(request)
+		require.NoError(t, err)
+		requests = append(requests, request)
+		wantPods = append(wantPods, pods...)
+	}
+	client := provreqclient.NewFakeProvisioningRequestClient(ctx, t, requests...)
+	injector := NewProvisioningRequestPodsInjectorWithOptions(client, PodsInjectorOptions{
+		InitialBackoffTime:              time.Minute,
+		MaxBackoffTime:                  10 * time.Minute,
+		MaxBackoffCacheSize:             100,
+		BestEffortAtomicBatchProcessing: true,
+		BestEffortAtomicMaxBatchSize:    10,
+		KubeClientBurst:                 1,
+	})
+
+	pods, err := injector.Process(ctx, nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, wantPods, pods, "both requests share a batch, and each pod keeps its own command and args")
 }
 
 func TestCheckCapacityBatchDifferentSchedulingRequirements(t *testing.T) {

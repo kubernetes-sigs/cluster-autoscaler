@@ -25,6 +25,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apiv1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -129,6 +130,30 @@ func TestProvReqBatchFullLoop(t *testing.T) {
 	}
 }
 
+func TestProvReqBatchIgnoresContainerArgs(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := test.GetTestContextWithCancel(t)
+		defer synctestutils.TearDown(cancel)
+
+		env := newProvReqBatchTest(ctx, t, 10)
+		env.addNodeGroup("cpu", false)
+		requests := env.addRequests("requests", 12, false, func(template *apiv1.PodTemplate) {
+			template.Template.Spec.Containers[0].Args = []string{"--input", template.Name}
+		})
+
+		wantResizes := []provReqBatchResize{{"cpu", 10}, {"cpu", 2}}
+		for loop, provisioned := range []int{10, 12} {
+			synctestutils.MustRunOnceAfter(ctx, t, env.autoscaler, 10*time.Second)
+			require.Equal(t, wantResizes[:loop+1], env.resizes)
+			env.assertTargetSize("cpu", 1+provisioned)
+			env.assertProvisioned(requests, provisioned)
+		}
+		synctestutils.MustRunOnceAfter(ctx, t, env.autoscaler, 10*time.Second)
+		assert.Equal(t, wantResizes, env.resizes, "admitted requests must not trigger another resize")
+		env.assertProvisioned(requests, 12)
+	})
+}
+
 func TestProvReqBatchFailingGPUDoesNotBlockCPU(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := test.GetTestContextWithCancel(t)
@@ -146,7 +171,8 @@ func TestProvReqBatchFailingGPUDoesNotBlockCPU(t *testing.T) {
 			cpuRequests := env.addRequests(fmt.Sprintf("cpu-%d", round), 4, false)
 			before := len(env.resizes)
 
-			synctestutils.MustRunOnceAfter(ctx, t, env.autoscaler, 10*time.Second)
+			err := synctestutils.RunOnceAfter(ctx, t, env.autoscaler, 10*time.Second)
+			require.ErrorContains(t, err, cloudprovider.ErrAtomicIncreaseRejected.Error(), "the loop must report the rejected GPU resize")
 			require.Greater(t, len(env.resizes), before, "the GPU resize must actually be attempted")
 			assert.Equal(t, "gpu", env.resizes[before].group)
 			env.assertProvisioned(gpuRequests, 0)
@@ -328,7 +354,7 @@ func (env *provReqBatchTest) addReadyNodes(group string, count int) {
 	}
 }
 
-func (env *provReqBatchTest) addRequests(prefix string, count int, gpu bool) []*v1.ProvisioningRequest {
+func (env *provReqBatchTest) addRequests(prefix string, count int, gpu bool, templateMutators ...func(*apiv1.PodTemplate)) []*v1.ProvisioningRequest {
 	env.t.Helper()
 	var requests []*v1.ProvisioningRequest
 	for i := 0; i < count; i++ {
@@ -345,6 +371,9 @@ func (env *provReqBatchTest) addRequests(prefix string, count int, gpu bool) []*
 		request.UID = types.UID(request.Name)
 		request.Generation = 1
 		request.PodTemplates[0].Template.Spec.NodeSelector = map[string]string{"pool": pool}
+		for _, mutate := range templateMutators {
+			mutate(request.PodTemplates[0])
+		}
 		env.fakes.K8s.AddPodTemplate(request.PodTemplates[0])
 		created, err := env.fakes.PRClient.AutoscalingV1().ProvisioningRequests(request.Namespace).Create(env.ctx, request.ProvisioningRequest, metav1.CreateOptions{})
 		require.NoError(env.t, err)

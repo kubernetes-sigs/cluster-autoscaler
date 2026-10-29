@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
@@ -111,6 +112,34 @@ func TestBatchRetryLimitSelection(t *testing.T) {
 	batch, err = injector.GetBestEffortAtomicBatch(ctx, 6)
 	require.NoError(t, err)
 	assert.Len(t, batch, 6, "allow larger batches again after expiry")
+}
+
+func TestBatchRetryLimitIgnoresContainerCommandAndArgs(t *testing.T) {
+	ctx := t.Context()
+	injector := NewProvisioningRequestPodsInjectorWithOptions(nil, PodsInjectorOptions{
+		InitialBackoffTime:              time.Minute,
+		MaxBackoffTime:                  10 * time.Minute,
+		MaxBackoffCacheSize:             100,
+		BestEffortAtomicBatchProcessing: true,
+		BestEffortAtomicMaxBatchSize:    6,
+		KubeClientBurst:                 1,
+	})
+	var requests []*provreqwrapper.ProvisioningRequest
+	for i := 0; i < 6; i++ {
+		request := testProvisioningRequestWithCondition(fmt.Sprintf("request-%d", i), 1, v1.ProvisioningClassBestEffortAtomicScaleUp)
+		request.UID = types.UID(request.Name)
+		spec := &request.PodTemplates[0].Template.Spec
+		spec.Containers[0].Args = []string{"--input", request.Name}
+		spec.InitContainers = []apiv1.Container{{Name: "setup", Image: "setup", Command: []string{"setup", request.Name}}}
+		requests = append(requests, request)
+	}
+
+	injector.RememberBestEffortAtomicBatchLimit(ctx, requests[0], 2)
+	batch := injector.collectBatch(ctx, requests[1:], 6, injector.isSupportedBestEffortAtomicClass)
+	require.Len(t, batch, 2, "a limit remembered for one workload applies to workloads that differ only in command and args")
+	injector.RememberBestEffortAtomicBatchLimit(ctx, requests[1], 1)
+	require.Len(t, injector.batchRetryLimits, 1, "lower the shared limit rather than remembering another one")
+	assert.Equal(t, 1, injector.batchRetryLimits[0].pods)
 }
 
 func TestBatchRetryLimitIsolationAndBounds(t *testing.T) {
