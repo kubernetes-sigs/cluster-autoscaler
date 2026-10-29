@@ -19,6 +19,7 @@ package actuation
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -224,6 +225,149 @@ func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suf
 			wantNodeDeleteResults: map[string]status.NodeDeleteResult{
 				"test-node-0": {ResultType: status.NodeDeleteOk},
 				"test-node-1": {ResultType: status.NodeDeleteOk},
+			},
+		},
+		"empty node deletion is aborted when a pod is nominated to the node": {
+			nodeGroups: map[string]*testprovider.TestNodeGroup{
+				"test": sizedNodeGroup("test", 3, false, ignoreDaemonSetsUtilization),
+			},
+			emptyNodes: []nodeGroupViewInfo{
+				{"test", 0, 2},
+			},
+			pods: map[string][]*apiv1.Pod{
+				"test-node-0": {nominatedPod("nominated-pod-0", "test-node-0")},
+			},
+			wantStatus: scaleDownStatusInfo{
+				result: status.ScaleDownNodeDeleteStarted,
+				scaledDownNodes: []scaleDownNodeInfo{
+					{
+						name:      "test-node-0",
+						nodeGroup: "test",
+						utilInfo:  generateUtilInfo(1./8., 1./8.),
+					},
+					{
+						name:      "test-node-1",
+						nodeGroup: "test",
+						utilInfo:  generateUtilInfo(0, 0),
+					},
+				},
+			},
+			wantDeletedNodes: []string{"test-node-1"},
+			wantTaintUpdates: map[string][][]apiv1.Taint{
+				"test-node-0": {
+					{toBeDeletedTaint},
+					{},
+				},
+				"test-node-1": {
+					{toBeDeletedTaint},
+				},
+			},
+			wantNodeDeleteResults: map[string]status.NodeDeleteResult{
+				"test-node-0": {ResultType: status.NodeDeleteErrorInternal, Err: cmpopts.AnyError},
+				"test-node-1": {ResultType: status.NodeDeleteOk},
+			},
+		},
+		"nominated pods are evicted together with the other pods during drain": {
+			nodeGroups: map[string]*testprovider.TestNodeGroup{
+				"test": sizedNodeGroup("test", 3, false, ignoreDaemonSetsUtilization),
+			},
+			drainNodes: []nodeGroupViewInfo{
+				{"test", 0, 2},
+			},
+			pods: map[string][]*apiv1.Pod{
+				"test-node-0": slices.Concat(removablePods(2, "test-node-0"), []*apiv1.Pod{nominatedPod("nominated-pod-0", "test-node-0")}),
+				"test-node-1": removablePods(2, "test-node-1"),
+			},
+			wantStatus: scaleDownStatusInfo{
+				result: status.ScaleDownNodeDeleteStarted,
+				scaledDownNodes: []scaleDownNodeInfo{
+					{
+						name:        "test-node-0",
+						nodeGroup:   "test",
+						evictedPods: slices.Concat(removablePods(2, "test-node-0"), []*apiv1.Pod{nominatedPod("nominated-pod-0", "test-node-0")}),
+						utilInfo:    generateUtilInfo(3./8., 3./8.),
+					},
+					{
+						name:        "test-node-1",
+						nodeGroup:   "test",
+						evictedPods: removablePods(2, "test-node-1"),
+						utilInfo:    generateUtilInfo(2./8., 2./8.),
+					},
+				},
+			},
+			wantDeletedNodes: []string{"test-node-0", "test-node-1"},
+			wantDeletedPods:  []string{"test-node-0-pod-0", "test-node-0-pod-1", "nominated-pod-0", "test-node-1-pod-0", "test-node-1-pod-1"},
+			wantTaintUpdates: map[string][][]apiv1.Taint{
+				"test-node-0": {
+					{toBeDeletedTaint},
+				},
+				"test-node-1": {
+					{toBeDeletedTaint},
+				},
+			},
+			wantNodeDeleteResults: map[string]status.NodeDeleteResult{
+				"test-node-0": {ResultType: status.NodeDeleteOk},
+				"test-node-1": {ResultType: status.NodeDeleteOk},
+			},
+		},
+		"pods nominated to other nodes don't block deletion": {
+			nodeGroups: map[string]*testprovider.TestNodeGroup{
+				"test": sizedNodeGroup("test", 3, false, ignoreDaemonSetsUtilization),
+			},
+			emptyNodes: []nodeGroupViewInfo{
+				{"test", 0, 1},
+			},
+			pods: map[string][]*apiv1.Pod{
+				"other-node": {nominatedPod("nominated-pod-0", "other-node")},
+			},
+			wantStatus: scaleDownStatusInfo{
+				result: status.ScaleDownNodeDeleteStarted,
+				scaledDownNodes: []scaleDownNodeInfo{
+					{
+						name:      "test-node-0",
+						nodeGroup: "test",
+						utilInfo:  generateUtilInfo(0, 0),
+					},
+				},
+			},
+			wantDeletedNodes: []string{"test-node-0"},
+			wantTaintUpdates: map[string][][]apiv1.Taint{
+				"test-node-0": {
+					{toBeDeletedTaint},
+				},
+			},
+			wantNodeDeleteResults: map[string]status.NodeDeleteResult{
+				"test-node-0": {ResultType: status.NodeDeleteOk},
+			},
+		},
+		"nominated pods that are being deleted don't block deletion": {
+			nodeGroups: map[string]*testprovider.TestNodeGroup{
+				"test": sizedNodeGroup("test", 3, false, ignoreDaemonSetsUtilization),
+			},
+			emptyNodes: []nodeGroupViewInfo{
+				{"test", 0, 1},
+			},
+			pods: map[string][]*apiv1.Pod{
+				"test-node-0": {deletedPod(nominatedPod("nominated-pod-0", "test-node-0"))},
+			},
+			wantStatus: scaleDownStatusInfo{
+				result: status.ScaleDownNodeDeleteStarted,
+				scaledDownNodes: []scaleDownNodeInfo{
+					{
+						name:      "test-node-0",
+						nodeGroup: "test",
+						utilInfo:  generateUtilInfo(1./8., 1./8.),
+					},
+				},
+			},
+			wantDeletedNodes: []string{"test-node-0"},
+			wantTaintUpdates: map[string][][]apiv1.Taint{
+				"test-node-0": {
+					{toBeDeletedTaint},
+				},
+			},
+			wantNodeDeleteResults: map[string]status.NodeDeleteResult{
+				"test-node-0": {ResultType: status.NodeDeleteOk},
 			},
 		},
 		"empty and drain deletion work correctly together": {
@@ -1719,6 +1863,20 @@ func removablePod(name string, node string) *apiv1.Pod {
 			},
 		},
 	}
+}
+
+// nominatedPod returns a pod that is not bound to any node yet, but is nominated to the given node by the scheduler.
+func nominatedPod(name string, node string) *apiv1.Pod {
+	pod := removablePod(name, "")
+	pod.Status.NominatedNodeName = node
+	return pod
+}
+
+// deletedPod marks the pod as being deleted.
+func deletedPod(pod *apiv1.Pod) *apiv1.Pod {
+	now := metav1.Now()
+	pod.DeletionTimestamp = &now
+	return pod
 }
 
 func generateDsPods(count int, node string) []*apiv1.Pod {
