@@ -56,9 +56,6 @@ func resourceAllocatableRequested(resourceName apiv1.ResourceName, nodeInfo *fra
 func (m *resourceUtilizationMetric) computeResourceUtilization(clusterState ClusterState) (float64, error) {
 	var totalRequested, totalAllocatable, ratio float64
 	for _, nodeInfo := range clusterState.nodeInfos {
-		if nodeInfo == nil || nodeInfo.Node() == nil {
-			continue
-		}
 		res, err := resourceAllocatableRequested(m.resourceName, nodeInfo, clusterState.currentTime)
 		if err != nil {
 			return 0, err
@@ -104,9 +101,9 @@ func (m *resourceUtilizationMetric) Summarize(metricValues []float64) map[string
 	last := metricValues[len(metricValues)-1]
 	diff := last - first
 	r := map[string]float64{
-		fmt.Sprintf("%s_%%_init", m.Name()):     first * 100,
-		fmt.Sprintf("%s_%%_final", m.Name()):    last * 100,
-		fmt.Sprintf("%s_%%_improved", m.Name()): diff * 100,
+		fmt.Sprintf("%s_%%_init", m.Name()):  first * 100,
+		fmt.Sprintf("%s_%%_final", m.Name()): last * 100,
+		fmt.Sprintf("%s_%%_diff", m.Name()):  diff * 100,
 	}
 	return r
 }
