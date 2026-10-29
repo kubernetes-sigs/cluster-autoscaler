@@ -18,10 +18,12 @@ package actuation
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown"
@@ -425,8 +427,13 @@ func (a *Actuator) createSnapshot(ctx context.Context, nodes []*apiv1.Node) (clu
 		return nil, err
 	}
 
-	scheduledPods := kube_util.ScheduledPods(pods)
-	nonExpendableScheduledPods := utils.FilterOutExpendablePods(scheduledPods, a.autoscalingCtx.ExpendablePodsPriorityCutoff)
+	// Pods nominated to a node by the scheduler (status.nominatedNodeName) are not bound yet, but the
+	// scheduler is going to bind them regardless of the ToBeDeleted taint, so they have to be treated as
+	// already occupying the node, consistently with the cluster snapshot used by the planner.
+	podsBySchedulability := kube_util.ArrangePodsBySchedulability(pods, nil)
+	allocatedPods := slices.Concat(podsBySchedulability.Scheduled, podsBySchedulability.NominatedNode)
+	// Pods from other nodes are filtered out to avoid warning logs about non-existing nodes from `SetClusterState`
+	nonExpendablePods := utils.FilterOutExpendablePods(podsOnNodes(allocatedPods, nodes), a.autoscalingCtx.ExpendablePodsPriorityCutoff)
 
 	var draSnapshot *drasnapshot.Snapshot
 	if a.autoscalingCtx.DynamicResourceAllocationEnabled && a.autoscalingCtx.DraProvider != nil {
@@ -444,11 +451,30 @@ func (a *Actuator) createSnapshot(ctx context.Context, nodes []*apiv1.Node) (clu
 		}
 	}
 
-	err = snapshot.SetClusterState(ctx, nodes, nonExpendableScheduledPods, draSnapshot, csiSnapshot)
+	err = snapshot.SetClusterState(ctx, nodes, nonExpendablePods, draSnapshot, csiSnapshot)
 	if err != nil {
 		return nil, err
 	}
 	return snapshot, nil
+}
+
+// podsOnNodes returns the pods bound or nominated to any of the given nodes.
+func podsOnNodes(pods []*apiv1.Pod, nodes []*apiv1.Node) []*apiv1.Pod {
+	nodeNames := make(sets.Set[string], len(nodes))
+	for _, node := range nodes {
+		nodeNames.Insert(node.Name)
+	}
+	var result []*apiv1.Pod
+	for _, pod := range pods {
+		nodeName := pod.Spec.NodeName
+		if nodeName == "" {
+			nodeName = pod.Status.NominatedNodeName
+		}
+		if nodeNames.Has(nodeName) {
+			result = append(result, pod)
+		}
+	}
+	return result
 }
 
 func joinPodNames(pods []*apiv1.Pod) string {
