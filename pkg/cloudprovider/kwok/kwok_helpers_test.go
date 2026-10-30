@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	core "k8s.io/client-go/testing"
@@ -887,4 +888,39 @@ func TestLoadNodeTemplatesFromConfigMap(t *testing.T) {
 	assert.Error(t, err)
 	assert.Empty(t, nos)
 	assert.Equal(t, len(nos), 0)
+}
+
+func TestPrepareNodeWithoutAnnotationsAndLabels(t *testing.T) {
+	no := &apiv1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node1"}}
+
+	assert.NotPanics(t, func() { prepareNode(no, "ng1") })
+	assert.Equal(t, "kwok-fake-node1", no.GetName())
+	assert.Equal(t, "fake", no.GetAnnotations()[KwokManagedAnnotation])
+	assert.Equal(t, "ng1", no.GetAnnotations()[NGNameAnnotation])
+	assert.NotNil(t, no.GetLabels())
+	assert.Equal(t, getProviderID("kwok-fake-node1"), no.Spec.ProviderID)
+}
+
+func TestCreateNodegroupsFromTemplateWithoutAnnotations(t *testing.T) {
+	kc := &KwokProviderConfig{
+		status: &GroupingConfig{groupNodesBy: groupNodesByLabel, key: "kwok-nodegroup"},
+	}
+	// A minimal template grouped by label which doesn't define any annotations.
+	nodes := []*apiv1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "node1",
+				Labels: map[string]string{"kwok-nodegroup": "ng1"},
+			},
+		},
+	}
+
+	var ngs []*NodeGroup
+	assert.NotPanics(t, func() {
+		ngs = createNodegroups(nodes, &fake.Clientset{}, kc, testNodeLister, newTestAllNodeLister(nil))
+	})
+	assert.Len(t, ngs, 1)
+	assert.Equal(t, "ng1", ngs[0].Id())
+	assert.Equal(t, "fake", ngs[0].nodeTemplate.GetAnnotations()[KwokManagedAnnotation])
+	assert.Equal(t, "ng1", ngs[0].nodeTemplate.GetAnnotations()[NGNameAnnotation])
 }
