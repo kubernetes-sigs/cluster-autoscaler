@@ -430,7 +430,7 @@ func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suf
 				"atomic-4-node-3": {ResultType: status.NodeDeleteOk},
 			},
 		},
-		"failure to taint empty node stops deletion and cleans already applied taints": {
+		"failure to taint empty node does not stop deletion of other nodes": {
 			nodeGroups: map[string]*testprovider.TestNodeGroup{
 				"test": sizedNodeGroup("test", 3, false, ignoreDaemonSetsUtilization),
 			},
@@ -441,31 +441,80 @@ func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suf
 			},
 			failedNodeTaint: map[string]bool{"test-node-2": true},
 			wantStatus: scaleDownStatusInfo{
-				result: status.ScaleDownError,
+				result: status.ScaleDownNodeDeleteStarted,
+				scaledDownNodes: []scaleDownNodeInfo{
+					{
+						name:      "test-node-0",
+						nodeGroup: "test",
+						utilInfo:  generateUtilInfo(0, 0),
+					},
+					{
+						name:      "test-node-1",
+						nodeGroup: "test",
+						utilInfo:  generateUtilInfo(0, 0),
+					},
+					{
+						name:      "test-node-3",
+						nodeGroup: "test",
+						utilInfo:  generateUtilInfo(0, 0),
+					},
+					{
+						name:        "test-node-4",
+						nodeGroup:   "test",
+						evictedPods: removablePods(2, "test-node-4"),
+						utilInfo:    generateUtilInfo(2./8., 2./8.),
+					},
+				},
 			},
+			wantDeletedNodes: []string{"test-node-0", "test-node-1", "test-node-3", "test-node-4"},
+			wantDeletedPods:  []string{"test-node-4-pod-0", "test-node-4-pod-1"},
 			wantTaintUpdates: map[string][][]apiv1.Taint{
 				"test-node-0": {
 					{toBeDeletedTaint},
-					{},
 				},
 				"test-node-1": {
 					{toBeDeletedTaint},
-					{},
 				},
 				"test-node-3": {
 					{toBeDeletedTaint},
-					{},
 				},
+				"test-node-4": {
+					{toBeDeletedTaint},
+				},
+			},
+			wantNodeDeleteResults: map[string]status.NodeDeleteResult{
+				"test-node-0": {ResultType: status.NodeDeleteOk},
+				"test-node-1": {ResultType: status.NodeDeleteOk},
+				"test-node-2": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
+				"test-node-3": {ResultType: status.NodeDeleteOk},
+				"test-node-4": {ResultType: status.NodeDeleteOk},
+			},
+		},
+		"failure to taint all nodes stops deletion": {
+			nodeGroups: map[string]*testprovider.TestNodeGroup{
+				"test": sizedNodeGroup("test", 3, false, ignoreDaemonSetsUtilization),
+			},
+			emptyNodes: []nodeGroupViewInfo{{"test", 0, 2}},
+			drainNodes: []nodeGroupViewInfo{{"test", 2, 3}},
+			pods: map[string][]*apiv1.Pod{
+				"test-node-2": removablePods(2, "test-node-2"),
+			},
+			failedNodeTaint: map[string]bool{
+				"test-node-0": true,
+				"test-node-1": true,
+				"test-node-2": true,
+			},
+			wantStatus: scaleDownStatusInfo{
+				result: status.ScaleDownError,
 			},
 			wantNodeDeleteResults: map[string]status.NodeDeleteResult{
 				"test-node-0": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
 				"test-node-1": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
 				"test-node-2": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
-				"test-node-3": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
 			},
 			wantErr: cmpopts.AnyError,
 		},
-		"failure to taint empty atomic node stops deletion and cleans already applied taints": {
+		"failure to taint empty atomic node stops atomic group deletion and cleans already applied taints": {
 			nodeGroups: map[string]*testprovider.TestNodeGroup{
 				"test":     sizedNodeGroup("test", 3, false, ignoreDaemonSetsUtilization),
 				"atomic-4": sizedNodeGroup("atomic-4", 4, true, ignoreDaemonSetsUtilization),
@@ -477,8 +526,18 @@ func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suf
 			},
 			failedNodeTaint: map[string]bool{"atomic-4-node-2": true},
 			wantStatus: scaleDownStatusInfo{
-				result: status.ScaleDownError,
+				result: status.ScaleDownNodeDeleteStarted,
+				scaledDownNodes: []scaleDownNodeInfo{
+					{
+						name:        "test-node-4",
+						nodeGroup:   "test",
+						evictedPods: removablePods(2, "test-node-4"),
+						utilInfo:    generateUtilInfo(2./8., 2./8.),
+					},
+				},
 			},
+			wantDeletedNodes: []string{"test-node-4"},
+			wantDeletedPods:  []string{"test-node-4-pod-0", "test-node-4-pod-1"},
 			wantTaintUpdates: map[string][][]apiv1.Taint{
 				"atomic-4-node-0": {
 					{toBeDeletedTaint},
@@ -492,21 +551,24 @@ func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suf
 					{toBeDeletedTaint},
 					{},
 				},
+				"test-node-4": {
+					{toBeDeletedTaint},
+				},
 			},
 			wantNodeDeleteResults: map[string]status.NodeDeleteResult{
 				"atomic-4-node-0": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
 				"atomic-4-node-1": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
 				"atomic-4-node-2": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
 				"atomic-4-node-3": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
+				"test-node-4":     {ResultType: status.NodeDeleteOk},
 			},
-			wantErr: cmpopts.AnyError,
 		},
-		"failure to taint drain node stops further deletion and cleans already applied taints": {
+		"failure to taint drain node does not stop deletion of other nodes": {
 			nodeGroups: map[string]*testprovider.TestNodeGroup{
 				"test": sizedNodeGroup("test", 3, false, ignoreDaemonSetsUtilization),
 			},
-			emptyNodes: []nodeGroupViewInfo{{"test", 0, 2}}, //generateNodeGroupViewList(testNg, 0, 2),
-			drainNodes: []nodeGroupViewInfo{{"test", 2, 6}}, //generateNodeGroupViewList(testNg, 2, 6),
+			emptyNodes: []nodeGroupViewInfo{{"test", 0, 2}},
+			drainNodes: []nodeGroupViewInfo{{"test", 2, 6}},
 			pods: map[string][]*apiv1.Pod{
 				"test-node-2": removablePods(2, "test-node-2"),
 				"test-node-3": removablePods(2, "test-node-3"),
@@ -515,7 +577,7 @@ func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suf
 			},
 			failedNodeTaint: map[string]bool{"test-node-2": true},
 			wantStatus: scaleDownStatusInfo{
-				result: status.ScaleDownError,
+				result: status.ScaleDownNodeDeleteStarted,
 				scaledDownNodes: []scaleDownNodeInfo{
 					{
 						name:        "test-node-0",
@@ -529,9 +591,32 @@ func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suf
 						evictedPods: nil,
 						utilInfo:    generateUtilInfo(0, 0),
 					},
+					{
+						name:        "test-node-3",
+						nodeGroup:   "test",
+						evictedPods: removablePods(2, "test-node-3"),
+						utilInfo:    generateUtilInfo(2./8., 2./8.),
+					},
+					{
+						name:        "test-node-4",
+						nodeGroup:   "test",
+						evictedPods: removablePods(2, "test-node-4"),
+						utilInfo:    generateUtilInfo(2./8., 2./8.),
+					},
+					{
+						name:        "test-node-5",
+						nodeGroup:   "test",
+						evictedPods: removablePods(2, "test-node-5"),
+						utilInfo:    generateUtilInfo(2./8., 2./8.),
+					},
 				},
 			},
-			wantDeletedNodes: []string{"test-node-0", "test-node-1"},
+			wantDeletedNodes: []string{"test-node-0", "test-node-1", "test-node-3", "test-node-4", "test-node-5"},
+			wantDeletedPods: []string{
+				"test-node-3-pod-0", "test-node-3-pod-1",
+				"test-node-4-pod-0", "test-node-4-pod-1",
+				"test-node-5-pod-0", "test-node-5-pod-1",
+			},
 			wantTaintUpdates: map[string][][]apiv1.Taint{
 				"test-node-0": {
 					{toBeDeletedTaint},
@@ -539,31 +624,26 @@ func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suf
 				"test-node-1": {
 					{toBeDeletedTaint},
 				},
-				// The other drain nodes are tainted and then reverted, because one drain node failed.
 				"test-node-3": {
 					{toBeDeletedTaint},
-					{},
 				},
 				"test-node-4": {
 					{toBeDeletedTaint},
-					{},
 				},
 				"test-node-5": {
 					{toBeDeletedTaint},
-					{},
 				},
 			},
 			wantNodeDeleteResults: map[string]status.NodeDeleteResult{
 				"test-node-0": {ResultType: status.NodeDeleteOk},
 				"test-node-1": {ResultType: status.NodeDeleteOk},
 				"test-node-2": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
-				"test-node-3": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
-				"test-node-4": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
-				"test-node-5": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
+				"test-node-3": {ResultType: status.NodeDeleteOk},
+				"test-node-4": {ResultType: status.NodeDeleteOk},
+				"test-node-5": {ResultType: status.NodeDeleteOk},
 			},
-			wantErr: cmpopts.AnyError,
 		},
-		"failure to taint drain atomic node stops further deletion and cleans already applied taints": {
+		"failure to taint drain atomic node stops atomic group deletion and cleans already applied taints": {
 			nodeGroups: map[string]*testprovider.TestNodeGroup{
 				"test":     sizedNodeGroup("test", 3, false, ignoreDaemonSetsUtilization),
 				"atomic-6": sizedNodeGroup("atomic-6", 6, true, ignoreDaemonSetsUtilization),
@@ -580,7 +660,7 @@ func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suf
 			},
 			failedNodeTaint: map[string]bool{"atomic-6-node-2": true},
 			wantStatus: scaleDownStatusInfo{
-				result: status.ScaleDownError,
+				result: status.ScaleDownNodeDeleteStarted,
 				scaledDownNodes: []scaleDownNodeInfo{
 					{
 						name:        "test-node-0",
@@ -634,6 +714,76 @@ func getStartDeletionTestCases(ignoreDaemonSetsUtilization bool, force bool, suf
 				"atomic-6-node-3": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
 				"atomic-6-node-4": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
 				"atomic-6-node-5": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
+			},
+		},
+		"failure to taint drain node in mixed atomic group cleans empty node taint and aborts atomic group": {
+			nodeGroups: map[string]*testprovider.TestNodeGroup{
+				"test":     sizedNodeGroup("test", 1, false, ignoreDaemonSetsUtilization),
+				"atomic-2": sizedNodeGroup("atomic-2", 2, true, ignoreDaemonSetsUtilization),
+			},
+			emptyNodes: []nodeGroupViewInfo{
+				{"atomic-2", 0, 1},
+				{"test", 0, 1},
+			},
+			drainNodes: []nodeGroupViewInfo{
+				{"atomic-2", 1, 2},
+			},
+			pods: map[string][]*apiv1.Pod{
+				"atomic-2-node-1": removablePods(2, "atomic-2-node-1"),
+			},
+			failedNodeTaint: map[string]bool{"atomic-2-node-1": true},
+			wantStatus: scaleDownStatusInfo{
+				result: status.ScaleDownNodeDeleteStarted,
+				scaledDownNodes: []scaleDownNodeInfo{
+					{
+						name:      "test-node-0",
+						nodeGroup: "test",
+						utilInfo:  generateUtilInfo(0, 0),
+					},
+				},
+			},
+			wantDeletedNodes: []string{"test-node-0"},
+			wantTaintUpdates: map[string][][]apiv1.Taint{
+				"atomic-2-node-0": {
+					{toBeDeletedTaint},
+					{},
+				},
+				"test-node-0": {
+					{toBeDeletedTaint},
+				},
+			},
+			wantNodeDeleteResults: map[string]status.NodeDeleteResult{
+				"atomic-2-node-0": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
+				"atomic-2-node-1": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
+				"test-node-0":     {ResultType: status.NodeDeleteOk},
+			},
+		},
+		"failure to taint drain node in mixed atomic group with no other groups returns error": {
+			nodeGroups: map[string]*testprovider.TestNodeGroup{
+				"atomic-2": sizedNodeGroup("atomic-2", 2, true, ignoreDaemonSetsUtilization),
+			},
+			emptyNodes: []nodeGroupViewInfo{
+				{"atomic-2", 0, 1},
+			},
+			drainNodes: []nodeGroupViewInfo{
+				{"atomic-2", 1, 2},
+			},
+			pods: map[string][]*apiv1.Pod{
+				"atomic-2-node-1": removablePods(2, "atomic-2-node-1"),
+			},
+			failedNodeTaint: map[string]bool{"atomic-2-node-1": true},
+			wantStatus: scaleDownStatusInfo{
+				result: status.ScaleDownError,
+			},
+			wantTaintUpdates: map[string][][]apiv1.Taint{
+				"atomic-2-node-0": {
+					{toBeDeletedTaint},
+					{},
+				},
+			},
+			wantNodeDeleteResults: map[string]status.NodeDeleteResult{
+				"atomic-2-node-0": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
+				"atomic-2-node-1": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: cmpopts.AnyError},
 			},
 			wantErr: cmpopts.AnyError,
 		},
@@ -1425,7 +1575,7 @@ podsLoop:
 	}
 
 	// Collect all taint updates recorded by the fake k8s client hook.
-	// Because StartDeletion and all background EndDeletion calls have completed above,
+	// Because StartDeletion (including cleanTaintsSync) and all background EndDeletion calls have completed above,
 	// all taint updates have already been pushed to the buffered taintUpdates channel.
 	gotTaintUpdates := make(map[string][][]apiv1.Taint)
 extraTaintsLoop:
@@ -1437,8 +1587,22 @@ extraTaintsLoop:
 			break extraTaintsLoop
 		}
 	}
+	// After the first taint failure in an atomic node group, the group's remaining nodes are skipped. Which siblings
+	// were already tainted (and then untainted) and which were skipped depends on worker scheduling, so a sibling
+	// expected to be tainted and untainted is also accepted with no taint updates at all.
+	wantTaintUpdates := make(map[string][][]apiv1.Taint, len(tc.wantTaintUpdates))
+	for nodeName, updates := range tc.wantTaintUpdates {
+		res, hasResult := tc.wantNodeDeleteResults[nodeName]
+		startedDeletion := hasResult && res.ResultType != status.NodeDeleteErrorFailedToMarkToBeDeleted
+		if !startedDeletion && len(tc.failedNodeTaint) > 0 && len(updates) == 2 && len(updates[1]) == 0 {
+			if _, wasTainted := gotTaintUpdates[nodeName]; !wasTainted {
+				continue
+			}
+		}
+		wantTaintUpdates[nodeName] = updates
+	}
 	startupTaintValue := cmpopts.IgnoreFields(apiv1.Taint{}, "Value")
-	if diff := cmp.Diff(tc.wantTaintUpdates, gotTaintUpdates, startupTaintValue, cmpopts.EquateEmpty()); diff != "" {
+	if diff := cmp.Diff(wantTaintUpdates, gotTaintUpdates, startupTaintValue, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("taintUpdates diff (-want +got):\n%s", diff)
 	}
 }
@@ -1464,10 +1628,13 @@ func TestStartDeletionWithDynamicNodeDeleteDelay(t *testing.T) {
 	testCases := getStartDeletionTestCases(false, false, "testNgDyn")
 	testsToRun := []string{
 		"empty node deletion testNgDyn",
-		// Empty and drain nodes are tainted by separate taintNodesSync calls, so this runs two trackers.
 		"empty and drain deletion work correctly together testNgDyn",
-		"failure to taint empty node stops deletion and cleans already applied taints testNgDyn",
-		"failure to taint drain node stops further deletion and cleans already applied taints testNgDyn",
+		"failure to taint empty node does not stop deletion of other nodes testNgDyn",
+		"failure to taint drain node does not stop deletion of other nodes testNgDyn",
+		"failure to taint drain atomic node stops atomic group deletion and cleans already applied taints testNgDyn",
+		"failure to taint drain node in mixed atomic group cleans empty node taint and aborts atomic group testNgDyn",
+		"failure to taint drain node in mixed atomic group with no other groups returns error testNgDyn",
+		"failure to taint all nodes stops deletion testNgDyn",
 	}
 
 	for _, name := range testsToRun {
@@ -1482,6 +1649,121 @@ func TestStartDeletionWithDynamicNodeDeleteDelay(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			runStartDeletionTest(t, tc, false)
 		})
+	}
+}
+
+// newTaintNodesTestActuator returns an Actuator whose fake client fails updates for nodes in failingNodes,
+// and a counter of update attempts.
+func newTaintNodesTestActuator(t *testing.T, nodes []*apiv1.Node, failingNodes map[string]bool, opts config.AutoscalingOptions) (*Actuator, func() int) {
+	t.Helper()
+	var mu sync.Mutex
+	if opts.MaxConcurrentNodesTainting == 0 {
+		opts.MaxConcurrentNodesTainting = 5
+	}
+	nodesByName := make(map[string]*apiv1.Node, len(nodes))
+	for _, n := range nodes {
+		nodesByName[n.Name] = n
+	}
+	updateAttempts := 0
+	fakeClient := &fake.Clientset{}
+	fakeClient.Fake.AddReactor("get", "nodes", func(action core.Action) (bool, runtime.Object, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return true, nodesByName[action.(core.GetAction).GetName()].DeepCopy(), nil
+	})
+	fakeClient.Fake.AddReactor("update", "nodes", func(action core.Action) (bool, runtime.Object, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		updateAttempts++
+		obj := action.(core.UpdateAction).GetObject().(*apiv1.Node)
+		if failingNodes[obj.Name] {
+			return true, nil, fmt.Errorf("simulated taint error")
+		}
+		nodesByName[obj.Name] = obj.DeepCopy()
+		return true, obj, nil
+	})
+
+	registry := kube_util.NewListerRegistry(nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	autoscalingCtx, err := NewScaleTestAutoscalingContext(opts, fakeClient, registry, provider, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Couldn't set up autoscaling context: %v", err)
+	}
+	return &Actuator{
+			autoscalingCtx:      &autoscalingCtx,
+			nodeDeletionTracker: deletiontracker.NewNodeDeletionTracker(0),
+		}, func() int {
+			mu.Lock()
+			defer mu.Unlock()
+			return updateAttempts
+		}
+}
+
+func TestTaintNodesAtomicFailFast(t *testing.T) {
+	ctx := GetTestContext(t)
+	nodes := generateNodes(0, 20, "atomic-20")
+	failingNodes := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		failingNodes[n.Name] = true
+	}
+	opts := config.AutoscalingOptions{MaxScaleDownParallelism: len(nodes), MaxConcurrentNodesTainting: 5}
+	actuator, updateAttempts := newTaintNodesTestActuator(t, nodes, failingNodes, opts)
+	bucket := &budgets.NodeGroupView{Group: sizedNodeGroup("atomic-20", 20, true, false), Nodes: nodes, BatchSize: len(nodes)}
+
+	got, err := actuator.taintNodesSync(ctx, []*budgets.NodeGroupView{bucket}, nil)
+	if err == nil {
+		t.Errorf("want error when no nodes can be scaled down, got nil")
+	}
+	if len(got.buckets) != 0 || len(got.nodesToClean) != 0 {
+		t.Errorf("want no tainted buckets and no nodes to clean, got %d buckets, %d nodes to clean", len(got.buckets), len(got.nodesToClean))
+	}
+	// Only the workers that were already past the skip check when the first taint failed can still attempt a taint.
+	if attempts := updateAttempts(); attempts > opts.MaxConcurrentNodesTainting {
+		t.Errorf("want at most %d taint attempts before the rest of the atomic group is skipped, got %d", opts.MaxConcurrentNodesTainting, attempts)
+	}
+}
+
+func TestTaintNodesLatencyTrackerBookkeeping(t *testing.T) {
+	ctx := GetTestContext(t)
+	atomicNodes := generateNodes(0, 4, "atomic-4")
+	testNodes := generateNodes(0, 3, "test")
+	allNodes := append(append([]*apiv1.Node{}, atomicNodes...), testNodes...)
+	failingNodes := map[string]bool{"atomic-4-node-2": true, "test-node-1": true}
+	actuator, _ := newTaintNodesTestActuator(t, allNodes, failingNodes, config.AutoscalingOptions{MaxScaleDownParallelism: len(allNodes)})
+	tracker := newUpdateLatencyTracker(nil, len(allNodes))
+
+	atomicGroup := sizedNodeGroup("atomic-4", 4, true, false)
+	buckets := []*budgets.NodeGroupView{
+		{Group: atomicGroup, Nodes: atomicNodes[:2], BatchSize: 4},
+		{Group: sizedNodeGroup("test", 3, false, false), Nodes: testNodes},
+		{Group: atomicGroup, Nodes: atomicNodes[2:], BatchSize: 4, Drain: true},
+	}
+
+	got, err := actuator.taintNodesSync(ctx, buckets, tracker)
+	if err != nil {
+		t.Fatalf("unexpected error from taintNodesSync: %v", err)
+	}
+	if len(got.buckets) != 1 || got.buckets[0].Group.Id() != "test" || got.buckets[0].Drain {
+		t.Fatalf("want only the non-atomic empty bucket, got %d buckets", len(got.buckets))
+	}
+	if diff := cmp.Diff([]string{"test-node-0", "test-node-2"}, nodeNames(got.buckets[0].Nodes)); diff != "" {
+		t.Errorf("tainted non-atomic nodes diff (-want +got):\n%s", diff)
+	}
+	// Which atomic siblings got tainted before atomic-4-node-2 failed depends on scheduling.
+	cleanable := map[string]bool{"atomic-4-node-0": true, "atomic-4-node-1": true, "atomic-4-node-3": true}
+	for _, node := range got.nodesToClean {
+		if !cleanable[node.Name] {
+			t.Errorf("unexpected node to clean: %s", node.Name)
+		}
+	}
+	close(tracker.startTimeChan)
+	var gotStarted []string
+	for record := range tracker.startTimeChan {
+		gotStarted = append(gotStarted, record.nodeName)
+	}
+	wantStarted := append([]string{"test-node-0", "test-node-2"}, nodeNames(got.nodesToClean)...)
+	if diff := cmp.Diff(wantStarted, gotStarted, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
+		t.Errorf("recorded start times diff (-want +got):\n%s", diff)
 	}
 }
 

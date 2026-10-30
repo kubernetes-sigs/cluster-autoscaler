@@ -204,25 +204,53 @@ func TestUpdateLatencyTrackerContextCancellation(t *testing.T) {
 	})
 }
 
-func TestUpdateLatencyTrackerAbort(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		// "n1" never gets tainted.
-		nodeLister := NewTestCustomNodeLister([]string{"n1"}, nil)
-		tracker := newUpdateLatencyTracker(nodeLister, 1)
-		tracker.recordStartTime("n1", time.Now())
+func TestUpdateLatencyTrackerStopWaitingForNodes(t *testing.T) {
+	t.Run("dropping all started nodes finishes immediately without waiting for taints", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			// "n1" never gets tainted.
+			nodeLister := NewTestCustomNodeLister([]string{"n1"}, nil)
+			tracker := newUpdateLatencyTracker(nodeLister, 1)
+			tracker.recordStartTime("n1", time.Now())
 
-		go tracker.start(t.Context())
-		tracker.abort()
-		// Calling abort a second time should not panic.
-		tracker.abort()
+			go tracker.start(t.Context())
+			tracker.stopWaitingForNodes([]string{"n1"})
+			// Calling stopWaitingForNodes a second time should not panic.
+			tracker.stopWaitingForNodes([]string{"n1"})
 
-		select {
-		case <-tracker.done:
-		case <-time.After(time.Second):
-			t.Fatal("tracker did not finish after abort")
-		}
-		_, err := tracker.waitForLatency()
-		assert.Error(t, err)
+			select {
+			case <-tracker.done:
+			case <-time.After(time.Second):
+				t.Fatal("tracker did not finish after dropping all nodes")
+			}
+			latency, err := tracker.waitForLatency()
+			assert.NoError(t, err)
+			assert.Equal(t, time.Duration(0), latency)
+		})
+	})
+
+	t.Run("dropping while polling keeps already observed latencies and does not wait for dropped nodes", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			nodes := []string{"n1", "n2", "n3"}
+			// n1 propagates in 10ms, n2 propagates in 50ms (then gets dropped), n3 never propagates (and gets dropped).
+			nodeLister := NewTestCustomNodeLister(nodes, map[string]time.Duration{
+				"n1": 10 * time.Millisecond,
+				"n2": 50 * time.Millisecond,
+			})
+			tracker := newUpdateLatencyTracker(nodeLister, len(nodes))
+			startTime := time.Now()
+			for _, name := range nodes {
+				tracker.recordStartTime(name, startTime)
+			}
+			go tracker.start(t.Context())
+
+			// Let the tracker poll long enough to observe both n1 (10ms) and n2 (50ms) before dropping n2 and n3.
+			time.Sleep(80 * time.Millisecond)
+			tracker.stopWaitingForNodes([]string{"n2", "n3"})
+
+			latency, err := tracker.waitForLatency()
+			assert.NoError(t, err)
+			assert.Equal(t, 50*time.Millisecond, latency)
+		})
 	})
 }
 
@@ -230,7 +258,7 @@ func TestUpdateLatencyTrackerNilReceiver(t *testing.T) {
 	var tracker *updateLatencyTracker
 	assert.NotPanics(t, func() {
 		tracker.recordStartTime("n1", time.Now())
-		tracker.abort()
+		tracker.stopWaitingForNodes([]string{"n1"})
 	})
 }
 
@@ -264,7 +292,7 @@ func TestNodeDelayAfterTaintCalculator(t *testing.T) {
 		nodes      []string
 		// if a node from `nodes` has no entry in `nodeTaintAfterDuration`, waiting for the node's taint will time out.
 		nodeTaintAfterDuration map[string]time.Duration
-		abort                  bool
+		dropAllWithoutCompute  bool
 		wantDelay              time.Duration
 	}
 
@@ -325,7 +353,7 @@ func TestNodeDelayAfterTaintCalculator(t *testing.T) {
 			},
 		},
 		{
-			name:                "aborted loop does not affect subsequent loops",
+			name:                "loop where all nodes are dropped without calling ComputeDelay does not affect subsequent loops",
 			dynamicDelayEnabled: true,
 			loops: []loop{
 				{
@@ -334,10 +362,10 @@ func TestNodeDelayAfterTaintCalculator(t *testing.T) {
 					wantDelay:              200 * time.Millisecond,
 				},
 				{
-					// n2 would take 200ms (raising delay to 400ms), but the tracker is aborted without calling computeDelay.
+					// n2 would take 200ms (raising delay to 400ms), but is dropped without calling computeDelay.
 					nodes:                  []string{"n2"},
 					nodeTaintAfterDuration: map[string]time.Duration{"n2": 200 * time.Millisecond},
-					abort:                  true,
+					dropAllWithoutCompute:  true,
 				},
 				{
 					waitBefore:             time.Second,
@@ -407,12 +435,12 @@ func TestNodeDelayAfterTaintCalculator(t *testing.T) {
 					for _, name := range l.nodes {
 						tracker.recordStartTime(name, startTime)
 					}
-					if l.abort {
-						tracker.abort()
+					if l.dropAllWithoutCompute {
+						tracker.stopWaitingForNodes(l.nodes)
 						select {
 						case <-tracker.done:
 						case <-time.After(time.Second):
-							t.Fatalf("loop %d: tracker did not finish after abort", i)
+							t.Fatalf("loop %d: tracker did not finish after stopWaitingForNodes", i)
 						}
 						continue
 					}

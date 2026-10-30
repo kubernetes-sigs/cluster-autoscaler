@@ -18,8 +18,8 @@ package actuation
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -51,7 +51,11 @@ type nodeTaintStartTime struct {
 type nodeDelayAfterTaintCalculator struct {
 	staticNodeDeleteDelayAfterTaint time.Duration
 	dynamicDelayEnabled             bool
-	pastLatencies                   *expiring.List
+	// pastLatenciesMu prevents a data race if two loops' background goroutines finish waitForLatency() around the same time.
+	// Since ComputeDelay runs in a background go func(), a slow/timed-out ComputeDelay from loop N can still be in flight
+	// when loop N + 1 starts another scale-down batch and calls ComputeDelay.
+	pastLatenciesMu sync.Mutex
+	pastLatencies   *expiring.List
 }
 
 // updateLatencyTracker estimates the end-to-end propagation latency of ToBeDeletedTaint from CA
@@ -62,13 +66,12 @@ type nodeDelayAfterTaintCalculator struct {
 // cover watch delivery to informers.
 // Used by `Actuator`.
 type updateLatencyTracker struct {
-	// Closing the stopChan will abort the latency tracking and maxLatency calculation.
-	stopChan      chan struct{}
-	closeStopChan sync.Once
-	// Sends node tainting start timestamps to the tracker
+	// Sends node tainting start timestamps to the tracker.
 	startTimeChan      chan nodeTaintStartTime
 	closeStartTimeChan sync.Once
-	// nodesInProgress records when each node's taint request began
+	// droppedNodes holds nodes whose taints were rolled back and should not be awaited.
+	droppedNodes []string
+	// nodesInProgress records when each node's taint request began.
 	nodesInProgress map[string]time.Time
 	// maxLatency is the maximum observed taint propagation latency. Is returned from waitForLatency().
 	maxLatency time.Duration
@@ -106,11 +109,10 @@ func (c *nodeDelayAfterTaintCalculator) startLatencyTracker(ctx context.Context,
 //
 // If DynamicNodeDeleteDelayAfterTaintEnabled is false, computeDelay returns the static NodeDeleteDelayAfterTaint.
 // If DynamicNodeDeleteDelayAfterTaintEnabled is true, latencyTracker cannot be nil and computeDelay blocks until latency tracker observes taint
-// propagation latency for all nodes or times out, and returns 2 times the maximum latency observed during the last hour.
+// propagation latency for all non-dropped nodes or times out, and returns 2 times the maximum latency observed during the last hour.
 // If latency tracker returns zero as observed latency and pastLatencies are empty, returns static NodeDeleteDelayAfterTaint.
 //
 // After this method is called, latencyTracker.recordStartTime() cannot be called anymore.
-// If latencyTracker.abort() was called, computeDelay() shouldn't be called with this tracker as an argument.
 // Used by Actuator.
 func (c *nodeDelayAfterTaintCalculator) computeDelay(ctx context.Context, latencyTracker *updateLatencyTracker) time.Duration {
 	if !c.dynamicDelayEnabled {
@@ -124,6 +126,8 @@ func (c *nodeDelayAfterTaintCalculator) computeDelay(ctx context.Context, latenc
 			klog.FromContext(ctx).Error(err, "Failed to measure taint latency, using max latency")
 		}
 	}
+	c.pastLatenciesMu.Lock()
+	defer c.pastLatenciesMu.Unlock()
 	if latency > 0 {
 		c.pastLatencies.RegisterElement(latency)
 	}
@@ -148,7 +152,6 @@ func newUpdateLatencyTracker(nodeLister kubernetes.NodeLister, expectedNodeCount
 		nodesInProgress: make(map[string]time.Time, expectedNodeCount),
 		done:            make(chan struct{}),
 		startTimeChan:   make(chan nodeTaintStartTime, expectedNodeCount),
-		stopChan:        make(chan struct{}),
 		nodeLister:      nodeLister,
 	}
 }
@@ -173,9 +176,6 @@ func (u *updateLatencyTracker) start(ctx context.Context) {
 		case <-ctx.Done():
 			u.err = ctx.Err()
 			return
-		case <-u.stopChan:
-			u.err = errors.New("latency tracking aborted")
-			return
 		case <-ticker.C:
 			u.updateFinishTime(ctx)
 		}
@@ -192,31 +192,36 @@ func (u *updateLatencyTracker) recordStartTime(nodeName string, startTime time.T
 	u.startTimeChan <- nodeTaintStartTime{nodeName, startTime}
 }
 
-// abort is used for cancelling the tracker when computeDelay() will not be called.
+// stopWaitingForNodes stops accepting new nodes, removes the given nodes from tracking,
+// and transitions the tracker to awaiting taint propagation for the remaining nodes.
+// If no nodes remain in progress, the tracker finishes immediately.
+// After stopWaitingForNodes is called, recordStartTime cannot be called anymore.
 // Can be called with a nil receiver.
 // Used by Actuator.
-func (u *updateLatencyTracker) abort() {
+func (u *updateLatencyTracker) stopWaitingForNodes(nodeNames []string) {
 	if u == nil {
 		return
 	}
-	u.closeStopChan.Do(func() {
-		close(u.stopChan)
+	u.closeStartTimeChan.Do(func() {
+		u.droppedNodes = slices.Clone(nodeNames)
+		close(u.startTimeChan)
 	})
 }
 
-// waitForLatency blocks until all node taints are observed in the informer or a timeout elapses.
+// waitForLatency blocks until all non-dropped node taints are observed in the informer or a timeout elapses.
 // After waitForLatency was called, recordStartTime cannot be called anymore.
 // Returns maximum of the observed node taint propagation latency and error that prevented the tracker from processing all nodes.
 // If a tracker times out before all node taints are propagated to the informer, the max latency observed before timeout is returned, together with a timeout error.
 func (u *updateLatencyTracker) waitForLatency() (time.Duration, error) {
-	u.closeStartTimeChan.Do(func() {
-		close(u.startTimeChan)
-	})
+	u.stopWaitingForNodes(nil)
 	<-u.done
 	return u.maxLatency, u.err
 }
 
 func (u *updateLatencyTracker) await(ctx context.Context, ticker *time.Ticker) error {
+	for _, nodeName := range u.droppedNodes {
+		delete(u.nodesInProgress, nodeName)
+	}
 	// This is required in case recordStartTime + waitForLatency() happens faster than a single pollInterval in start() elapses.
 	u.updateFinishTime(ctx)
 
