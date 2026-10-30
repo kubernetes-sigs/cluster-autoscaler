@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/pdb"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/planner"
 	scaledownstatus "sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/status"
+	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/strategy"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaleup"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaleup/orchestrator"
 	core_utils "sigs.k8s.io/cluster-autoscaler/pkg/core/utils"
@@ -169,7 +170,8 @@ func NewStaticAutoscaler(
 	quotasTrackerOptions resourcequotas.TrackerOptions,
 	minQuotasTrackerOptions resourcequotas.TrackerOptions,
 	csiProvider *csinodeprovider.Provider,
-	capacityBufferPodsRegistry *fakepods.Registry) *StaticAutoscaler {
+	capacityBufferPodsRegistry *fakepods.Registry,
+	scaleDownStrategy *strategy.Strategy) *StaticAutoscaler {
 
 	klog.V(4).Infof("Creating new static autoscaler with opts: %v", opts)
 
@@ -215,7 +217,7 @@ func NewStaticAutoscaler(
 	quotasTrackerFactory := resourcequotas.NewTrackerFactory(quotasTrackerOptions)
 	minQuotasTrackerFactory := resourcequotas.NewTrackerFactory(minQuotasTrackerOptions)
 
-	scaleDownPlanner := planner.New(autoscalingCtx, processors, deleteOptions, drainabilityRules, minQuotasTrackerFactory)
+	scaleDownPlanner := planner.New(autoscalingCtx, processors, deleteOptions, drainabilityRules, minQuotasTrackerFactory, scaleDownStrategy)
 	processorCallbacks.scaleDownPlanner = scaleDownPlanner
 
 	ndt := deletiontracker.NewNodeDeletionTracker(0 * time.Second)
