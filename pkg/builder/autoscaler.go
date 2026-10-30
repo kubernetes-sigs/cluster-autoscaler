@@ -231,7 +231,11 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 			opts.Processors.ScaleUpStatusProcessor = status.NewCombinedScaleUpStatusProcessor([]status.ScaleUpStatusProcessor{
 				cbprocessor.NewFakePodsScaleUpStatusProcessor(buffersPodsRegistry), opts.Processors.ScaleUpStatusProcessor})
 			if opts.CapacityBufferReadyReplicasEnabled {
-				autoscalingStatusProcessors = append(autoscalingStatusProcessors, cbprocessor.NewCapacityBufferAutoscalingStatusProcessor(b.manager.GetClient(), buffersPodsRegistry))
+				readyReplicasController := cbctrl.NewReadyReplicasController(b.manager.GetClient())
+				if err := readyReplicasController.SetupWithManager(b.manager); err != nil {
+					return nil, nil, fmt.Errorf("failed to setup CapacityBuffer ReadyReplicas controller: %w", err)
+				}
+				autoscalingStatusProcessors = append(autoscalingStatusProcessors, cbprocessor.NewCapacityBufferAutoscalingStatusProcessor(readyReplicasController, buffersPodsRegistry))
 			}
 		}
 	}
