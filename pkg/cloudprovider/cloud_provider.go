@@ -110,6 +110,15 @@ var ErrAlreadyExist = errors.NewAutoscalerError(errors.InternalError, "Already e
 // configuration that is not supported by cloudprovider.
 var ErrIllegalConfiguration = errors.NewAutoscalerError(errors.InternalError, "Configuration not allowed by cloud provider")
 
+// ErrAtomicIncreaseRejected can be wrapped by an error returned from AtomicIncreaseSize to report
+// that the cloud provider rejected the whole increase without changing the node group, for
+// example because it lacks capacity for the entire delta. Cloud providers that don't implement
+// AtomicIncreaseSize can wrap it in an error returned from IncreaseSize, which Cluster Autoscaler
+// calls instead, under the same conditions. Only use it when the outcome is certain: Cluster
+// Autoscaler may then immediately request a smaller increase of the same group. After any other
+// error, it only requests a smaller increase in a later iteration.
+var ErrAtomicIncreaseRejected = errors.NewAutoscalerError(errors.CloudProviderError, "atomic increase rejected without changing the node group")
+
 // NodeGroup contains configuration info and functions to control a set
 // of nodes that have the same capacity and set of labels.
 type NodeGroup interface {
@@ -127,7 +136,9 @@ type NodeGroup interface {
 
 	// IncreaseSize increases the size of the node group. To delete a node you need
 	// to explicitly name it and use DeleteNode. This function should wait until
-	// node group size is updated. Implementation required.
+	// node group size is updated. Implementation required. If AtomicIncreaseSize isn't
+	// implemented and the increase was rejected without changing the node group, the
+	// returned error may wrap ErrAtomicIncreaseRejected.
 	IncreaseSize(ctx context.Context, delta int) error
 
 	// AtomicIncreaseSize tries to increase the size of the node group atomically.
@@ -135,7 +146,8 @@ type NodeGroup interface {
 	// Implementation is optional. Implementation of this method generally requires external cloud provider support
 	// for atomically requesting multiple instances. If implemented, CA will take advantage of the method while scaling up
 	// BestEffortAtomicScaleUp ProvisioningClass, guaranteeing that all instances required for such a
-	// ProvisioningRequest are provisioned atomically.
+	// ProvisioningRequest are provisioned atomically. If the increase was rejected without changing the
+	// node group, the returned error should wrap ErrAtomicIncreaseRejected.
 	AtomicIncreaseSize(ctx context.Context, delta int) error
 
 	// DeleteNodes deletes nodes from this node group. Error is returned either on
