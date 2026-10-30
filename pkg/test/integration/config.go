@@ -126,6 +126,14 @@ func WithCSINodeAwareScheduling() AutoscalingOptionOverride {
 	}
 }
 
+// WithPodGroupSupport enables or disables PodGroup support (nodes hosting pods of gang-scheduled
+// PodGroups are not scaled down).
+func WithPodGroupSupport(enabled bool) AutoscalingOptionOverride {
+	return func(o *config.AutoscalingOptions) {
+		o.PodGroupSupportEnabled = enabled
+	}
+}
+
 // WithMaxNodeStartupTime sets how long a registered but unready Node is still treated as starting up before it's considered unready.
 func WithMaxNodeStartupTime(d time.Duration) AutoscalingOptionOverride {
 	return func(o *config.AutoscalingOptions) {
