@@ -27,6 +27,7 @@ import (
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/daemonset"
 	caerror "sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
@@ -78,6 +79,7 @@ func (p *MixedTemplateNodeInfoProvider) Process(ctx context.Context, autoscaling
 	logger := klog.FromContext(ctx)
 	result := make(map[string]*framework.NodeInfo)
 	seenGroups := make(map[string]bool)
+	compiledDaemonSets := daemonset.CompileDaemonSets(daemonsets)
 
 	// sort nodes into those good and bad candidates for templates. the bad candidates will be processed
 	// at the end of this function as a last resort for a node info template.
@@ -107,7 +109,7 @@ func (p *MixedTemplateNodeInfoProvider) Process(ctx context.Context, autoscaling
 			if err != nil {
 				return false, "", caerror.NewAutoscalerErrorf(caerror.InternalError, "error while retrieving node %s from cluster snapshot - this shouldn't happen: %v", node.Name, err)
 			}
-			templateNodeInfo, caErr := simulator.SanitizedTemplateNodeInfoFromNodeInfo(ctx, nodeInfo, id, daemonsets, p.forceDaemonSets, taintConfig)
+			templateNodeInfo, caErr := simulator.SanitizedTemplateNodeInfoFromNodeInfo(ctx, nodeInfo, id, compiledDaemonSets, p.forceDaemonSets, taintConfig)
 			if caErr != nil {
 				return false, "", caErr
 			}
@@ -148,7 +150,7 @@ func (p *MixedTemplateNodeInfoProvider) Process(ctx context.Context, autoscaling
 
 		// No good template, trying to generate one. This is called only if there are no
 		// working nodes in the node groups. By default CA tries to use a real-world example.
-		nodeInfo, err := simulator.SanitizedTemplateNodeInfoFromNodeGroup(ctx, nodeGroup, daemonsets, taintConfig)
+		nodeInfo, err := simulator.SanitizedTemplateNodeInfoFromNodeGroup(ctx, nodeGroup, compiledDaemonSets, taintConfig)
 		if err != nil {
 			if !errors.Is(err, cloudprovider.ErrNotImplemented) {
 				logger.Error(err, "Unable to build proper template node for node group", "nodeGroupId", id)

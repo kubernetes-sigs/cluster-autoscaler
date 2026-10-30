@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"math/rand"
 
-	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,7 +42,7 @@ type nodeGroupTemplateNodeInfoGetter interface {
 
 // SanitizedTemplateNodeInfoFromNodeGroup returns a template NodeInfo object based on NodeGroup.TemplateNodeInfo(). The template is sanitized, and only
 // contains the pods that should appear on a new Node from the same node group (e.g. DaemonSet pods).
-func SanitizedTemplateNodeInfoFromNodeGroup(ctx context.Context, nodeGroup nodeGroupTemplateNodeInfoGetter, daemonsets []*appsv1.DaemonSet, taintConfig taints.TaintConfig) (*framework.NodeInfo, errors.AutoscalerError) {
+func SanitizedTemplateNodeInfoFromNodeGroup(ctx context.Context, nodeGroup nodeGroupTemplateNodeInfoGetter, daemonsets []*daemonset.CompiledDaemonSet, taintConfig taints.TaintConfig) (*framework.NodeInfo, errors.AutoscalerError) {
 	// TODO(DRA): Figure out how to handle TemplateNodeInfo() returning DaemonSet Pods using DRA. Currently, things only work correctly if such pods are
 	// already allocated by TemplateNodeInfo(). It might be better for TemplateNodeInfo() to return unallocated claims, and to run scheduler predicates and
 	// compute the allocations here.
@@ -61,7 +60,7 @@ func SanitizedTemplateNodeInfoFromNodeGroup(ctx context.Context, nodeGroup nodeG
 
 // SanitizedTemplateNodeInfoFromNodeInfo returns a template NodeInfo object based on a real example NodeInfo from the cluster. The template is sanitized, and only
 // contains the pods that should appear on a new Node from the same node group (e.g. DaemonSet pods).
-func SanitizedTemplateNodeInfoFromNodeInfo(ctx context.Context, example *framework.NodeInfo, nodeGroupId string, daemonsets []*appsv1.DaemonSet, forceDaemonSets bool, taintConfig taints.TaintConfig) (*framework.NodeInfo, errors.AutoscalerError) {
+func SanitizedTemplateNodeInfoFromNodeInfo(ctx context.Context, example *framework.NodeInfo, nodeGroupId string, daemonsets []*daemonset.CompiledDaemonSet, forceDaemonSets bool, taintConfig taints.TaintConfig) (*framework.NodeInfo, errors.AutoscalerError) {
 	randSuffix := fmt.Sprintf("%d", rand.Int63())
 	newNodeNameBase := fmt.Sprintf("template-node-for-%s", nodeGroupId)
 
@@ -71,10 +70,7 @@ func SanitizedTemplateNodeInfoFromNodeInfo(ctx context.Context, example *framewo
 	if err != nil {
 		return nil, errors.ToAutoscalerError(errors.InternalError, err)
 	}
-	expectedPods, err := podsExpectedOnFreshNode(sanitizedExample, daemonsets, forceDaemonSets, randSuffix)
-	if err != nil {
-		return nil, errors.ToAutoscalerError(errors.InternalError, err)
-	}
+	expectedPods := podsExpectedOnFreshNode(sanitizedExample, daemonsets, forceDaemonSets, randSuffix)
 	templateNodeInfo := framework.NewNodeInfo(sanitizedExample.Node(), sanitizedExample.LocalResourceSlices, expectedPods...)
 
 	// Add back sanitized CSINode info which was kinda discarded when we created templateNodeInfo object
@@ -169,7 +165,7 @@ func createSanitizedPod(pod *apiv1.Pod, nodeName, nameSuffix string) *apiv1.Pod 
 	return sanitizedPod
 }
 
-func podsExpectedOnFreshNode(sanitizedExampleNodeInfo *framework.NodeInfo, daemonsets []*appsv1.DaemonSet, forceDaemonSets bool, nameSuffix string) ([]*framework.PodInfo, error) {
+func podsExpectedOnFreshNode(sanitizedExampleNodeInfo *framework.NodeInfo, daemonsets []*daemonset.CompiledDaemonSet, forceDaemonSets bool, nameSuffix string) []*framework.PodInfo {
 	var result []*framework.PodInfo
 	runningDS := make(map[types.UID]bool)
 	for _, pod := range sanitizedExampleNodeInfo.Pods() {
@@ -191,34 +187,22 @@ func podsExpectedOnFreshNode(sanitizedExampleNodeInfo *framework.NodeInfo, daemo
 	// TODO(DRA): Figure out how to make this work for DS pods using DRA. Currently such pods would get force-added to the
 	// ClusterSnapshot, but the ResourceClaims reflecting their DRA usage on the Node wouldn't. So CA would be overestimating
 	// available DRA resources on the Node.
-	var pendingDS []*appsv1.DaemonSet
+	var pendingDS []*daemonset.CompiledDaemonSet
 	for _, ds := range daemonsets {
-		if !runningDS[ds.UID] {
+		if !runningDS[ds.UID()] {
 			pendingDS = append(pendingDS, ds)
 		}
 	}
-	// The provided nodeInfo has to have taints properly sanitized, or this won't work correctly.
-	daemonPods, err := daemonset.GetDaemonSetPodsForNode(sanitizedExampleNodeInfo, pendingDS)
-	if err != nil {
-		return nil, err
-	}
-	for _, pod := range daemonPods {
-		if !forceDaemonSets && !isPreemptingSystemNodeCritical(pod) {
+	for _, ds := range pendingDS {
+		if !forceDaemonSets && !ds.IsPreemptingSystemNodeCritical() {
 			continue
 		}
-		// There's technically no need to sanitize these pods since they're created from scratch, but
-		// it's nice to have the same suffix for all names in one sanitized NodeInfo when debugging.
-		result = append(result, framework.NewPodInfo(createSanitizedPod(pod.Pod, sanitizedExampleNodeInfo.Node().Name, nameSuffix), nil))
+		// The provided nodeInfo has to have taints properly sanitized, or this won't work correctly.
+		if ds.ShouldRunOnNode(sanitizedExampleNodeInfo.Node()) {
+			// There's technically no need to sanitize these pods since they're created from scratch, but
+			// it's nice to have the same suffix for all names in one sanitized NodeInfo when debugging.
+			result = append(result, framework.NewPodInfo(createSanitizedPod(ds.TemplatePod(), sanitizedExampleNodeInfo.Node().Name, nameSuffix), nil))
+		}
 	}
-	return result, nil
-}
-
-func isPreemptingSystemNodeCritical(pod *framework.PodInfo) bool {
-	if pod.Spec.PriorityClassName != labels.SystemNodeCriticalLabel {
-		return false
-	}
-	if pod.Spec.PreemptionPolicy != nil && *pod.Spec.PreemptionPolicy != apiv1.PreemptLowerPriority {
-		return false
-	}
-	return true
+	return result
 }

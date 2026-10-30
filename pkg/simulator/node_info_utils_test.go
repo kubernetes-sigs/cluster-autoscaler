@@ -26,6 +26,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
@@ -40,6 +42,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	drautils "sigs.k8s.io/cluster-autoscaler/pkg/simulator/dynamicresources/utils"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/daemonset"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/labels"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
@@ -147,7 +150,7 @@ func TestSanitizedTemplateNodeInfoFromNodeGroup(t *testing.T) {
 		},
 	} {
 		t.Run(tc.testName, func(t *testing.T) {
-			templateNodeInfo, err := SanitizedTemplateNodeInfoFromNodeGroup(context.Background(), tc.nodeGroup, testDaemonSets, taints.TaintConfig{})
+			templateNodeInfo, err := SanitizedTemplateNodeInfoFromNodeGroup(context.Background(), tc.nodeGroup, daemonset.CompileDaemonSets(testDaemonSets), taints.TaintConfig{})
 			if tc.wantCpError {
 				if err == nil || err.Type() != errors.CloudProviderError {
 					t.Fatalf("TemplateNodeInfoFromNodeGroupTemplate(): want CloudProviderError, but got: %v (%T)", err, err)
@@ -366,7 +369,7 @@ func TestSanitizedTemplateNodeInfoFromNodeInfo(t *testing.T) {
 				exampleNodeInfo.SetCSINode(tc.csiNode)
 			}
 
-			templateNodeInfo, err := SanitizedTemplateNodeInfoFromNodeInfo(context.Background(), exampleNodeInfo, nodeGroupId, tc.daemonSets, tc.forceDS, taints.TaintConfig{})
+			templateNodeInfo, err := SanitizedTemplateNodeInfoFromNodeInfo(context.Background(), exampleNodeInfo, nodeGroupId, daemonset.CompileDaemonSets(tc.daemonSets), tc.forceDS, taints.TaintConfig{})
 			if tc.wantError {
 				if err == nil {
 					t.Fatal("TemplateNodeInfoFromExampleNodeInfo(): want error, but got nil")
@@ -891,4 +894,26 @@ func (f *fakeNodeGroup) Id() string {
 
 func (f *fakeNodeGroup) TemplateNodeInfo(ctx context.Context) (*framework.NodeInfo, error) {
 	return f.templateNodeInfoResult, f.templateNodeInfoErr
+}
+
+func TestPodsExpectedOnFreshNodeReturnsIndependentPods(t *testing.T) {
+	compiled := daemonset.CompileDaemonSets([]*appsv1.DaemonSet{ds1})
+	nodeA := framework.NewNodeInfo(BuildTestNode("node-a", 1000, 1000), nil)
+	nodeB := framework.NewNodeInfo(BuildTestNode("node-b", 1000, 1000), nil)
+
+	podsA := podsExpectedOnFreshNode(nodeA, compiled, true, "a")
+	podsB := podsExpectedOnFreshNode(nodeB, compiled, true, "b")
+	require.Len(t, podsA, 1)
+	require.Len(t, podsB, 1)
+
+	assert.Equal(t, "node-a", podsA[0].Spec.NodeName)
+	assert.Equal(t, "node-b", podsB[0].Spec.NodeName)
+	assert.NotEqual(t, podsA[0].UID, podsB[0].UID)
+	assert.NotEqual(t, podsA[0].Name, podsB[0].Name)
+
+	// Every DaemonSet pod gets default tolerations, so the first one always exists.
+	originalTolerationKey := podsB[0].Spec.Tolerations[0].Key
+	podsA[0].Spec.Tolerations[0].Key = "changed"
+	assert.Equal(t, originalTolerationKey, podsB[0].Spec.Tolerations[0].Key)
+	assert.Equal(t, originalTolerationKey, compiled[0].TemplatePod().Spec.Tolerations[0].Key)
 }

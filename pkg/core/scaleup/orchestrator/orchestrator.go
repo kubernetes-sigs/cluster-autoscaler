@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/daemonset"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/klogx"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
@@ -488,9 +489,10 @@ func (o *ScaleUpOrchestrator) processCreateNodeGroupResult(
 	nodeInfos[newId] = nodeInfos[initialOptionId]
 	schedulablePodGroups[newId] = schedulablePodGroups[initialOptionId]
 
+	compiledDaemonSets := daemonset.CompileDaemonSets(daemonSets)
 	// If possible, replace candidate node-info with node info based on created node group.
 	// The latter should be more in line with nodes which will be created by node group.
-	mainCreatedNodeInfo, aErr := simulator.SanitizedTemplateNodeInfoFromNodeGroup(ctx, result.MainCreatedNodeGroup, daemonSets, o.taintConfig)
+	mainCreatedNodeInfo, aErr := simulator.SanitizedTemplateNodeInfoFromNodeGroup(ctx, result.MainCreatedNodeGroup, compiledDaemonSets, o.taintConfig)
 	if aErr == nil {
 		nodeInfos[newId] = mainCreatedNodeInfo
 	} else {
@@ -515,7 +517,7 @@ func (o *ScaleUpOrchestrator) processCreateNodeGroupResult(
 	}
 
 	for _, nodeGroup := range result.ExtraCreatedNodeGroups {
-		nodeInfo, aErr := simulator.SanitizedTemplateNodeInfoFromNodeGroup(ctx, nodeGroup, daemonSets, o.taintConfig)
+		nodeInfo, aErr := simulator.SanitizedTemplateNodeInfoFromNodeGroup(ctx, nodeGroup, compiledDaemonSets, o.taintConfig)
 		if aErr != nil {
 			logger.Info("Cannot build node info for newly created extra node group; balancing similar node groups will not work", "nodeGroupId", nodeGroup.Id(), "err", aErr)
 			continue
