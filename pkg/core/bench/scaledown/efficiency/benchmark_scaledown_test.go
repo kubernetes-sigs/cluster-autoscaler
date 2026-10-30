@@ -162,16 +162,15 @@ func (scenario scaleDownScenario) run(b *testing.B) {
 		empty, needDrain := sdDeps.Planner.NodesToDelete(context.Background(), currentTime)
 
 		budgetProcessor := budgets.NewScaleDownBudgetProcessor(sdDeps.AutoscalingCtx)
-		emptyGrouped, drainGrouped := budgetProcessor.CropNodes(context.Background(), sdDeps.Actuator.actuationStatus, empty, needDrain)
-
+		croppedGroups := budgetProcessor.CropNodes(context.Background(), sdDeps.Actuator.actuationStatus, empty, needDrain)
 		empty = []*apiv1.Node{}
-		for _, group := range emptyGrouped {
-			empty = append(empty, group.Nodes...)
-		}
-
 		needDrain = []*apiv1.Node{}
-		for _, group := range drainGrouped {
-			needDrain = append(needDrain, group.Nodes...)
+		for _, group := range croppedGroups {
+			if group.Drain {
+				needDrain = append(needDrain, group.Nodes...)
+			} else {
+				empty = append(empty, group.Nodes...)
+			}
 		}
 
 		// No more nodes to delete, final state reached.
