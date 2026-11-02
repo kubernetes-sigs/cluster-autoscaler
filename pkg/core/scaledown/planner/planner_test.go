@@ -1325,33 +1325,18 @@ func (d *fakeScoringDimension) Score(nodeInfo *framework.NodeInfo) (float64, err
 	return d.scores[nodeInfo.Node().Name], nil
 }
 
-// newStrategyTestPlanner builds a Planner over the given nodes and pods with all nodes eligible for scale down.
+// newStrategyTestPlanner builds a Planner whose cluster snapshot contains the given nodes and pods
 func newStrategyTestPlanner(t *testing.T, nodes []*apiv1.Node, pods []*apiv1.Pod, sdStrategy *strategy.Strategy) *Planner {
 	t.Helper()
-	rsLister, err := kube_util.NewTestReplicaSetLister(generateReplicaSets("rs", 5))
-	assert.NoError(t, err)
-	registry := kube_util.NewListerRegistry(nil, nil, nil, nil, nil, nil, nil, rsLister, nil)
+	registry := kube_util.NewListerRegistry(nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	provider := testprovider.NewTestCloudProviderBuilder().Build()
-	provider.AddNodeGroup("ng1", 0, 0, 0)
-	eligible := make(map[string]bool)
-	for _, node := range nodes {
-		provider.AddNode("ng1", node)
-		eligible[node.Name] = true
-	}
-	autoscalingOpts := config.AutoscalingOptions{
-		NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
-			ScaleDownUnneededTime: 10 * time.Minute,
-		},
-		ScaleDownSimulationTimeout: 10 * time.Second,
-		MaxScaleDownParallelism:    10,
-	}
+	autoscalingOpts := config.AutoscalingOptions{}
 	processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(autoscalingOpts)
 	autoscalingCtx, err := NewScaleTestAutoscalingContext(autoscalingOpts, &fake.Clientset{}, registry, provider, nil, nil, templateNodeInfoRegistry)
 	assert.NoError(t, err)
 	clustersnapshot.InitializeClusterSnapshotOrDie(t, autoscalingCtx.ClusterSnapshot, nodes, pods)
 	factory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{CustomResourcesProcessor: processors.CustomResourcesProcessor, QuotaProvider: resourcequotas.NewCloudMinProvider(provider)})
 	p := New(&autoscalingCtx, processors, options.NodeDeleteOptions{}, nil, factory, sdStrategy)
-	p.eligibilityChecker = &fakeEligibilityChecker{eligible: eligible}
 	return p
 }
 
@@ -1383,8 +1368,8 @@ func TestRankNodes(t *testing.T) {
 		{
 			name:       "empty strategy keeps candidate order",
 			sdStrategy: emptyStrategy,
-			input:      []string{"n1", "n2", "n3"},
-			want:       []string{"n1", "n2", "n3"},
+			input:      []string{"n2", "n3", "n1"},
+			want:       []string{"n2", "n3", "n1"},
 		},
 		{
 			name:       "lowest utilization ranked first",
@@ -1410,8 +1395,8 @@ func TestRankNodes(t *testing.T) {
 				Dimensions: []strategy.ScoringDimension{&fakeScoringDimension{name: "Failing", err: fmt.Errorf("a scoring error occurred")}},
 				Weights:    map[string]float64{"Failing": 1},
 			},
-			input: []string{"n1", "n2", "n3"},
-			want:  []string{"n1", "n2", "n3"},
+			input: []string{"n2", "n1", "n3"},
+			want:  []string{"n2", "n1", "n3"},
 		},
 		{
 			name: "out of range score returns original order",

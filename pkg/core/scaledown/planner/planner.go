@@ -292,6 +292,9 @@ func (p *Planner) injectPods(pods []*apiv1.Pod) error {
 // rankNodes scores, normalizes, weights, totals and sorts candidates based on provided Strategy
 // If any error occurs, original unsorted unneededNodes slice is returned.
 func (p *Planner) rankNodes(unneededNodes []string) []string {
+	if p.scaleDownStrategy == nil || len(p.scaleDownStrategy.Dimensions) == 0 {
+		return unneededNodes
+	}
 	rs := strategy.NewRankingSession(p.scaleDownStrategy)
 	for _, nodeName := range unneededNodes {
 		nodeInfo, err := p.autoscalingCtx.ClusterSnapshot.GetNodeInfo(nodeName)
@@ -336,9 +339,8 @@ func (p *Planner) categorizeNodes(ctx context.Context, podDestinations map[strin
 	timer := time.NewTimer(p.autoscalingCtx.ScaleDownSimulationTimeout)
 	var skippedNodes []string
 
-	if p.scaleDownStrategy != nil && len(p.scaleDownStrategy.Dimensions) > 0 {
-		currentlyUnneededNodeNames = p.rankNodes(currentlyUnneededNodeNames)
-	}
+	currentlyUnneededNodeNames = p.rankNodes(currentlyUnneededNodeNames)
+
 	for i, node := range currentlyUnneededNodeNames {
 		if timedOut(timer) {
 			skippedNodes = currentlyUnneededNodeNames[i:]

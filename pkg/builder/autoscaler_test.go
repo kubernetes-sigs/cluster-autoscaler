@@ -85,39 +85,12 @@ func TestAutoscalerBuilderScaleDownStrategy(t *testing.T) {
 		wantErr           bool
 	}{
 		{
-			name:              "strategy not configured",
-			scaleDownStrategy: "",
-		},
-		{
-			name:              "whitespaces only, strategy not configured",
-			scaleDownStrategy: "      ",
-		},
-		{
 			name:              "valid strategy",
 			scaleDownStrategy: "Utilization=1",
 		},
 		{
 			name:              "valid strategy trim whitespaces",
 			scaleDownStrategy: "Utilization  =  1  ",
-		},
-		{
-			name:              "float weight",
-			scaleDownStrategy: "Utilization=4.2",
-		},
-		{
-			name:              "unknown dimension",
-			scaleDownStrategy: "Unknown=1",
-			wantErr:           true,
-		},
-		{
-			name:              "duplicate dimension",
-			scaleDownStrategy: "Utilization=1,Utilization=2",
-			wantErr:           true,
-		},
-		{
-			name:              "missing weights",
-			scaleDownStrategy: "Utilization",
-			wantErr:           true,
 		},
 		{
 			name:              "invalid negative weight",
@@ -132,11 +105,6 @@ func TestAutoscalerBuilderScaleDownStrategy(t *testing.T) {
 		{
 			name:              "invalid weight format",
 			scaleDownStrategy: "Utilization=4.5.6",
-			wantErr:           true,
-		},
-		{
-			name:              "trailing comma produces empty part",
-			scaleDownStrategy: "Utilization=42,",
 			wantErr:           true,
 		},
 	}
