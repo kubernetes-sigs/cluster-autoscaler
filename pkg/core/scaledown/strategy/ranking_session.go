@@ -17,9 +17,10 @@ limitations under the License.
 package strategy
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
-	"sort"
+	"strings"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 )
@@ -83,9 +84,10 @@ func (rs *RankingSession) Normalize() error {
 
 // WeightTotal applies configured weights and sums the total score for each node.
 func (rs *RankingSession) WeightTotal() error {
-	for dimName, scoresList := range rs.DimensionScores {
+	for _, dim := range rs.strategy.Dimensions {
+		dimName := dim.Name()
 		weight := rs.strategy.Weights[dimName]
-		for _, dimensionScore := range scoresList {
+		for _, dimensionScore := range rs.DimensionScores[dimName] {
 			rank, ok := rs.Rankings[dimensionScore.NodeName]
 			if !ok {
 				rank = &NodeRank{
@@ -109,22 +111,20 @@ func (rs *RankingSession) WeightTotal() error {
 }
 
 // Sort returns a sorted copy of unneeded node names according to their TotalScore in descending order.
+// Ties are broken by node name, so the result is deterministic regardless of input order.
 func (rs *RankingSession) Sort(nodeNames []string) []string {
+	totalScore := func(nodeName string) float64 {
+		if rank := rs.Rankings[nodeName]; rank != nil {
+			return rank.TotalScore
+		}
+		return 0
+	}
 	sorted := slices.Clone(nodeNames)
-	sort.Slice(sorted, func(i, j int) bool {
-		rankI := rs.Rankings[sorted[i]]
-		rankJ := rs.Rankings[sorted[j]]
-		var totalI, totalJ float64
-		if rankI != nil {
-			totalI = rankI.TotalScore
-		}
-		if rankJ != nil {
-			totalJ = rankJ.TotalScore
-		}
-		if totalI == totalJ {
-			return sorted[i] < sorted[j]
-		}
-		return totalI > totalJ
+	slices.SortFunc(sorted, func(a, b string) int {
+		return cmp.Or(
+			cmp.Compare(totalScore(b), totalScore(a)), // Higher TotalScore first.
+			strings.Compare(a, b),
+		)
 	})
 	return sorted
 }

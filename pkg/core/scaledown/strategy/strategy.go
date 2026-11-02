@@ -18,6 +18,7 @@ package strategy
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -54,6 +55,9 @@ func (s *Strategy) parse(strategyStr string) error {
 		weight, err := strconv.ParseFloat(weightStr, 64)
 		if err != nil {
 			return fmt.Errorf("failed to parse weight '%s' for dimension '%s', err: %s", weightStr, dimName, err.Error())
+		}
+		if math.IsNaN(weight) || math.IsInf(weight, 0) {
+			return fmt.Errorf("weight must be a finite number for dimension '%s', got '%s'", dimName, weightStr)
 		}
 		if weight < 0 {
 			return fmt.Errorf("weight cannot be negative for dimension '%s'", dimName)

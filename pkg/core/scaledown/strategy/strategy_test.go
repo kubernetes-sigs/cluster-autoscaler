@@ -92,6 +92,21 @@ func TestNewStrategy(t *testing.T) {
 			wantErr:     true,
 		},
 		{
+			name:        "NaN weight",
+			strategyStr: "Utilization=NaN",
+			wantErr:     true,
+		},
+		{
+			name:        "infinity weight",
+			strategyStr: "Utilization=Inf",
+			wantErr:     true,
+		},
+		{
+			name:        "negative infinity weight",
+			strategyStr: "Utilization=-Inf",
+			wantErr:     true,
+		},
+		{
 			name:        "unknown dimension",
 			strategyStr: "Unknown=1",
 			wantErr:     true,

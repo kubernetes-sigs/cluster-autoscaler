@@ -54,6 +54,8 @@ type ScoringDimension interface {
 }
 
 // DimensionNormalizer is an optional extension interface to normalize raw scores into allowed range.
+// TODO: Add tests for normalization once a ScoringDimension implementing DimensionNormalizer exists.
+// Currently no Dimension implements it, so RankingSession.Normalize never calls Normalize.
 type DimensionNormalizer interface {
 	// Normalize modifies the given NodeDimensionScoreList in place to scale the scores at once.
 	Normalize(scores NodeDimensionScoreList) error

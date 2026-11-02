@@ -79,18 +79,22 @@ func TestRankingSessionScoreNode(t *testing.T) {
 }
 
 func TestRankingSessionWeightTotal(t *testing.T) {
-	newSession := func(weights map[string]float64) *RankingSession {
-		return NewRankingSession(&Strategy{Weights: weights})
+	newSession := func(dimNames []string, weights map[string]float64) *RankingSession {
+		var dims []ScoringDimension
+		for _, name := range dimNames {
+			dims = append(dims, &fakeDimension{name: name})
+		}
+		return NewRankingSession(&Strategy{Dimensions: dims, Weights: weights})
 	}
 
 	t.Run("no dimension scores creates no ranks", func(t *testing.T) {
-		rs := newSession(map[string]float64{"A": 1})
+		rs := newSession([]string{"A"}, map[string]float64{"A": 1})
 		assert.NoError(t, rs.WeightTotal())
 		assert.Empty(t, rs.Rankings)
 	})
 
 	t.Run("weights applied and summed", func(t *testing.T) {
-		rs := newSession(map[string]float64{"A": 0.5, "B": 2})
+		rs := newSession([]string{"A", "B"}, map[string]float64{"A": 0.5, "B": 2})
 		rs.DimensionScores["A"] = NodeDimensionScoreList{{NodeName: "n1", Score: 100}, {NodeName: "n2", Score: 20}}
 		rs.DimensionScores["B"] = NodeDimensionScoreList{{NodeName: "n1", Score: 10}, {NodeName: "n2", Score: 30}}
 
@@ -103,7 +107,7 @@ func TestRankingSessionWeightTotal(t *testing.T) {
 	})
 
 	t.Run("rank created for every scored node", func(t *testing.T) {
-		rs := newSession(map[string]float64{"A": 1, "B": 1})
+		rs := newSession([]string{"A", "B"}, map[string]float64{"A": 1, "B": 1})
 		rs.DimensionScores["A"] = NodeDimensionScoreList{{NodeName: "n1", Score: 10}, {NodeName: "n2", Score: 20}}
 		rs.DimensionScores["B"] = NodeDimensionScoreList{{NodeName: "n1", Score: 30}, {NodeName: "n2", Score: 40}}
 
@@ -132,7 +136,10 @@ func TestRankingSessionWeightTotalScoreRange(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			rs := NewRankingSession(&Strategy{Weights: map[string]float64{"A": 1}})
+			rs := NewRankingSession(&Strategy{
+				Dimensions: []ScoringDimension{&fakeDimension{name: "A"}},
+				Weights:    map[string]float64{"A": 1},
+			})
 			rs.DimensionScores["A"] = NodeDimensionScoreList{{NodeName: "n1", Score: tc.score}}
 
 			err := rs.WeightTotal()
