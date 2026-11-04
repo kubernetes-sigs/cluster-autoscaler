@@ -59,6 +59,11 @@ func (p *ProvisioningRequestPodsInjector) IsAvailableForProvisioning(pr *provreq
 		if provisioned.Status != metav1.ConditionFalse {
 			return false
 		}
+		if provisioned.Reason == provreqconditions.WaitingForNodesReason {
+			// Check requests waiting for nodes at a fixed interval, without backing off, so they are
+			// marked as provisioned soon after the nodes become ready.
+			return provisioned.LastTransitionTime.Add(p.initialRetryTime).Before(p.clock.Now())
+		}
 		val, found := p.backoffDuration.Get(key(pr))
 		retryTime, ok := val.(time.Duration)
 		if !found || !ok {

@@ -27,6 +27,7 @@ import (
 	clock "k8s.io/utils/clock/testing"
 	"k8s.io/utils/lru"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest"
+	provreqconditions "sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/conditions"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqclient"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqwrapper"
 )
@@ -67,6 +68,19 @@ func TestProvisioningRequestPodsInjector(t *testing.T) {
 		LastTransitionTime: metav1.NewTime(minAgo),
 	}
 
+	waitingForNodes := metav1.Condition{
+		Type:               v1.Provisioned,
+		Status:             metav1.ConditionFalse,
+		Reason:             provreqconditions.WaitingForNodesReason,
+		LastTransitionTime: metav1.NewTime(minAgo),
+	}
+	waitingForNodesRecently := metav1.Condition{
+		Type:               v1.Provisioned,
+		Status:             metav1.ConditionFalse,
+		Reason:             provreqconditions.WaitingForNodesReason,
+		LastTransitionTime: metav1.NewTime(now.Add(-30 * time.Second)),
+	}
+
 	podsA := 10
 	newProvReqA := testProvisioningRequestWithCondition("new", podsA, v1.ProvisioningClassCheckCapacity)
 	newAcceptedProvReqA := testProvisioningRequestWithCondition("new-accepted", podsA, v1.ProvisioningClassCheckCapacity, accepted)
@@ -82,6 +96,8 @@ func TestProvisioningRequestPodsInjector(t *testing.T) {
 	failedProvReq := testProvisioningRequestWithCondition("failed", podsA, v1.ProvisioningClassBestEffortAtomicScaleUp, failed)
 	notProvisionedRecentlyProvReqB := testProvisioningRequestWithCondition("provisioned-false-recently-B", podsB, v1.ProvisioningClassBestEffortAtomicScaleUp, notProvisionedRecently)
 	unknownProvisionedProvReqB := testProvisioningRequestWithCondition("provisioned-unknown-B", podsB, v1.ProvisioningClassBestEffortAtomicScaleUp, unknownProvisioned)
+	waitingForNodesProvReqB := testProvisioningRequestWithCondition("waiting-for-nodes-B", podsB, v1.ProvisioningClassBestEffortAtomicScaleUp, waitingForNodes, accepted)
+	waitingForNodesRecentlyProvReqB := testProvisioningRequestWithCondition("waiting-for-nodes-recently-B", podsB, v1.ProvisioningClassBestEffortAtomicScaleUp, waitingForNodesRecently, accepted)
 	unknownClass := testProvisioningRequestWithCondition("new-accepted", podsA, "unknown-class", accepted)
 
 	testCases := []struct {
@@ -155,6 +171,16 @@ func TestProvisioningRequestPodsInjector(t *testing.T) {
 			provReqs: []*provreqwrapper.ProvisioningRequest{notProvisionedRecentlyProvReqB},
 		},
 		{
+			name:                     "Provisioned=False, waiting for nodes, pods are injected without backoff",
+			provReqs:                 []*provreqwrapper.ProvisioningRequest{waitingForNodesProvReqB},
+			wantUnscheduledPodCount:  podsB,
+			wantUpdatedConditionName: waitingForNodesProvReqB.Name,
+		},
+		{
+			name:     "Provisioned=False, waiting for nodes, checked recently, no pods are injected",
+			provReqs: []*provreqwrapper.ProvisioningRequest{waitingForNodesRecentlyProvReqB},
+		},
+		{
 			name:     "Provisioned=Unknown, no pods are injected",
 			provReqs: []*provreqwrapper.ProvisioningRequest{unknownProvisionedProvReqB, failedProvReq},
 		},
@@ -174,6 +200,7 @@ func TestProvisioningRequestPodsInjector(t *testing.T) {
 		client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, tc.provReqs...)
 		backoffTime := lru.New(100)
 		backoffTime.Add(key(notProvisionedRecentlyProvReqB), 2*time.Minute)
+		backoffTime.Add(key(waitingForNodesProvReqB), 2*time.Minute)
 		injector := ProvisioningRequestPodsInjector{1 * time.Minute, 10 * time.Minute, backoffTime, clock.NewFakePassiveClock(now), client, now, tc.checkCapacityBatchProcessing, tc.checkCapacityProcessorInstance}
 		getUnscheduledPods, err := injector.Process(context.Background(), nil, provreqwrapper.BuildTestPods("ns", "pod", tc.existingUnsUnschedulablePodCount))
 		if err != nil {

@@ -42,6 +42,12 @@ const (
 	CapacityIsProvisionedReason = "CapacityIsProvisioned"
 	// CapacityIsProvisionedMsg is added when capacity was requested successfully.
 	CapacityIsProvisionedMsg = "Capacity is found in the cluster"
+	// WaitingForNodesReason is added when capacity was requested successfully, but the new nodes are not ready yet.
+	WaitingForNodesReason = "WaitingForNodes"
+	// WaitingForNodesMsg is added when capacity was requested successfully, but the new nodes are not ready yet.
+	WaitingForNodesMsg = "Capacity was requested, waiting for the new nodes to become ready"
+	// NodesNotReadyMsg is added when the nodes a ProvisioningRequest waited for didn't become ready.
+	NodesNotReadyMsg = "Requested nodes didn't become ready, CA will try to find capacity later."
 	// FailedToCheckCapacityReason is added when CA failed to check pre-existing capacity.
 	FailedToCheckCapacityReason = "FailedToCheckCapacity"
 	// FailedToCheckCapacityMsg is added when CA failed to check pre-existing capacity.
