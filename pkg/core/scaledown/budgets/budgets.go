@@ -18,6 +18,7 @@ package budgets
 
 import (
 	"context"
+	"slices"
 	"strconv"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -37,6 +38,8 @@ type NodeGroupView struct {
 	// BatchSize allows overriding the number of nodes needed to trigger deletion.
 	// Useful for node groups which only scale between zero and max size.
 	BatchSize int
+	// Drain indicates whether the nodes in this bucket need to be drained before deletion.
+	Drain bool
 }
 
 // ScaleDownBudgetProcessor is responsible for keeping the number of nodes deleted in parallel within defined limits.
@@ -52,12 +55,11 @@ func NewScaleDownBudgetProcessor(autoscalingCtx *ca_context.AutoscalingContext) 
 }
 
 // CropNodes crops the provided node lists to respect scale-down max parallelism budgets.
-// The returned nodes are grouped by a node group.
-// This function assumes that each node group may occur at most once in each of the "empty" and "drain" lists.
-func (bp *ScaleDownBudgetProcessor) CropNodes(ctx context.Context, as scaledown.ActuationStatus, empty, drain []*apiv1.Node) (emptyToDelete, drainToDelete []*NodeGroupView) {
+// The returned buckets are grouped by node group and whether the nodes need to be drained.
+func (bp *ScaleDownBudgetProcessor) CropNodes(ctx context.Context, as scaledown.ActuationStatus, empty, drain []*apiv1.Node) []*NodeGroupView {
 	logger := klog.FromContext(ctx)
-	emptyIndividual, emptyAtomic := bp.categorize(ctx, bp.group(ctx, empty))
-	drainIndividual, drainAtomic := bp.categorize(ctx, bp.group(ctx, drain))
+	emptyIndividual, emptyAtomic := bp.categorize(ctx, bp.group(ctx, empty, false))
+	drainIndividual, drainAtomic := bp.categorize(ctx, bp.group(ctx, drain, true))
 
 	emptyAtomicMap := groupBuckets(emptyAtomic)
 	drainAtomicMap := groupBuckets(drainAtomic)
@@ -68,7 +70,7 @@ func (bp *ScaleDownBudgetProcessor) CropNodes(ctx context.Context, as scaledown.
 
 	var err error
 	canOverflow := true
-	emptyToDelete, drainToDelete = []*NodeGroupView{}, []*NodeGroupView{}
+	emptyToDelete, drainToDelete := []*NodeGroupView{}, []*NodeGroupView{}
 
 	allNodes, err := allNodes(bp.autoscalingCtx.ClusterSnapshot)
 	if err != nil {
@@ -180,7 +182,7 @@ func (bp *ScaleDownBudgetProcessor) CropNodes(ctx context.Context, as scaledown.
 
 	drainToDelete, _ = cropIndividualNodes(drainToDelete, drainIndividual, drainBudget)
 
-	return emptyToDelete, drainToDelete
+	return slices.Concat(emptyToDelete, drainToDelete)
 }
 
 func groupBuckets(buckets []*NodeGroupView) map[string]*NodeGroupView {
@@ -209,7 +211,7 @@ func cropIndividualNodes(toDelete []*NodeGroupView, groups []*NodeGroupView, bud
 	return toDelete, budget - remainingBudget
 }
 
-func (bp *ScaleDownBudgetProcessor) group(ctx context.Context, nodes []*apiv1.Node) []*NodeGroupView {
+func (bp *ScaleDownBudgetProcessor) group(ctx context.Context, nodes []*apiv1.Node, drain bool) []*NodeGroupView {
 	logger := klog.FromContext(ctx)
 	groupMap := map[string]int{}
 	grouped := []*NodeGroupView{}
@@ -226,6 +228,7 @@ func (bp *ScaleDownBudgetProcessor) group(ctx context.Context, nodes []*apiv1.No
 			grouped = append(grouped, &NodeGroupView{
 				Group: nodeGroup,
 				Nodes: []*apiv1.Node{node},
+				Drain: drain,
 			})
 		}
 	}
