@@ -60,7 +60,7 @@ type Estimator interface {
 type EstimatorBuilder func(clustersnapshot.ClusterSnapshot, EstimationContext) Estimator
 
 // EstimationAnalyserFunc to be run at the end of the estimation logic.
-type EstimationAnalyserFunc func(clustersnapshot.ClusterSnapshot, cloudprovider.NodeGroup, map[string]bool)
+type EstimationAnalyserFunc func(clustersnapshot.ClusterSnapshot, cloudprovider.NodeGroup, *framework.NodeInfo, map[string]bool)
 
 // NewEstimatorBuilder creates a new estimator object from flag.
 func NewEstimatorBuilder(name string, limiter EstimationLimiter, orderer EstimationPodOrderer, estimationAnalyserFunc EstimationAnalyserFunc, fastpathBinpackingEnabled bool) (EstimatorBuilder, error) {
