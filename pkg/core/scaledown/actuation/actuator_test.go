@@ -1884,3 +1884,120 @@ func TestSummarizeTaintErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildDrainBatches(t *testing.T) {
+	makePdb := func(name, app string, allowed int32) *policyv1.PodDisruptionBudget {
+		return &policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: policyv1.PodDisruptionBudgetSpec{
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": app}},
+			},
+			Status: policyv1.PodDisruptionBudgetStatus{DisruptionsAllowed: allowed},
+		}
+	}
+	makeCandidate := func(nodeName string, apps ...string) nodeDrainCandidate {
+		var pods []*apiv1.Pod
+		for i, app := range apps {
+			pod := removablePod(fmt.Sprintf("%s-pod-%d", nodeName, i), nodeName)
+			if app != "" {
+				pod.Labels = map[string]string{"app": app}
+			}
+			pods = append(pods, pod)
+		}
+		return nodeDrainCandidate{
+			nodeInfo: framework.NewTestNodeInfo(generateNode(nodeName), pods...),
+			pods:     pods,
+		}
+	}
+
+	testCases := []struct {
+		name        string
+		candidates  []nodeDrainCandidate
+		pdbs        []*policyv1.PodDisruptionBudget
+		wantBatches [][]string
+	}{
+		{
+			name: "no PDBs drains all nodes in a single batch",
+			candidates: []nodeDrainCandidate{
+				makeCandidate("n0", "a"),
+				makeCandidate("n1", "a"),
+				makeCandidate("n2", "a"),
+			},
+			wantBatches: [][]string{{"n0", "n1", "n2"}},
+		},
+		{
+			name: "budget of 1 across 3 nodes drains sequentially",
+			candidates: []nodeDrainCandidate{
+				makeCandidate("n0", "a"),
+				makeCandidate("n1", "a"),
+				makeCandidate("n2", "a"),
+			},
+			pdbs:        []*policyv1.PodDisruptionBudget{makePdb("pdb-a", "a", 1)},
+			wantBatches: [][]string{{"n0"}, {"n1"}, {"n2"}},
+		},
+		{
+			name: "budget of 2 across 3 nodes batches 2 then 1",
+			candidates: []nodeDrainCandidate{
+				makeCandidate("n0", "a"),
+				makeCandidate("n1", "a"),
+				makeCandidate("n2", "a"),
+			},
+			pdbs:        []*policyv1.PodDisruptionBudget{makePdb("pdb-a", "a", 2)},
+			wantBatches: [][]string{{"n0", "n1"}, {"n2"}},
+		},
+		{
+			name: "independent PDBs and unprotected pods drain in parallel",
+			candidates: []nodeDrainCandidate{
+				makeCandidate("n0", "a"),
+				makeCandidate("n1", "a"),
+				makeCandidate("n2", "b"),
+				makeCandidate("n3", "b"),
+				makeCandidate("n4", ""),
+			},
+			pdbs: []*policyv1.PodDisruptionBudget{
+				makePdb("pdb-a", "a", 1),
+				makePdb("pdb-b", "b", 1),
+			},
+			wantBatches: [][]string{{"n0", "n2", "n4"}, {"n1", "n3"}},
+		},
+		{
+			name: "multi-pod node waits for full PDB budget instead of sharing partially consumed wave",
+			candidates: []nodeDrainCandidate{
+				makeCandidate("n0", "a"),
+				makeCandidate("n1", "a", "a"),
+			},
+			pdbs:        []*policyv1.PodDisruptionBudget{makePdb("pdb-a", "a", 2)},
+			wantBatches: [][]string{{"n0"}, {"n1"}},
+		},
+		{
+			name: "single node exceeding initial PDB budget gets its own wave for that PDB",
+			candidates: []nodeDrainCandidate{
+				makeCandidate("n0", "a", "a"),
+				makeCandidate("n1", "a"),
+				makeCandidate("n2", "b"),
+			},
+			pdbs: []*policyv1.PodDisruptionBudget{
+				makePdb("pdb-a", "a", 1),
+				makePdb("pdb-b", "b", 1),
+			},
+			wantBatches: [][]string{{"n0", "n2"}, {"n1"}},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildDrainBatches(tc.candidates, tc.pdbs)
+			var gotNames [][]string
+			for _, batch := range got {
+				var names []string
+				for _, c := range batch {
+					names = append(names, c.nodeInfo.Node().Name)
+				}
+				gotNames = append(gotNames, names)
+			}
+			if diff := cmp.Diff(tc.wantBatches, gotNames); diff != "" {
+				t.Errorf("buildDrainBatches diff (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
