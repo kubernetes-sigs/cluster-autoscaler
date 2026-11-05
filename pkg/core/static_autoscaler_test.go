@@ -24,6 +24,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2738,6 +2739,40 @@ func TestStaticAutoscalerProcessorCallbacks(t *testing.T) {
 	assert.Equal(t, 0, len(processorCallbacks.extraValues))
 	_, found = processorCallbacks.GetExtraValue("blah")
 	assert.False(t, found)
+}
+
+func TestStaticAutoscalerProcessorCallbacksConcurrentAccess(t *testing.T) {
+	processorCallbacks := newStaticAutoscalerProcessorCallbacks()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(4)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				processorCallbacks.SetExtraValue(fmt.Sprintf("key-%d-%d", id, j), j)
+			}
+		}(i)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				processorCallbacks.GetExtraValue(fmt.Sprintf("key-%d-%d", id, j))
+			}
+		}(i)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				processorCallbacks.DisableScaleDownForLoop()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				processorCallbacks.reset()
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestRemoveFixNodeTargetSize(t *testing.T) {
