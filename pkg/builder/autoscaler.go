@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	schedulingv1beta1 "k8s.io/api/scheduling/v1beta1"
 	cbv1beta1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	provreqclientset "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/client/clientset/versioned"
 	"k8s.io/client-go/informers"
@@ -45,6 +46,7 @@ import (
 	ca_processors "sigs.k8s.io/cluster-autoscaler/pkg/processors"
 	cbprocessor "sigs.k8s.io/cluster-autoscaler/pkg/processors/capacitybuffer"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodeinfosprovider"
+	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodes"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/podinjection"
 	podinjectionbackoff "sigs.k8s.io/cluster-autoscaler/pkg/processors/podinjection/backoff"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/pods"
@@ -61,6 +63,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/options"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/scheduling"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
@@ -269,6 +272,16 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 	opts.Processors.ScaleDownCandidatesNotifier.Register(sdCandidatesSorting)
 
 	cp := scaledowncandidates.NewCombinedScaleDownCandidatesProcessor()
+	if autoscalingOptions.PodGroupSupportEnabled {
+		cp.Register(nodes.NewGangScaleDownNodeProcessor(b.manager.GetClient()))
+		// Register the PodGroup informer now, so that it syncs at manager
+		// startup along with the others instead of on first use mid-iteration,
+		// and so that a cluster not serving the API is reported at startup.
+		// The cache is not running yet, so this must not block.
+		if _, err := b.manager.GetCache().GetInformer(ctx, &schedulingv1beta1.PodGroup{}, cache.BlockUntilSynced(false)); err != nil {
+			klog.Errorf("PodGroup support is enabled, but PodGroups cannot be watched; nodes hosting gang pods will not be protected from scale-down: %v", err)
+		}
+	}
 	cp.Register(scaledowncandidates.NewScaleDownCandidatesSortingProcessor(scaleDownCandidatesComparers))
 
 	if autoscalingOptions.ScaleDownDelayTypeLocal {

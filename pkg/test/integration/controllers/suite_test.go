@@ -25,9 +25,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	clockutil "k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -36,9 +34,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	cbv1beta1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	capacitybuffer "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/clientset/versioned"
-	cqv1beta1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacityquota/autoscaling.x-k8s.io/v1beta1"
+	"sigs.k8s.io/cluster-autoscaler/pkg/builder"
 	cbapi "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer"
 	cbclient "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/client"
 	cbctrl "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/controller"
@@ -89,13 +86,7 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
 
-	scheme := runtime.NewScheme()
-	err = clientgoscheme.AddToScheme(scheme)
-	Expect(err).NotTo(HaveOccurred())
-	err = cqv1beta1.AddToScheme(scheme)
-	Expect(err).NotTo(HaveOccurred())
-	err = cbv1beta1.AddToScheme(scheme)
-	Expect(err).NotTo(HaveOccurred())
+	scheme := builder.NewScheme()
 
 	k8sClient, err = kubernetes.NewForConfig(cfg)
 	Expect(err).NotTo(HaveOccurred())
