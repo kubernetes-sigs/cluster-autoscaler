@@ -144,6 +144,90 @@ func TestProviderSnapshot(t *testing.T) {
 	}
 }
 
+// TestProviderSnapshotDoesNotMutateListerObjects verifies that mutating a Snapshot returned by Provider.Snapshot()
+// (before any Fork()) doesn't mutate the ResourceClaim objects returned by the lister, which are shared with the
+// informer cache and are meant to be read-only. Regression test for kubernetes-sigs/cluster-autoscaler#37.
+func TestProviderSnapshotDoesNotMutateListerObjects(t *testing.T) {
+	pod := test.BuildTestPod("pod1", 1, 1, test.WithResourceClaim("a", "claim-1", ""))
+	pod.Namespace = "default"
+	otherPod := test.BuildTestPod("pod2", 1, 1)
+	otherPod.Namespace = "default"
+
+	for _, tc := range []struct {
+		name   string
+		claim  *resourceapi.ResourceClaim
+		mutate func(*drasnapshot.Snapshot) error
+	}{
+		{
+			name:   "ReservePodClaims",
+			claim:  &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim-1", Namespace: "default", UID: "claim-1"}},
+			mutate: func(s *drasnapshot.Snapshot) error { return s.ReservePodClaims(pod) },
+		},
+		{
+			// Reserved only for the Pod, so unreserving also deallocates it in place.
+			name: "UnreservePodClaims",
+			claim: &resourceapi.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-1", Namespace: "default", UID: "claim-1"},
+				Status: resourceapi.ResourceClaimStatus{
+					Allocation:  &resourceapi.AllocationResult{},
+					ReservedFor: []resourceapi.ResourceClaimConsumerReference{{Resource: "pods", Name: pod.Name, UID: pod.UID}},
+				},
+			},
+			mutate: func(s *drasnapshot.Snapshot) error { return s.UnreservePodClaims(pod) },
+		},
+		{
+			// Not owned by the Pod and reserved for another Pod too, so it's rewritten rather than deleted.
+			name: "RemovePodOwnedClaims",
+			claim: &resourceapi.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-1", Namespace: "default", UID: "claim-1"},
+				Status: resourceapi.ResourceClaimStatus{
+					Allocation: &resourceapi.AllocationResult{},
+					ReservedFor: []resourceapi.ResourceClaimConsumerReference{
+						{Resource: "pods", Name: pod.Name, UID: pod.UID},
+						{Resource: "pods", Name: otherPod.Name, UID: otherPod.UID},
+					},
+				},
+			},
+			mutate: func(s *drasnapshot.Snapshot) error {
+				s.RemovePodOwnedClaims(context.Background(), pod)
+				return nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			origClaim := tc.claim.DeepCopy()
+
+			claimLister := &fakeLister[*resourceapi.ResourceClaim]{objects: []*resourceapi.ResourceClaim{tc.claim}}
+			sliceLister := &fakeLister[*resourceapi.ResourceSlice]{}
+			classLister := &fakeLister[*resourceapi.DeviceClass]{}
+			provider := NewProvider(claimLister, sliceLister, classLister)
+
+			snapshot, err := provider.Snapshot()
+			if err != nil {
+				t.Fatalf("Provider.Snapshot(): unexpected error: %v", err)
+			}
+
+			// No Fork() - the base layer is the top layer here.
+			if err := tc.mutate(snapshot); err != nil {
+				t.Fatalf("%s(): unexpected error: %v", tc.name, err)
+			}
+
+			// Guard against a vacuous pass: the snapshot itself must have changed.
+			snapshotClaim, err := snapshot.ResourceClaims().Get("default", "claim-1")
+			if err != nil {
+				t.Fatalf("ResourceClaims().Get(): unexpected error: %v", err)
+			}
+			if cmp.Equal(origClaim, snapshotClaim) {
+				t.Fatalf("%s() did not change the claim in the snapshot, the test proves nothing", tc.name)
+			}
+
+			if diff := cmp.Diff(origClaim, tc.claim); diff != "" {
+				t.Errorf("lister-returned claim was mutated by %s() on an unforked snapshot (-want +got): %s", tc.name, diff)
+			}
+		})
+	}
+}
+
 // TestNewProviderFromInformers verifies that the interface translation listers created in NewProviderFromInformers correctly return
 // all objects in the cluster.
 func TestNewProviderFromInformers(t *testing.T) {
