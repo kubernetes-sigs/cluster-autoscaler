@@ -24,61 +24,52 @@ import (
 // PatchSet manages a stack of patches, allowing for fork/revert/commit operations.
 // It provides a view of the data as if all patches were applied sequentially.
 //
+// Alongside the patches, PatchSet maintains the effective map: the key/value pairs
+// resulting from applying all the patches in order. The effective map is kept up to
+// date by every operation, so read operations are served from it directly and never
+// need to traverse the patches.
+//
 // Time Complexities:
 //   - Fork(): O(1).
 //   - Commit(): O(P), where P is the number of modified/deleted entries
 //     in the current patch or no-op for PatchSet with a single patch.
-//   - Revert(): O(P), where P is the number of modified/deleted entries
-//     in the topmost patch or no-op for PatchSet with a single patch.
-//   - FindValue(key): O(1) for cached keys, O(N * P) - otherwise.
-//   - AsMap(), ValuesSlice(), Values(), Len(): O(N * P) as they need to iterate
-//     through all the layers modifications and deletions to get the latest state.
-//     Best case - if the cache is currently in sync with the PatchSet data
-//     complexity becomes O(C), where C is the number of entries in the cache
-//     (key/value pairs in flattened PatchSet plus cached negative lookups).
-//   - SetCurrent(key, value): O(1).
-//   - DeleteCurrent(key): O(1).
-//   - InCurrentPatch(key): O(1).
+//   - Revert(): O(P * N), where P is the number of modified/deleted entries
+//     in the topmost patch or no-op for PatchSet with a single patch. Each of
+//     the P keys is re-resolved from the remaining patches.
+//   - FindValue(key), SetCurrent(key, value), DeleteCurrent(key), InCurrentPatch(key), Len(): O(1).
+//   - AsMap(), ValuesSlice(), Values(): O(C), where C is the number of effective key/value pairs.
 //
 // Variables used in complexity analysis:
 //   - N: The number of patch layers in the PatchSet.
 //   - P: The number of modified/deleted entries in a single patch layer
 //
-// Caching:
+// Read operations never modify the PatchSet, so they can safely run concurrently with each
+// other. The PatchSet must not be modified concurrently with any other operation.
 //
-// The PatchSet employs a lazy caching mechanism to speed up access to data. When a specific item is requested,
-// the cache is checked first. If the item isn't cached, its effective value is computed by traversing the layers
-// of patches from the most recent to the oldest, and the result is then stored in the cache. For operations that
-// require the entire dataset like AsMap, if a cache is fully up-to-date, the data is served directly from the cache.
-// Otherwise, the entire dataset is rebuilt by applying all patches, and this process fully populates the cache.
-// Direct modifications to the current patch update the specific item in the cache immediately. Reverting the latest
-// patch will clear affected items from the cache and mark the cache as potentially out-of-sync, as underlying values may
-// no longer represent the PatchSet as a whole. Committing and forking does not invalidate the cache, as the effective
-// values remain consistent from the perspective of read operations.
+// Values are stored and returned by value, so V should be cheap to copy (e.g. a pointer).
 type PatchSet[K comparable, V any] struct {
 	// patches is a stack of individual modification layers. The base data is
 	// at index 0, and subsequent modifications are layered on top.
-	// PatchSet should always contain at least a single patch.
 	patches []*Patch[K, V]
 
-	// cache stores the computed effective value for keys that have been accessed.
-	// A nil pointer indicates the key is effectively deleted or not present.
-	cache map[K]*V
-
-	// cacheInSync indicates whether the cache map accurately reflects the
-	// current state derived from applying all patches in the 'patches' slice.
-	// When false, the cache may be stale and needs to be rebuilt or validated
-	// before being fully trusted for all keys.
-	cacheInSync bool
+	// effective holds the effective key/value pairs - the result of applying
+	// all the patches in order. It's always up to date.
+	effective map[K]V
 }
 
 // NewPatchSet creates a new PatchSet, initializing it with the provided base patches.
 func NewPatchSet[K comparable, V any](patches ...*Patch[K, V]) *PatchSet[K, V] {
-	return &PatchSet[K, V]{
-		patches:     patches,
-		cache:       make(map[K]*V),
-		cacheInSync: false,
+	p := &PatchSet[K, V]{
+		patches:   patches,
+		effective: make(map[K]V, totalKeyCount(patches)),
 	}
+	for _, patch := range patches {
+		maps.Copy(p.effective, patch.modified)
+		for key := range patch.deleted {
+			delete(p.effective, key)
+		}
+	}
+	return p
 }
 
 // Fork adds a new, empty patch layer to the top of the stack.
@@ -110,86 +101,49 @@ func (p *PatchSet[K, V]) Revert() {
 	currentPatch := p.patches[len(p.patches)-1]
 	p.patches = p.patches[:len(p.patches)-1]
 
+	// Only keys modified or deleted in the reverted patch could have changed
+	// their effective value - re-resolve them from the remaining patches.
 	for key := range currentPatch.modified {
-		delete(p.cache, key)
+		p.repairEffectiveKey(key)
 	}
-
 	for key := range currentPatch.deleted {
-		delete(p.cache, key)
+		p.repairEffectiveKey(key)
 	}
-
-	p.cacheInSync = false
 }
 
-// FindValue searches for the effective value of a key by looking through the patches
-// from top to bottom. It returns the value and true if found, or the zero value and false
-// if the key is deleted or not found in any patch.
-func (p *PatchSet[K, V]) FindValue(key K) (value V, found bool) {
-	var zero V
-
-	if cachedValue, cacheHit := p.cache[key]; cacheHit {
-		if cachedValue == nil {
-			return zero, false
-		}
-
-		return *cachedValue, true
-	}
-
-	value = zero
-	found = false
+// repairEffectiveKey recomputes the effective value of the key from the patches.
+func (p *PatchSet[K, V]) repairEffectiveKey(key K) {
 	for i := len(p.patches) - 1; i >= 0; i-- {
 		patch := p.patches[i]
 		if patch.IsDeleted(key) {
 			break
 		}
-
-		foundValue, ok := patch.Get(key)
-		if ok {
-			value = foundValue
-			found = true
-			break
+		if value, found := patch.Get(key); found {
+			p.effective[key] = value
+			return
 		}
 	}
+	delete(p.effective, key)
+}
 
-	if found {
-		p.cache[key] = &value
-	} else {
-		p.cache[key] = nil
-	}
-
+// FindValue returns the effective value of the key and true if found, or the zero value
+// and false if the key is deleted or not present in any patch.
+func (p *PatchSet[K, V]) FindValue(key K) (value V, found bool) {
+	value, found = p.effective[key]
 	return value, found
 }
 
-// AsMap merges all patches into a single map representing the current effective state.
-// It iterates through all patches from bottom to top, applying modifications and deletions.
-// The cache is populated with the results during this process.
+// AsMap returns a newly allocated map with all the effective key/value pairs.
 func (p *PatchSet[K, V]) AsMap() map[K]V {
-	if !p.cacheInSync {
-		return p.rebuildCache()
-	}
-
-	patchSetMap := make(map[K]V, len(p.cache))
-	for key, value := range p.cache {
-		if value != nil {
-			patchSetMap[key] = *value
-		}
-	}
-	return patchSetMap
+	return maps.Clone(p.effective)
 }
 
 // ValuesSlice returns a newly allocated slice with all the effective values
-// of the PatchSet, in no particular order. Unlike AsMap it doesn't allocate
-// an intermediate map.
+// of the PatchSet, in no particular order.
 func (p *PatchSet[K, V]) ValuesSlice() []V {
-	p.syncCache()
-
-	// The cache may contain negative (nil) entries, so its size is
-	// only an upper bound for the number of values.
-	values := make([]V, 0, len(p.cache))
-	for _, value := range p.cache {
-		if value != nil {
-			values = append(values, *value)
-		}
+	values := make([]V, 0, len(p.effective))
+	for _, value := range p.effective {
+		values = append(values, value)
 	}
 	return values
 }
@@ -197,62 +151,12 @@ func (p *PatchSet[K, V]) ValuesSlice() []V {
 // Values returns an iterator over all the effective values of the PatchSet,
 // in no particular order. The PatchSet must not be modified while iterating.
 func (p *PatchSet[K, V]) Values() iter.Seq[V] {
-	return func(yield func(V) bool) {
-		p.syncCache()
-		for _, value := range p.cache {
-			if value == nil {
-				continue
-			}
-			if !yield(*value) {
-				return
-			}
-		}
-	}
+	return maps.Values(p.effective)
 }
 
 // Len returns the number of effective key/value pairs in the PatchSet.
-// It needs to skip negative (nil) entries in the cache, so its complexity
-// is O(C) rather than O(1) - see the PatchSet complexity notes.
 func (p *PatchSet[K, V]) Len() int {
-	p.syncCache()
-
-	count := 0
-	for _, value := range p.cache {
-		if value != nil {
-			count++
-		}
-	}
-	return count
-}
-
-// syncCache rebuilds the cache from all the patch layers if it's not in sync.
-func (p *PatchSet[K, V]) syncCache() {
-	if !p.cacheInSync {
-		p.rebuildCache()
-	}
-}
-
-// rebuildCache merges all patches into a single map representing the current
-// effective state, populates the cache with it and marks the cache as in sync.
-// The returned map is owned by the caller.
-func (p *PatchSet[K, V]) rebuildCache() map[K]V {
-	keysCount := p.totalKeyCount()
-	patchSetMap := make(map[K]V, keysCount)
-
-	for _, patch := range p.patches {
-		maps.Copy(patchSetMap, patch.modified)
-
-		for key := range patch.deleted {
-			delete(patchSetMap, key)
-		}
-	}
-
-	for key, value := range patchSetMap {
-		p.cache[key] = &value
-	}
-	p.cacheInSync = true
-
-	return patchSetMap
+	return len(p.effective)
 }
 
 // SetCurrent adds or updates a key-value pair in the topmost patch layer.
@@ -263,7 +167,7 @@ func (p *PatchSet[K, V]) SetCurrent(key K, value V) {
 
 	currentPatch := p.patches[len(p.patches)-1]
 	currentPatch.Set(key, value)
-	p.cache[key] = &value
+	p.effective[key] = value
 }
 
 // DeleteCurrent marks a key as deleted in the topmost patch layer.
@@ -274,7 +178,7 @@ func (p *PatchSet[K, V]) DeleteCurrent(key K) {
 
 	currentPatch := p.patches[len(p.patches)-1]
 	currentPatch.Delete(key)
-	p.cache[key] = nil
+	delete(p.effective, key)
 }
 
 // InCurrentPatch checks if the key is available in the topmost patch layer.
@@ -292,9 +196,9 @@ func (p *PatchSet[K, V]) InCurrentPatch(key K) bool {
 // pairs across all patches taking the highest number of records possible
 // this calculation does not consider deleted records - thus it is likely
 // to be not accurate
-func (p *PatchSet[K, V]) totalKeyCount() int {
+func totalKeyCount[K comparable, V any](patches []*Patch[K, V]) int {
 	count := 0
-	for _, patch := range p.patches {
+	for _, patch := range patches {
 		count += len(patch.modified)
 	}
 
@@ -311,7 +215,7 @@ func ClonePatchSet[K comparable, V any](ps *PatchSet[K, V], cloneKey func(K) K, 
 		return nil
 	}
 
-	cloned := NewPatchSet[K, V]()
+	clonedPatches := make([]*Patch[K, V], 0, len(ps.patches))
 	for _, patch := range ps.patches {
 		clonedPatch := NewPatch[K, V]()
 		for key, value := range patch.modified {
@@ -324,8 +228,9 @@ func ClonePatchSet[K comparable, V any](ps *PatchSet[K, V], cloneKey func(K) K, 
 			clonedPatch.Delete(clonedKey)
 		}
 
-		cloned.patches = append(cloned.patches, clonedPatch)
+		clonedPatches = append(clonedPatches, clonedPatch)
 	}
 
-	return cloned
+	// The effective map is built from the cloned patches, so it holds the cloned values.
+	return NewPatchSet(clonedPatches...)
 }
