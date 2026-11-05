@@ -18,6 +18,12 @@ package simulator
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -243,4 +249,53 @@ func testDeleteOptions() options.NodeDeleteOptions {
 		SkipNodesWithLocalStorage:         true,
 		SkipNodesWithCustomControllerPods: true,
 	}
+}
+
+func TestUnremovableReasons(t *testing.T) {
+	count := 0
+	for r := range UnremovableReasons() {
+		assert.NotEqual(t, "Unknown", r.String(), "UnremovableReason %d has no name in String()", int(r))
+		count++
+	}
+	assert.Equal(t, int(unremovableReasonCount), count)
+}
+
+// TestUnremovableReasonCountIsLast verifies that unremovableReasonCount is the last constant in its block, so that
+// new UnremovableReason values can't be accidentally declared after it and skipped by UnremovableReasons().
+func TestUnremovableReasonCountIsLast(t *testing.T) {
+	// Tests run with the package directory as the working directory.
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("Glob() failed: %v", err)
+	}
+	fset := token.NewFileSet()
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatalf("ParseFile(%q) failed: %v", file, err)
+		}
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			var names []string
+			for _, spec := range gd.Specs {
+				for _, n := range spec.(*ast.ValueSpec).Names {
+					names = append(names, n.Name)
+				}
+			}
+			if !slices.Contains(names, "unremovableReasonCount") {
+				continue
+			}
+			if last := names[len(names)-1]; last != "unremovableReasonCount" {
+				t.Errorf("unremovableReasonCount must be the last constant in its block, but %q follows it; declare new UnremovableReason values above unremovableReasonCount", last)
+			}
+			return
+		}
+	}
+	t.Fatal("const block with unremovableReasonCount not found")
 }

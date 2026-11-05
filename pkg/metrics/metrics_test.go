@@ -25,6 +25,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/component-base/metrics"
+	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
 )
 
 func newCaMetricsWithRegistry(registry metrics.KubeRegistry) *caMetrics {
@@ -173,5 +174,38 @@ func TestRegisterNodesDeleted(t *testing.T) {
 				assert.Equal(t, want, got, "reason=%s result=%s", s.reason, s.result)
 			}
 		})
+	}
+}
+
+func TestUpdateUnremovableNodesCount(t *testing.T) {
+	reg := metrics.NewKubeRegistry()
+	m := newCaMetricsWithRegistry(reg)
+	m.RegisterAll(false)
+
+	// The steps run in order against the same gauge, so each one checks the
+	// transition from the previous step's values.
+	steps := []struct {
+		name   string
+		counts map[simulator.UnremovableReason]int
+	}{
+		{
+			name:   "nodes become unremovable",
+			counts: map[simulator.UnremovableReason]int{simulator.BlockedByPod: 2, simulator.NoPlaceToMovePods: 3},
+		},
+		{
+			name:   "one reason has no nodes left",
+			counts: map[simulator.UnremovableReason]int{simulator.NoPlaceToMovePods: 1},
+		},
+		{
+			name:   "no unremovable nodes",
+			counts: nil,
+		},
+	}
+	for _, step := range steps {
+		m.UpdateUnremovableNodesCount(step.counts)
+		for r := range simulator.UnremovableReasons() {
+			got := testutil.ToFloat64(m.unremovableNodesCount.GaugeVec.WithLabelValues(r.String()))
+			assert.Equal(t, step.counts[r], int(got), "step %q, reason %v", step.name, r)
+		}
 	}
 }

@@ -870,10 +870,12 @@ func (m *caMetrics) UpdateUnneededNodesCount(nodesCount int) {
 	m.unneededNodesCount.Set(float64(nodesCount))
 }
 
-// UpdateUnremovableNodesCount records number of currently unremovable nodes
+// UpdateUnremovableNodesCount records number of currently unremovable nodes.
+// Every reason is reported, so a reason with no unremovable nodes left drops to 0
+// instead of keeping a stale value.
 func (m *caMetrics) UpdateUnremovableNodesCount(unremovableReasonCounts map[simulator.UnremovableReason]int) {
-	for reason, count := range unremovableReasonCounts {
-		m.unremovableNodesCount.WithLabelValues(fmt.Sprintf("%v", reason)).Set(float64(count))
+	for reason := range simulator.UnremovableReasons() {
+		m.unremovableNodesCount.WithLabelValues(fmt.Sprintf("%v", reason)).Set(float64(unremovableReasonCounts[reason]))
 	}
 }
 
