@@ -157,7 +157,11 @@ func TestRefresh(t *testing.T) {
 		additionalPr.CreationTimestamp = metav1.NewTime(weekAgo)
 		additionalPr.Spec.ProvisioningClassName = v1.ProvisioningClassCheckCapacity
 
-		processor := provReqProcessor{func() time.Time { return now }, 1, provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, pr, additionalPr), nil, ""}
+		processor := provReqProcessor{
+			now:        func() time.Time { return now },
+			maxUpdated: 1,
+			client:     provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, pr, additionalPr),
+		}
 		processor.refresh(context.Background(), []*provreqwrapper.ProvisioningRequest{pr, additionalPr})
 
 		assert.ElementsMatch(t, test.wantConditions, pr.Status.Conditions)
@@ -217,7 +221,7 @@ func TestDeleteOldProvReqs(t *testing.T) {
 
 	client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, pr, additionalPr, oldFailedPr, oldExpiredPr)
 
-	processor := provReqProcessor{func() time.Time { return now }, 1, client, nil, ""}
+	processor := provReqProcessor{now: func() time.Time { return now }, maxUpdated: 1, client: client}
 	processor.refresh(context.Background(), []*provreqwrapper.ProvisioningRequest{pr, additionalPr, oldFailedPr, oldExpiredPr})
 
 	_, err := client.ProvisioningRequestNoCache(oldFailedPr.Namespace, oldFailedPr.Name)
