@@ -64,6 +64,7 @@ var crClient client.Client
 var ctx context.Context
 var cancel context.CancelFunc
 var reconciliationCache *cbmetrics.ReconciliationCache
+var readyReplicasController *cbctrl.ReadyReplicasController
 var clock = clockutil.RealClock{}
 
 var _ = BeforeSuite(func() {
@@ -131,6 +132,10 @@ var _ = BeforeSuite(func() {
 	)
 	// Registers the buffer controller and the dynamic scalable ref watcher it owns.
 	err = controller.SetupWithManager(ctx, mgr)
+	Expect(err).ToNot(HaveOccurred())
+
+	readyReplicasController = cbctrl.NewReadyReplicasController(mgr.GetClient())
+	err = readyReplicasController.SetupWithManager(mgr)
 	Expect(err).ToNot(HaveOccurred())
 
 	go func() {

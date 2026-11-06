@@ -285,4 +285,35 @@ var _ = Describe("CapacityBuffer Controller", func() {
 			}).Should(Succeed())
 		})
 	})
+
+	Context("ReadyReplicas Updates", func() {
+		SetDefaultEventuallyTimeout(5 * time.Second)
+		SetDefaultEventuallyPollingInterval(100 * time.Millisecond)
+
+		AfterEach(func() {
+			By("cleaning up test resources")
+			_ = buffersClient.AutoscalingV1beta1().CapacityBuffers(namespace).DeleteCollection(ctx, metav1.DeleteOptions{}, metav1.ListOptions{})
+		})
+
+		It("should reconcile buffer readyReplicas when updated", func() {
+			By("creating a capacity buffer")
+			buffer := testutil.NewBuffer(
+				testutil.WithName("b1"),
+				testutil.WithNamespace[*v1beta1.CapacityBuffer](namespace),
+				testutil.WithActiveProvisioningStrategy(),
+			)
+			buffer, err := buffersClient.AutoscalingV1beta1().CapacityBuffers(namespace).Create(ctx, buffer, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("updating readyReplicas via the controller")
+			readyReplicasController.Update(buffer, 3)
+
+			By("waiting until the buffer's readyReplicas get reconciled")
+			Eventually(func(g Gomega) {
+				b, err := buffersClient.AutoscalingV1beta1().CapacityBuffers(namespace).Get(ctx, "b1", metav1.GetOptions{})
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(b.Status.ReadyReplicas).To(Equal(new(int32(3))))
+			}).Should(Succeed())
+		})
+	})
 })
