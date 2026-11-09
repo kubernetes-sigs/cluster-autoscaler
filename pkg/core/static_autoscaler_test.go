@@ -2778,16 +2778,75 @@ func TestRemoveFixNodeTargetSize(t *testing.T) {
 	}
 
 	// Nothing should be fixed. The incorrect size state is not old enough.
-	removed, err := autoscaler.fixNodeGroupSize(context.Background(), now.Add(-50*time.Minute))
+	fixing, err := autoscaler.fixNodeGroupSize(context.Background(), now.Add(-50*time.Minute))
 	assert.NoError(t, err)
-	assert.False(t, removed)
+	assert.False(t, fixing)
 
 	// Node group should be decreased.
-	removed, err = autoscaler.fixNodeGroupSize(context.Background(), now)
+	fixing, err = autoscaler.fixNodeGroupSize(context.Background(), now)
 	assert.NoError(t, err)
-	assert.True(t, removed)
+	assert.True(t, fixing)
+	autoscaler.asyncNodeGroupOps.wait()
 	change := core_utils.GetStringFromChan(sizeChanges)
 	assert.Equal(t, "ng1/-2", change)
+}
+
+func TestFixNodeGroupSizeAsync(t *testing.T) {
+	sizeChanges := make(chan string, 10)
+	decreaseStarted := make(chan struct{}, 10)
+	unblockDecrease := make(chan struct{})
+	now := time.Now()
+
+	ng1_1 := BuildTestNode("ng1-1", 1000, 1000)
+	ng1_1.Spec.ProviderID = "ng1-1"
+	provider := testprovider.NewTestCloudProviderBuilder().WithOnScaleUp(func(nodegroup string, delta int) error {
+		decreaseStarted <- struct{}{}
+		<-unblockDecrease
+		sizeChanges <- fmt.Sprintf("%s/%d", nodegroup, delta)
+		return nil
+	}).Build()
+	provider.AddNodeGroup("ng1", 1, 10, 3)
+	provider.AddNode("ng1", ng1_1)
+
+	fakeClient := &fake.Clientset{}
+	fakeLogRecorder, _ := clusterstate_utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
+
+	autoscalingCtx := &ca_context.AutoscalingContext{
+		AutoscalingOptions: config.AutoscalingOptions{
+			NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+				MaxNodeProvisionTime: 45 * time.Minute,
+			},
+		},
+		CloudProvider: provider,
+	}
+
+	clusterState := clusterstate.NewClusterStateRegistry(provider, fakeLogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.AutoscalingOptions.NodeGroupDefaults), nil, clusterstate.WithConfig(clusterstate.ClusterStateRegistryConfig{
+		MaxTotalUnreadyPercentage: 10,
+		OkTotalUnreadyCount:       1,
+	}))
+	err := clusterState.UpdateNodes(context.Background(), []*apiv1.Node{ng1_1}, now.Add(-time.Hour))
+	assert.NoError(t, err)
+
+	autoscaler := &StaticAutoscaler{
+		AutoscalingContext:   autoscalingCtx,
+		clusterStateRegistry: clusterState,
+	}
+
+	// The decrease is started in the background, even though the cloud provider call blocks.
+	fixing, err := autoscaler.fixNodeGroupSize(context.Background(), now)
+	assert.NoError(t, err)
+	assert.True(t, fixing)
+	<-decreaseStarted
+
+	// While the decrease is in progress, it isn't started again for the same node group.
+	fixing, err = autoscaler.fixNodeGroupSize(context.Background(), now)
+	assert.NoError(t, err)
+	assert.False(t, fixing)
+
+	close(unblockDecrease)
+	autoscaler.asyncNodeGroupOps.wait()
+	assert.Equal(t, "ng1/-2", core_utils.GetStringFromChan(sizeChanges))
+	assert.Equal(t, core_utils.NothingReturned, core_utils.GetStringFromChan(sizeChanges))
 }
 
 func TestRemoveOldUnregisteredNodes(t *testing.T) {
