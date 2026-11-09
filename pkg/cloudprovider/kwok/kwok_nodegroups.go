@@ -52,7 +52,16 @@ func (nodeGroup *NodeGroup) MinSize(ctx context.Context) int {
 // TargetSize returns the current TARGET size of the node group. It is possible that the
 // number is different from the number of nodes registered in Kubernetes.
 func (nodeGroup *NodeGroup) TargetSize(ctx context.Context) (int, error) {
+	nodeGroup.mu.Lock()
+	defer nodeGroup.mu.Unlock()
 	return nodeGroup.targetSize, nil
+}
+
+// setTargetSize overwrites the target size of the node group.
+func (nodeGroup *NodeGroup) setTargetSize(size int) {
+	nodeGroup.mu.Lock()
+	defer nodeGroup.mu.Unlock()
+	nodeGroup.targetSize = size
 }
 
 // IncreaseSize increases NodeGroup size.
@@ -60,6 +69,12 @@ func (nodeGroup *NodeGroup) IncreaseSize(ctx context.Context, delta int) error {
 	if delta <= 0 {
 		return fmt.Errorf(sizeIncreaseMustBePositiveErr)
 	}
+
+	// Hold the lock for the whole operation so that concurrent size changes
+	// can't push the node group above its max size.
+	nodeGroup.mu.Lock()
+	defer nodeGroup.mu.Unlock()
+
 	size := nodeGroup.targetSize
 	newSize := int(size) + delta
 	if newSize > nodeGroup.MaxSize(context.TODO()) {
@@ -68,13 +83,14 @@ func (nodeGroup *NodeGroup) IncreaseSize(ctx context.Context, delta int) error {
 
 	klog.V(5).Infof("increasing size of nodegroup '%s' to %v (old size: %v, delta: %v)", nodeGroup.name, newSize, size, delta)
 
-	schedNode, err := nodeGroup.TemplateNodeInfo(context.TODO())
-	if err != nil {
+	if nodeGroup.nodeTemplate == nil {
 		return fmt.Errorf("couldn't create a template node for nodegroup %s", nodeGroup.name)
 	}
 
 	for i := 0; i < delta; i++ {
-		node := schedNode.Node()
+		// Every new node must be built from a fresh copy of the template,
+		// otherwise the shared node group template would be mutated in place.
+		node := nodeGroup.nodeTemplate.DeepCopy()
 		node.Name = fmt.Sprintf("%s-%s", nodeGroup.name, rand.String(5))
 		if node.Annotations == nil {
 			node.Annotations = map[string]string{}
@@ -102,6 +118,11 @@ func (nodeGroup *NodeGroup) AtomicIncreaseSize(ctx context.Context, delta int) e
 
 // DeleteNodes deletes the specified nodes from the node group.
 func (nodeGroup *NodeGroup) DeleteNodes(ctx context.Context, nodes []*apiv1.Node) error {
+	// Hold the lock for the whole operation so that concurrent deletions
+	// can't push the node group below its min size.
+	nodeGroup.mu.Lock()
+	defer nodeGroup.mu.Unlock()
+
 	size := nodeGroup.targetSize
 	if size <= nodeGroup.MinSize(context.TODO()) {
 		return fmt.Errorf(minSizeReachedErr)
@@ -140,6 +161,10 @@ func (nodeGroup *NodeGroup) DecreaseTargetSize(ctx context.Context, delta int) e
 	if delta >= 0 {
 		return fmt.Errorf(sizeDecreaseMustBeNegativeErr)
 	}
+
+	nodeGroup.mu.Lock()
+	defer nodeGroup.mu.Unlock()
+
 	size := nodeGroup.targetSize
 	nodes, err := nodeGroup.getNodeNamesForNodeGroup()
 	if err != nil {
@@ -200,7 +225,8 @@ func (nodeGroup *NodeGroup) Nodes(ctx context.Context) ([]cloudprovider.Instance
 
 // TemplateNodeInfo returns a node template for this node group.
 func (nodeGroup *NodeGroup) TemplateNodeInfo(ctx context.Context) (*framework.NodeInfo, error) {
-	nodeInfo := framework.NewNodeInfo(nodeGroup.nodeTemplate, nil, framework.NewPodInfo(cloudprovider.BuildKubeProxy(nodeGroup.Id()), nil))
+	// Return a copy so that callers can't mutate the node group template.
+	nodeInfo := framework.NewNodeInfo(nodeGroup.nodeTemplate.DeepCopy(), nil, framework.NewPodInfo(cloudprovider.BuildKubeProxy(nodeGroup.Id()), nil))
 	return nodeInfo, nil
 }
 
