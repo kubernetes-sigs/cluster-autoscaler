@@ -829,6 +829,97 @@ func TestScaleUpKeptWhileTargetSizeIsUnknown(t *testing.T) {
 	assert.False(t, clusterstate.IsNodeGroupHealthy(ctx, "broken"))
 }
 
+func TestRegisterRemovedUnregisteredNodes(t *testing.T) {
+	timeoutErr := cloudprovider.InstanceErrorInfo{ErrorClass: cloudprovider.OtherErrorClass, ErrorCode: string(metrics.Timeout), ErrorMessage: "scale-up timed out"}
+	stockoutErr := cloudprovider.InstanceErrorInfo{ErrorClass: cloudprovider.OutOfResourcesErrorClass, ErrorCode: "STOCKOUT", ErrorMessage: "zone is out of resources"}
+	testCases := []struct {
+		name                string
+		scaleUpRequestDelta int
+		// previousFailure is the failed scale-up registered before the nodes are removed, if any.
+		previousFailure *cloudprovider.InstanceErrorInfo
+		removed         int
+
+		wantScaleUpRequestDelta int
+		wantFailureRecorded     bool
+	}{
+		{
+			name:                    "removing nodes added by a scale-up backs off the node group and closes the scale-up request",
+			scaleUpRequestDelta:     2,
+			removed:                 2,
+			wantScaleUpRequestDelta: 0,
+			wantFailureRecorded:     true,
+		},
+		{
+			name:                    "removing some of the nodes added by a scale-up backs off the node group and shrinks the scale-up request",
+			scaleUpRequestDelta:     3,
+			removed:                 1,
+			wantScaleUpRequestDelta: 2,
+			wantFailureRecorded:     true,
+		},
+		{
+			name:                "removing nodes without scale-up request backs off the node group",
+			removed:             1,
+			wantFailureRecorded: true,
+		},
+		{
+			name:                "removing nodes of a node group backed off after a scale-up timeout doesn't back it off again",
+			previousFailure:     &timeoutErr,
+			removed:             1,
+			wantFailureRecorded: false,
+		},
+		{
+			name:                "removing nodes of a node group backed off for other reasons backs it off after a timeout",
+			previousFailure:     &stockoutErr,
+			removed:             1,
+			wantFailureRecorded: true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			now := time.Now()
+
+			provider := testprovider.NewTestCloudProviderBuilder().Build()
+			provider.AddNodeGroup("ng1", 0, 10, 3)
+			ng1 := provider.GetNodeGroup("ng1")
+
+			fakeClient := &fake.Clientset{}
+			fakeLogRecorder, _ := utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
+			registry := newMockTemplateNodeInfoRegistry(map[string]*framework.NodeInfo{"ng1": framework.NewTestNodeInfo(BuildTestNode("ng1-template", 1000, 1000))})
+			nodeGroupConfigProcessor := nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute})
+			scaleUpFailuresRegistry := scaleupfailures.NewRegistry()
+			clusterstate := NewNotifiedClusterStateRegistry(provider, fakeLogRecorder, newBackoff(), nodeGroupConfigProcessor, registry, withNotifiedScaleUpFailuresRegistry(scaleUpFailuresRegistry))
+
+			if tc.scaleUpRequestDelta > 0 {
+				clusterstate.RegisterScaleUp(ctx, ng1, tc.scaleUpRequestDelta, now.Add(-16*time.Minute))
+			}
+			if tc.previousFailure != nil {
+				clusterstate.RegisterFailedScaleUp(ctx, ng1, 1, *tc.previousFailure, now.Add(-time.Second))
+			}
+
+			clusterstate.RegisterRemovedUnregisteredNodes(ctx, ng1, tc.removed, now)
+
+			if tc.wantScaleUpRequestDelta > 0 {
+				assert.Equal(t, tc.wantScaleUpRequestDelta, clusterstate.scaleUpRequests["ng1"].Increase)
+			} else {
+				assert.False(t, clusterstate.HasNodeGroupStartedScaleUp("ng1"))
+			}
+			backoffStatus := clusterstate.BackoffStatusForNodeGroup(ctx, ng1, now)
+			assert.True(t, backoffStatus.IsBackedOff)
+			if tc.wantFailureRecorded {
+				assert.Equal(t, string(metrics.Timeout), backoffStatus.ErrorInfo.ErrorCode)
+				if assert.Len(t, clusterstate.GetScaleUpFailures()["ng1"], 1) {
+					failure := clusterstate.GetScaleUpFailures()["ng1"][0]
+					assert.Equal(t, tc.removed, failure.Delta)
+					assert.Equal(t, string(metrics.Timeout), failure.ErrorInfo.ErrorCode)
+				}
+			} else {
+				assert.Empty(t, clusterstate.GetScaleUpFailures()["ng1"])
+			}
+		})
+	}
+}
+
 func TestRegisterScaleDown(t *testing.T) {
 	ng1_1 := BuildTestNode("ng1-1", 1000, 1000)
 	provider := testprovider.NewTestCloudProviderBuilder().Build()

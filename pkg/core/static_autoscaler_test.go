@@ -50,6 +50,7 @@ import (
 	mockprovider "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/mocks"
 	testprovider "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate"
+	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/scaleupfailures"
 	clusterstate_utils "sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/utils"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
@@ -62,7 +63,9 @@ import (
 	. "sigs.k8s.io/cluster-autoscaler/pkg/core/test"
 	core_utils "sigs.k8s.io/cluster-autoscaler/pkg/core/utils"
 	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
+	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
 	"sigs.k8s.io/cluster-autoscaler/pkg/observers/loopstart"
+	"sigs.k8s.io/cluster-autoscaler/pkg/observers/nodegroupchange"
 	ca_processors "sigs.k8s.io/cluster-autoscaler/pkg/processors"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupconfig"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroups/asyncnodegroups"
@@ -2839,6 +2842,67 @@ func TestRemoveOldUnregisteredNodes(t *testing.T) {
 	assert.True(t, removed)
 	deletedNode := core_utils.GetStringFromChan(deletedNodes)
 	assert.Equal(t, "ng1/ng1-2", deletedNode)
+}
+
+// TestRemoveOldUnregisteredNodesRegistersFailedScaleUp verifies that removing nodes that failed to register within
+// maxNodeProvisionTime is registered as a failed scale-up, so that the node group gets backed off even if its
+// scale-up request looks fulfilled after the removal.
+func TestRemoveOldUnregisteredNodesRegistersFailedScaleUp(t *testing.T) {
+	deletedNodes := make(chan string, 10)
+
+	now := time.Now()
+
+	ng1_1 := BuildTestNode("ng1-1", 1000, 1000)
+	ng1_1.Spec.ProviderID = "ng1-1"
+	ng1_2 := BuildTestNode("ng1-2", 1000, 1000)
+	ng1_2.Spec.ProviderID = "ng1-2"
+	provider := testprovider.NewTestCloudProviderBuilder().WithOnScaleDown(func(nodegroup string, node string) error {
+		deletedNodes <- fmt.Sprintf("%s/%s", nodegroup, node)
+		return nil
+	}).Build()
+	provider.AddNodeGroup("ng1", 1, 10, 2)
+	provider.AddNode("ng1", ng1_1)
+	provider.AddNode("ng1", ng1_2)
+	ng1 := provider.GetNodeGroup("ng1")
+
+	fakeClient := &fake.Clientset{}
+	fakeLogRecorder, _ := clusterstate_utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
+
+	autoscalingCtx := &ca_context.AutoscalingContext{
+		AutoscalingOptions: config.AutoscalingOptions{
+			NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+				MaxNodeProvisionTime: 45 * time.Minute,
+			},
+		},
+		CloudProvider: provider,
+	}
+	scaleStateNotifier := nodegroupchange.NewNodeGroupChangeObserversList()
+	scaleUpFailuresRegistry := scaleupfailures.NewRegistry()
+	scaleStateNotifier.Register(scaleUpFailuresRegistry)
+	clusterState := clusterstate.NewClusterStateRegistry(provider, fakeLogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.AutoscalingOptions.NodeGroupDefaults), nil,
+		clusterstate.WithScaleStateNotifier(scaleStateNotifier), clusterstate.WithScaleUpFailuresRegistry(scaleUpFailuresRegistry))
+	clusterState.RegisterScaleUp(context.Background(), ng1, 1, now.Add(-time.Hour))
+	err := clusterState.UpdateNodes(context.Background(), []*apiv1.Node{ng1_1}, now.Add(-time.Hour))
+	assert.NoError(t, err)
+	unregisteredNodes := clusterState.GetUnregisteredNodes()
+	assert.Equal(t, 1, len(unregisteredNodes))
+
+	autoscaler := &StaticAutoscaler{
+		AutoscalingContext:   autoscalingCtx,
+		clusterStateRegistry: clusterState,
+	}
+	removed, err := autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
+	assert.NoError(t, err)
+	assert.True(t, removed)
+	assert.Equal(t, "ng1/ng1-2", core_utils.GetStringFromChan(deletedNodes))
+
+	assert.False(t, clusterState.HasNodeGroupStartedScaleUp("ng1"))
+	failures := clusterState.GetScaleUpFailures()["ng1"]
+	if assert.Len(t, failures, 1) {
+		assert.Equal(t, 1, failures[0].Delta)
+		assert.Equal(t, string(metrics.Timeout), failures[0].ErrorInfo.ErrorCode)
+		assert.Equal(t, cloudprovider.OtherErrorClass, failures[0].ErrorInfo.ErrorClass)
+	}
 }
 
 func setupTestRemoveOldUnregisteredNodesAtomic(t *testing.T, now time.Time, allowNonAtomicScaleUpToMax bool) (*clusterstate.ClusterStateRegistry, *ca_context.AutoscalingContext, *clusterstate_utils.LogEventRecorder, chan string) {
