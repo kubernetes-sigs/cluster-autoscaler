@@ -526,14 +526,14 @@ func (a *StaticAutoscaler) reconcileCluster(ctx context.Context, currentTime tim
 	unregisteredNodes := a.clusterStateRegistry.GetUnregisteredNodes()
 	if len(unregisteredNodes) > 0 {
 		logger.V(1).Info("unregistered nodes present", "unregisteredNodesCount", len(unregisteredNodes))
-		removedAny, err := a.removeOldUnregisteredNodes(ctx, unregisteredNodes,
+		removingAny, err := a.removeOldUnregisteredNodes(ctx, unregisteredNodes,
 			a.clusterStateRegistry, currentTime, autoscalingCtx.LogRecorder)
 		// There was a problem with removing unregistered nodes. Retry in the next loop.
 		if err != nil {
 			logger.Info("Failed to remove unregistered nodes", "err", err)
 		}
-		if removedAny {
-			logger.V(0).Info("Some unregistered nodes were removed")
+		if removingAny {
+			logger.V(0).Info("Started removing some unregistered nodes")
 		}
 	}
 
@@ -1148,8 +1148,8 @@ func (a *StaticAutoscaler) fixNodeGroupSize(ctx context.Context, currentTime tim
 	return fixing, nil
 }
 
-// removeOldUnregisteredNodes removes unregistered nodes if needed. Returns true
-// if anything was removed and error if such occurred.
+// removeOldUnregisteredNodes removes unregistered nodes if needed. The nodes are removed in the
+// background. Returns true if it started removing anything and error if such occurred.
 func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUnregisteredNodes []clusterstate.UnregisteredNode,
 	csr *clusterstate.ClusterStateRegistry, currentTime time.Time, logRecorder *utils.LogEventRecorder) (bool, error) {
 
@@ -1160,7 +1160,7 @@ func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUn
 	}
 
 	nodeGroups := a.nodeGroupsById(ctx)
-	removedAny := false
+	removingAny := false
 	for nodeGroupId, unregisteredNodesToDelete := range unregisteredNodesToRemove {
 		nodeGroup := nodeGroups[nodeGroupId]
 		logger.V(0).Info("Removing unregistered nodes for node group", "nodesCount", len(unregisteredNodesToDelete), "nodeGroupId", nodeGroupId)
@@ -1192,26 +1192,40 @@ func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUn
 			continue
 		}
 
-		err = deleteNodesFromNodeGroup(ctx, nodeGroup, nodesToDelete, a.ForceDeleteLongUnregisteredNodes)
-		csr.InvalidateNodeInstancesCacheEntry(ctx, nodeGroup)
-		if err != nil {
-			metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonOldUnregistered, metrics.NodeDeletionFailed)
-			logger.Info("Failed to remove unregistered nodes from node group", "nodesToDeleteCount", len(nodesToDelete), "nodeGroupId", nodeGroupId, "err", err)
-			for _, node := range nodesToDelete {
-				logRecorder.Eventf(apiv1.EventTypeWarning, "DeleteUnregisteredFailed",
-					"Failed to remove node %s: %v", node.Name, err)
-			}
-			return removedAny, err
+		started := a.asyncNodeGroupOps.tryStart(nodeGroupId, func() {
+			a.deleteUnregisteredNodes(ctx, nodeGroup, nodesToDelete, csr, logRecorder)
+		})
+		if !started {
+			logger.V(2).Info("Previous operation on node group still in progress, not removing its unregistered nodes now", "nodeGroupId", nodeGroupId)
+			continue
 		}
-		for _, node := range nodesToDelete {
-			logRecorder.Eventf(apiv1.EventTypeNormal, "DeleteUnregistered",
-				"Removed unregistered node %v", node.Name)
-		}
-		metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonOldUnregistered, metrics.NodeDeletionSucceeded)
-		metrics.RegisterOldUnregisteredNodesRemoved(len(nodesToDelete))
-		removedAny = true
+		removingAny = true
 	}
-	return removedAny, nil
+	return removingAny, nil
+}
+
+// deleteUnregisteredNodes deletes the given unregistered nodes from the node group and reports
+// the result.
+func (a *StaticAutoscaler) deleteUnregisteredNodes(ctx context.Context, nodeGroup cloudprovider.NodeGroup, nodesToDelete []*apiv1.Node,
+	csr *clusterstate.ClusterStateRegistry, logRecorder *utils.LogEventRecorder) {
+	logger := klog.FromContext(ctx)
+	err := deleteNodesFromNodeGroup(ctx, nodeGroup, nodesToDelete, a.ForceDeleteLongUnregisteredNodes)
+	csr.InvalidateNodeInstancesCacheEntry(ctx, nodeGroup)
+	if err != nil {
+		metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonOldUnregistered, metrics.NodeDeletionFailed)
+		logger.Info("Failed to remove unregistered nodes from node group", "nodesToDeleteCount", len(nodesToDelete), "nodeGroupId", nodeGroup.Id(), "err", err)
+		for _, node := range nodesToDelete {
+			logRecorder.Eventf(apiv1.EventTypeWarning, "DeleteUnregisteredFailed",
+				"Failed to remove node %s: %v", node.Name, err)
+		}
+		return
+	}
+	for _, node := range nodesToDelete {
+		logRecorder.Eventf(apiv1.EventTypeNormal, "DeleteUnregistered",
+			"Removed unregistered node %v", node.Name)
+	}
+	metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonOldUnregistered, metrics.NodeDeletionSucceeded)
+	metrics.RegisterOldUnregisteredNodesRemoved(len(nodesToDelete))
 }
 
 // deleteNodesFromNodeGroup deletes the nodes from the node group. If force is set, the node

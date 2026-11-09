@@ -2901,8 +2901,81 @@ func TestRemoveOldUnregisteredNodes(t *testing.T) {
 	removed, err = autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
 	assert.NoError(t, err)
 	assert.True(t, removed)
+	autoscaler.asyncNodeGroupOps.wait()
 	deletedNode := core_utils.GetStringFromChan(deletedNodes)
 	assert.Equal(t, "ng1/ng1-2", deletedNode)
+}
+
+func TestRemoveOldUnregisteredNodesAsync(t *testing.T) {
+	deletedNodes := make(chan string, 10)
+	deleteStarted := make(chan struct{}, 10)
+	unblockDelete := make(chan struct{})
+
+	now := time.Now()
+
+	ng1_1 := BuildTestNode("ng1-1", 1000, 1000)
+	ng1_1.Spec.ProviderID = "ng1-1"
+	ng1_2 := BuildTestNode("ng1-2", 1000, 1000)
+	ng1_2.Spec.ProviderID = "ng1-2"
+	provider := testprovider.NewTestCloudProviderBuilder().WithOnScaleDown(func(nodegroup string, node string) error {
+		deleteStarted <- struct{}{}
+		<-unblockDelete
+		deletedNodes <- fmt.Sprintf("%s/%s", nodegroup, node)
+		return nil
+	}).Build()
+	// Min size 0, so that the min size constraint doesn't prevent removing the node again below.
+	provider.AddNodeGroup("ng1", 0, 10, 2)
+	provider.AddNode("ng1", ng1_1)
+	provider.AddNode("ng1", ng1_2)
+
+	fakeClient := &fake.Clientset{}
+	fakeLogRecorder, _ := clusterstate_utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
+
+	autoscalingCtx := &ca_context.AutoscalingContext{
+		AutoscalingOptions: config.AutoscalingOptions{
+			NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+				MaxNodeProvisionTime: 45 * time.Minute,
+			},
+		},
+		CloudProvider: provider,
+	}
+	clusterState := clusterstate.NewClusterStateRegistry(provider, fakeLogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.AutoscalingOptions.NodeGroupDefaults), nil, clusterstate.WithConfig(clusterstate.ClusterStateRegistryConfig{
+		MaxTotalUnreadyPercentage: 10,
+		OkTotalUnreadyCount:       1,
+	}))
+	err := clusterState.UpdateNodes(context.Background(), []*apiv1.Node{ng1_1}, now.Add(-time.Hour))
+	assert.NoError(t, err)
+
+	unregisteredNodes := clusterState.GetUnregisteredNodes()
+	assert.Equal(t, 1, len(unregisteredNodes))
+
+	autoscaler := &StaticAutoscaler{
+		AutoscalingContext:   autoscalingCtx,
+		clusterStateRegistry: clusterState,
+	}
+
+	// The removal is started in the background, even though the cloud provider call blocks.
+	removed, err := autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
+	assert.NoError(t, err)
+	assert.True(t, removed)
+	<-deleteStarted
+
+	// While the removal is in progress, it isn't started again for the same node group.
+	removed, err = autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
+	assert.NoError(t, err)
+	assert.False(t, removed)
+
+	close(unblockDelete)
+	autoscaler.asyncNodeGroupOps.wait()
+	assert.Equal(t, "ng1/ng1-2", core_utils.GetStringFromChan(deletedNodes))
+	assert.Equal(t, core_utils.NothingReturned, core_utils.GetStringFromChan(deletedNodes))
+
+	// Once the removal has finished, it can be started again.
+	removed, err = autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
+	assert.NoError(t, err)
+	assert.True(t, removed)
+	autoscaler.asyncNodeGroupOps.wait()
+	assert.Equal(t, "ng1/ng1-2", core_utils.GetStringFromChan(deletedNodes))
 }
 
 func setupTestRemoveOldUnregisteredNodesAtomic(t *testing.T, now time.Time, allowNonAtomicScaleUpToMax bool) (*clusterstate.ClusterStateRegistry, *ca_context.AutoscalingContext, *clusterstate_utils.LogEventRecorder, chan string) {
@@ -2970,6 +3043,7 @@ func TestRemoveOldUnregisteredNodesAtomic(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.True(t, removed)
+	autoscaler.asyncNodeGroupOps.wait()
 
 	wantNames, deletedNames := []string{}, []string{}
 	for i := 0; i < 10; i++ {
@@ -3006,6 +3080,7 @@ func TestRemoveOldUnregisteredNodesAtomic(t *testing.T) {
 	removed, err = autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, autoscaler.clusterStateRegistry, now, fakeLogRecorder)
 	assert.NoError(t, err)
 	assert.True(t, removed)
+	autoscaler.asyncNodeGroupOps.wait()
 
 	wantNames, deletedNames = []string{}, []string{}
 	for i := 0; i < 10; i++ {
