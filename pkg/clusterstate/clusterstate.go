@@ -134,6 +134,7 @@ type ClusterStateRegistry struct {
 	perNodeGroupReadiness              map[string]Readiness
 	totalReadiness                     Readiness
 	acceptableRanges                   map[string]AcceptableRange
+	unknownTargetSizes                 map[string]bool // Running node groups whose target size couldn't be determined in the last update.
 	incorrectNodeGroupSizes            map[string]IncorrectNodeGroupSize
 	unregisteredNodes                  map[string]UnregisteredNode
 	deletedNodes                       map[string]struct{}
@@ -623,7 +624,8 @@ func (csr *ClusterStateRegistry) getUpcomingNodesInNodeGroup(ctx context.Context
 func (csr *ClusterStateRegistry) areThereUpcomingNodesInNodeGroup(ctx context.Context, nodeGroupName string, ignoreUnregisteredBefore time.Time) bool {
 	upcoming, ok := csr.getUpcomingNodesInNodeGroup(ctx, nodeGroupName)
 	if !ok {
-		return false
+		// An unknown target size doesn't mean that the scale-up has finished. Keep waiting for it, until it times out.
+		return csr.unknownTargetSizes[nodeGroupName]
 	}
 	// Long-unregistered nodes aren't upcoming, but the ones added by this request haven't fulfilled it.
 	for _, name := range csr.perNodeGroupReadiness[nodeGroupName].LongUnregistered {
@@ -686,8 +688,15 @@ type AcceptableRange struct {
 // the expected number of ready nodes is between targetSize and targetSize + 3.
 func (csr *ClusterStateRegistry) updateAcceptableRanges(ctx context.Context, targetSize map[string]int) {
 	result := make(map[string]AcceptableRange)
+	// The target size of node groups for which it couldn't be determined must not be assumed to be 0, otherwise
+	// their scale-up requests would be considered fulfilled.
+	unknownTargetSizes := make(map[string]bool)
 	for _, nodeGroup := range csr.getRunningNodeGroups(ctx) {
-		size := targetSize[nodeGroup.Id()]
+		size, found := targetSize[nodeGroup.Id()]
+		if !found {
+			unknownTargetSizes[nodeGroup.Id()] = true
+			continue
+		}
 		readiness := csr.perNodeGroupReadiness[nodeGroup.Id()]
 		result[nodeGroup.Id()] = AcceptableRange{
 			MinNodes:      size - len(readiness.LongUnregistered),
@@ -696,16 +705,23 @@ func (csr *ClusterStateRegistry) updateAcceptableRanges(ctx context.Context, tar
 		}
 	}
 	for nodeGroupName, scaleUpRequest := range csr.scaleUpRequests {
+		if unknownTargetSizes[nodeGroupName] {
+			continue
+		}
 		acceptableRange := result[nodeGroupName]
 		acceptableRange.MinNodes -= scaleUpRequest.Increase
 		result[nodeGroupName] = acceptableRange
 	}
 	for _, scaleDownRequest := range csr.scaleDownRequests {
+		if unknownTargetSizes[scaleDownRequest.NodeGroup.Id()] {
+			continue
+		}
 		acceptableRange := result[scaleDownRequest.NodeGroup.Id()]
 		acceptableRange.MaxNodes++
 		result[scaleDownRequest.NodeGroup.Id()] = acceptableRange
 	}
 	csr.acceptableRanges = result
+	csr.unknownTargetSizes = unknownTargetSizes
 }
 
 // Readiness contains readiness information about a group of nodes.

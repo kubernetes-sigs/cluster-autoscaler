@@ -799,6 +799,36 @@ func TestOlderLongUnregisteredNodeDoesNotBlockScaleUp(t *testing.T) {
 	assert.False(t, clusterstate.BackoffStatusForNodeGroup(context.Background(), ng1, afterDeadline).IsBackedOff)
 }
 
+// TestScaleUpKeptWhileTargetSizeIsUnknown verifies that a failure to get the target size of a node group doesn't
+// make its scale-up look finished.
+func TestScaleUpKeptWhileTargetSizeIsUnknown(t *testing.T) {
+	ctx := t.Context()
+	now := time.Now()
+
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	provider.AddNodeGroup("healthy", 1, 10, 1)
+	healthyNode := BuildTestNode("healthy-1", 1000, 1000)
+	SetNodeReadyState(healthyNode, true, now.Add(-time.Hour))
+	provider.AddNode("healthy", healthyNode)
+	broken := &mockprovider.NodeGroup{}
+	broken.On("Id").Return("broken")
+	broken.On("TargetSize", mock.Anything).Return(0, fmt.Errorf("rate limit exceeded"))
+	broken.On("Nodes", mock.Anything).Return([]cloudprovider.Instance{}, nil)
+	broken.On("Autoprovisioned").Return(false)
+	broken.On("GetOptions", mock.Anything).Return(&config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute}, nil)
+	provider.InsertNodeGroup(broken)
+
+	fakeClient := &fake.Clientset{}
+	fakeLogRecorder, _ := utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
+	clusterstate := newTestClusterStateRegistry(provider, fakeLogRecorder)
+
+	clusterstate.RegisterScaleUp(ctx, broken, 1, now)
+	assert.NoError(t, clusterstate.UpdateNodes(ctx, []*apiv1.Node{healthyNode}, now.Add(10*time.Second)))
+	assert.True(t, clusterstate.HasNodeGroupStartedScaleUp("broken"))
+	assert.True(t, clusterstate.IsNodeGroupScalingUp(ctx, "broken"))
+	assert.False(t, clusterstate.IsNodeGroupHealthy(ctx, "broken"))
+}
+
 func TestRegisterScaleDown(t *testing.T) {
 	ng1_1 := BuildTestNode("ng1-1", 1000, 1000)
 	provider := testprovider.NewTestCloudProviderBuilder().Build()
