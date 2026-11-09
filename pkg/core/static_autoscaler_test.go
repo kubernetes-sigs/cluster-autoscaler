@@ -2109,6 +2109,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 
 			// delete nodes with create errors
 			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			autoscaler.asyncNodeGroupOps.wait()
 
 			// nodes should be deleted
 			expectedDeleteCalls := 1
@@ -2144,6 +2145,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 
 			// delete nodes with create errors
 			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			autoscaler.asyncNodeGroupOps.wait()
 
 			// nodes should be deleted again
 			expectedDeleteCalls += 1
@@ -2217,6 +2219,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 
 			// delete nodes with create errors
 			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			autoscaler.asyncNodeGroupOps.wait()
 
 			// we expect no more Delete Nodes, don't increase expectedDeleteCalls
 			if tc.forceDeleteEnabled {
@@ -2265,6 +2268,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 
 			// No nodes are deleted when failed nodes don't have matching node groups
 			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			autoscaler.asyncNodeGroupOps.wait()
 			nodeGroupC.AssertNumberOfCalls(t, deleteMethod, 0)
 
 			// Node group with getOptions error gets no deletes.
@@ -2314,6 +2318,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 
 			// delete nodes with create errors
 			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			autoscaler.asyncNodeGroupOps.wait()
 
 			nodeGroupError.AssertNumberOfCalls(t, deleteMethod, 0)
 		})
@@ -2434,6 +2439,7 @@ func TestStaticAutoscalerInstanceCreationErrorsForZeroOrMaxScaling(t *testing.T)
 	}, false)
 
 	autoscaler.deleteCreatedNodesWithErrors(context.Background())
+	autoscaler.asyncNodeGroupOps.wait()
 
 	nodeGroupAtomic.AssertCalled(t, "DeleteNodes", mock.MatchedBy(
 		func(nodes []*apiv1.Node) bool {
@@ -2474,6 +2480,7 @@ func TestStaticAutoscalerInstanceCreationErrorsForZeroOrMaxScaling(t *testing.T)
 	}, true)
 
 	autoscaler.deleteCreatedNodesWithErrors(context.Background())
+	autoscaler.asyncNodeGroupOps.wait()
 
 	nodeGroupAtomic.AssertNumberOfCalls(t, "DeleteNodes", 0)
 
@@ -2512,6 +2519,7 @@ func TestStaticAutoscalerInstanceCreationErrorsForZeroOrMaxScaling(t *testing.T)
 	}, true)
 
 	autoscaler.deleteCreatedNodesWithErrors(context.Background())
+	autoscaler.asyncNodeGroupOps.wait()
 
 	nodeGroupAtomic.AssertCalled(t, "DeleteNodes", mock.MatchedBy(
 		func(nodes []*apiv1.Node) bool {

@@ -1277,14 +1277,13 @@ func toNodes(unregisteredNodes []clusterstate.UnregisteredNode) []*apiv1.Node {
 	return nodes
 }
 
+// deleteCreatedNodesWithErrors deletes nodes that failed to be created, in the background.
 func (a *StaticAutoscaler) deleteCreatedNodesWithErrors(ctx context.Context) {
 	// We always schedule deleting of incoming errornous nodes
 	// TODO[lukaszos] Consider adding logic to not retry delete every loop iteration
 	logger := klog.FromContext(ctx)
 	nodeGroups := a.nodeGroupsById(ctx)
 	nodesToDeleteByNodeGroupId := a.clusterStateRegistry.GetCreatedNodesWithErrors()
-
-	deletedAny := false
 
 	for nodeGroupId, nodesToDelete := range nodesToDeleteByNodeGroupId {
 		var err error
@@ -1293,24 +1292,38 @@ func (a *StaticAutoscaler) deleteCreatedNodesWithErrors(ctx context.Context) {
 		nodeGroup := nodeGroups[nodeGroupId]
 		if nodeGroup == nil {
 			err = fmt.Errorf("node group %s not found", nodeGroupId)
-		} else if nodesToDelete, err = overrideNodesToDeleteForZeroOrMax(ctx, a.NodeGroupDefaults, nodeGroup, nodesToDelete); err == nil && len(nodesToDelete) > 0 {
-			err = deleteNodesFromNodeGroup(ctx, nodeGroup, nodesToDelete, a.ForceDeleteFailedNodes)
+		} else {
+			nodesToDelete, err = overrideNodesToDeleteForZeroOrMax(ctx, a.NodeGroupDefaults, nodeGroup, nodesToDelete)
 		}
-
 		if err != nil {
 			logger.Info("Error while trying to delete nodes", "nodeGroupId", nodeGroupId, "err", err)
 			metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonCreateErrors, metrics.NodeDeletionFailed)
-		} else if len(nodesToDelete) > 0 {
-			deletedAny = true
-			a.clusterStateRegistry.InvalidateNodeInstancesCacheEntry(ctx, nodeGroup)
-			metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonCreateErrors, metrics.NodeDeletionSucceeded)
+			continue
+		}
+		if len(nodesToDelete) == 0 {
+			continue
+		}
+
+		started := a.asyncNodeGroupOps.tryStart(nodeGroupId, func() {
+			a.deleteNodesWithErrors(ctx, nodeGroup, nodesToDelete)
+		})
+		if !started {
+			logger.V(2).Info("Previous operation on node group still in progress, not deleting its nodes with create errors now", "nodeGroupId", nodeGroupId)
 		}
 	}
+}
 
-	if deletedAny {
-		logger.V(0).Info("Some nodes that failed to create were removed, recalculating cluster state.")
-		a.clusterStateRegistry.Recalculate(ctx)
+// deleteNodesWithErrors deletes the given nodes that failed to be created from the node group
+// and reports the result.
+func (a *StaticAutoscaler) deleteNodesWithErrors(ctx context.Context, nodeGroup cloudprovider.NodeGroup, nodesToDelete []*apiv1.Node) {
+	logger := klog.FromContext(ctx)
+	if err := deleteNodesFromNodeGroup(ctx, nodeGroup, nodesToDelete, a.ForceDeleteFailedNodes); err != nil {
+		logger.Info("Error while trying to delete nodes", "nodeGroupId", nodeGroup.Id(), "err", err)
+		metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonCreateErrors, metrics.NodeDeletionFailed)
+		return
 	}
+	a.clusterStateRegistry.InvalidateNodeInstancesCacheEntry(ctx, nodeGroup)
+	metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonCreateErrors, metrics.NodeDeletionSucceeded)
 }
 
 // overrideNodesToDeleteForZeroOrMax returns a list of nodes to delete, taking into account that
