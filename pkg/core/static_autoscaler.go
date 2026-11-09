@@ -545,7 +545,7 @@ func (a *StaticAutoscaler) reconcileCluster(ctx context.Context, currentTime tim
 	// Check if there has been a constant difference between the number of nodes in k8s and
 	// the number of nodes on the cloud provider side.
 	// TODO: andrewskim - add protection for ready AWS nodes.
-	fixedSomething, err := fixNodeGroupSize(ctx, autoscalingCtx, a.clusterStateRegistry, currentTime)
+	fixedSomething, err := a.fixNodeGroupSize(ctx, currentTime)
 	if err != nil {
 		logger.Error(err, "Failed to fix node group sizes")
 		return false, caerrors.ToAutoscalerError(caerrors.CloudProviderError, err)
@@ -1101,23 +1101,22 @@ func (a *StaticAutoscaler) isScaleDownInCooldown(currentTime time.Time) bool {
 		a.lastScaleDownDeleteTime.Add(a.ScaleDownDelayAfterDelete).After(currentTime)
 }
 
-// Sets the target size of node groups to the current number of nodes in them
-// if the difference was constant for a prolonged time. Returns true if managed
-// to fix something.
-func fixNodeGroupSize(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, clusterStateRegistry *clusterstate.ClusterStateRegistry, currentTime time.Time) (bool, error) {
+// fixNodeGroupSize sets the target size of node groups to the current number of nodes in them
+// if the difference was constant for a prolonged time. Returns true if managed to fix something.
+func (a *StaticAutoscaler) fixNodeGroupSize(ctx context.Context, currentTime time.Time) (bool, error) {
 	logger := klog.FromContext(ctx)
 	fixed := false
-	for _, nodeGroup := range autoscalingCtx.CloudProvider.NodeGroups(ctx) {
-		incorrectSize := clusterStateRegistry.GetIncorrectNodeGroupSize(nodeGroup.Id())
+	for _, nodeGroup := range a.CloudProvider.NodeGroups(ctx) {
+		incorrectSize := a.clusterStateRegistry.GetIncorrectNodeGroupSize(nodeGroup.Id())
 		if incorrectSize == nil {
 			continue
 		}
-		maxNodeProvisionTime, err := clusterStateRegistry.MaxNodeProvisionTime(ctx, nodeGroup)
+		maxNodeProvisionTime, err := a.clusterStateRegistry.MaxNodeProvisionTime(ctx, nodeGroup)
 		if err != nil {
 			return false, fmt.Errorf("failed to retrieve maxNodeProvisionTime for nodeGroup %s", nodeGroup.Id())
 		}
 		if incorrectSize.FirstObserved.Add(maxNodeProvisionTime).Before(currentTime) {
-			opts, err := nodeGroup.GetOptions(ctx, autoscalingCtx.NodeGroupDefaults)
+			opts, err := nodeGroup.GetOptions(ctx, a.NodeGroupDefaults)
 			if err != nil && err != cloudprovider.ErrNotImplemented {
 				return false, fmt.Errorf("failed to get options for nodeGroup %s: %v", nodeGroup.Id(), err)
 			}
@@ -1182,14 +1181,7 @@ func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUn
 			continue
 		}
 
-		if a.ForceDeleteLongUnregisteredNodes {
-			err = nodeGroup.ForceDeleteNodes(ctx, nodesToDelete)
-			if err == cloudprovider.ErrNotImplemented {
-				err = nodeGroup.DeleteNodes(ctx, nodesToDelete)
-			}
-		} else {
-			err = nodeGroup.DeleteNodes(ctx, nodesToDelete)
-		}
+		err = deleteNodesFromNodeGroup(ctx, nodeGroup, nodesToDelete, a.ForceDeleteLongUnregisteredNodes)
 		csr.InvalidateNodeInstancesCacheEntry(ctx, nodeGroup)
 		if err != nil {
 			metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonOldUnregistered, metrics.NodeDeletionFailed)
@@ -1209,6 +1201,18 @@ func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUn
 		removedAny = true
 	}
 	return removedAny, nil
+}
+
+// deleteNodesFromNodeGroup deletes the nodes from the node group. If force is set, the node
+// group's constraints (like its min size) are ignored, for cloud providers that support it.
+func deleteNodesFromNodeGroup(ctx context.Context, nodeGroup cloudprovider.NodeGroup, nodes []*apiv1.Node, force bool) error {
+	if force {
+		err := nodeGroup.ForceDeleteNodes(ctx, nodes)
+		if !errors.Is(err, cloudprovider.ErrNotImplemented) {
+			return err
+		}
+	}
+	return nodeGroup.DeleteNodes(ctx, nodes)
 }
 
 // oldUnregisteredNodes returns old unregistered nodes grouped by their node group id.
@@ -1265,14 +1269,7 @@ func (a *StaticAutoscaler) deleteCreatedNodesWithErrors(ctx context.Context) {
 		if nodeGroup == nil {
 			err = fmt.Errorf("node group %s not found", nodeGroupId)
 		} else if nodesToDelete, err = overrideNodesToDeleteForZeroOrMax(ctx, a.NodeGroupDefaults, nodeGroup, nodesToDelete); err == nil && len(nodesToDelete) > 0 {
-			if a.ForceDeleteFailedNodes {
-				err = nodeGroup.ForceDeleteNodes(ctx, nodesToDelete)
-				if errors.Is(err, cloudprovider.ErrNotImplemented) {
-					err = nodeGroup.DeleteNodes(ctx, nodesToDelete)
-				}
-			} else {
-				err = nodeGroup.DeleteNodes(ctx, nodesToDelete)
-			}
+			err = deleteNodesFromNodeGroup(ctx, nodeGroup, nodesToDelete, a.ForceDeleteFailedNodes)
 		}
 
 		if err != nil {

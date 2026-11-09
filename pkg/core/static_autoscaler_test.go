@@ -2772,13 +2772,18 @@ func TestRemoveFixNodeTargetSize(t *testing.T) {
 	err := clusterState.UpdateNodes(context.Background(), []*apiv1.Node{ng1_1}, now.Add(-time.Hour))
 	assert.NoError(t, err)
 
+	autoscaler := &StaticAutoscaler{
+		AutoscalingContext:   autoscalingCtx,
+		clusterStateRegistry: clusterState,
+	}
+
 	// Nothing should be fixed. The incorrect size state is not old enough.
-	removed, err := fixNodeGroupSize(context.Background(), autoscalingCtx, clusterState, now.Add(-50*time.Minute))
+	removed, err := autoscaler.fixNodeGroupSize(context.Background(), now.Add(-50*time.Minute))
 	assert.NoError(t, err)
 	assert.False(t, removed)
 
 	// Node group should be decreased.
-	removed, err = fixNodeGroupSize(context.Background(), autoscalingCtx, clusterState, now)
+	removed, err = autoscaler.fixNodeGroupSize(context.Background(), now)
 	assert.NoError(t, err)
 	assert.True(t, removed)
 	change := core_utils.GetStringFromChan(sizeChanges)
