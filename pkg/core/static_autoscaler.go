@@ -1191,6 +1191,9 @@ func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUn
 			err = nodeGroup.DeleteNodes(ctx, nodesToDelete)
 		}
 		csr.InvalidateNodeInstancesCacheEntry(ctx, nodeGroup)
+		// Removing the nodes decreased the node group target size, which could make an active scale-up request look
+		// fulfilled before it times out, so the removal has to be registered as a failed scale-up.
+		csr.RegisterRemovedUnregisteredNodes(ctx, nodeGroup, len(nodesToDelete), currentTime)
 		if err != nil {
 			metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonOldUnregistered, metrics.NodeDeletionFailed)
 			logger.Info("Failed to remove unregistered nodes from node group", "nodesToDeleteCount", len(nodesToDelete), "nodeGroupId", nodeGroupId, "err", err)
