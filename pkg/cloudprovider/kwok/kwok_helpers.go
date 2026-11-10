@@ -204,6 +204,13 @@ func prepareNode(no *apiv1.Node, ngName string) {
 	// add prefix in the name to make it clear that this node is different
 	// from the ones already existing in the cluster (in case there is a name clash)
 	no.Name = fmt.Sprintf("kwok-fake-%s", no.GetName())
+	// Templates don't have to define annotations or labels
+	if no.Annotations == nil {
+		no.Annotations = map[string]string{}
+	}
+	if no.Labels == nil {
+		no.Labels = map[string]string{}
+	}
 	no.Annotations[KwokManagedAnnotation] = "fake"
 	no.Annotations[NGNameAnnotation] = ngName
 	no.Spec.ProviderID = getProviderID(no.GetName())

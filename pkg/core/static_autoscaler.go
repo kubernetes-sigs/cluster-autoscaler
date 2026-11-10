@@ -1199,6 +1199,11 @@ func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUn
 			continue
 		}
 		logger.V(0).Info("Removing a batch of unregistered nodes from node group in the background, the next batch will be started once it finishes", "nodesCount", len(nodesToDelete), "nodeGroupId", nodeGroupId)
+		// Removing the nodes decreases the node group target size, which could make an active scale-up
+		// request look fulfilled before it times out, so the removal has to be registered as a failed
+		// scale-up. It's registered right away, rather than once the removal completes, so that no
+		// iteration can observe the decreased target size before the removal is registered.
+		csr.RegisterRemovedUnregisteredNodes(ctx, nodeGroup, len(nodesToDelete), currentTime)
 		removingAny = true
 	}
 	return removingAny, nil

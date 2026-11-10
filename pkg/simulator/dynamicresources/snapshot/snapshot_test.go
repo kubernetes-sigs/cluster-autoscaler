@@ -722,3 +722,113 @@ func TestSnapshotForkCommitRevert(t *testing.T) {
 		compareSnapshots(t, expectedState, snapshot, "After Fork, Modify, Revert, Fork, Modify")
 	})
 }
+
+// TestReservePodClaimsAliasRevert is a regression test for kubernetes-sigs/cluster-autoscaler#33:
+// a Pod referencing one claim through two aliases made ensureClaimWritable hand back the base
+// layer's pointer for the second alias, so the reservation was written into the base layer
+// in place and survived a Revert.
+func TestReservePodClaimsAliasRevert(t *testing.T) {
+	baseClaim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{Name: "shared", UID: "shared", Namespace: "default"}}
+	pod := test.BuildTestPod("aliaspod", 1, 1,
+		test.WithResourceClaim("aliasA", "shared", ""),
+		test.WithResourceClaim("aliasB", "shared", ""),
+	)
+	pod.Namespace = "default"
+
+	snapshot := NewSnapshot(map[ResourceClaimId]*resourceapi.ResourceClaim{GetClaimId(baseClaim): baseClaim}, nil, nil, nil)
+
+	snapshot.Fork()
+	if err := snapshot.ReservePodClaims(pod); err != nil {
+		t.Fatalf("ReservePodClaims(): unexpected error: %v", err)
+	}
+
+	// Inside the fork the reservation is visible exactly once.
+	forked, found := snapshot.getResourceClaim(GetClaimId(baseClaim))
+	if !found {
+		t.Fatalf("claim %v missing from the snapshot after ReservePodClaims()", GetClaimId(baseClaim))
+	}
+	if len(forked.Status.ReservedFor) != 1 {
+		t.Errorf("after ReservePodClaims() the claim has %d reservations, want 1", len(forked.Status.ReservedFor))
+	}
+	if forked == baseClaim {
+		t.Errorf("after ReservePodClaims() the current patch holds the base layer's claim object, want a copy")
+	}
+
+	snapshot.Revert()
+
+	// The base layer object itself must be untouched...
+	if len(baseClaim.Status.ReservedFor) != 0 {
+		t.Errorf("the base layer claim object was mutated in place: %d reservation(s), want 0", len(baseClaim.Status.ReservedFor))
+	}
+	// ...and so must what the snapshot reports after the Revert.
+	reverted, found := snapshot.getResourceClaim(GetClaimId(baseClaim))
+	if !found {
+		t.Fatalf("claim %v missing from the snapshot after Revert()", GetClaimId(baseClaim))
+	}
+	if len(reverted.Status.ReservedFor) != 0 {
+		t.Errorf("a claim referenced by a Pod through two aliases leaked %d reservation(s) past Revert(), want 0", len(reverted.Status.ReservedFor))
+	}
+}
+
+// TestClaimMutationsAliasRevert covers the other in-place claim mutators that go through
+// ensureClaimWritable, for the same aliasing scenario as TestReservePodClaimsAliasRevert.
+func TestClaimMutationsAliasRevert(t *testing.T) {
+	pod := test.BuildTestPod("aliaspod", 1, 1,
+		test.WithResourceClaim("aliasA", "shared", ""),
+		test.WithResourceClaim("aliasB", "shared", ""),
+	)
+	pod.Namespace = "default"
+	otherPod := test.BuildTestPod("otherpod", 1, 1)
+	otherPod.Namespace = "default"
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Snapshot) error
+	}{
+		{
+			name:   "UnreservePodClaims",
+			mutate: func(s *Snapshot) error { return s.UnreservePodClaims(pod) },
+		},
+		{
+			name: "RemovePodOwnedClaims",
+			mutate: func(s *Snapshot) error {
+				s.RemovePodOwnedClaims(context.Background(), pod)
+				return nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Not owned by the Pod, allocated, and reserved for both Pods - so the mutators
+			// rewrite it in place instead of deleting it.
+			baseClaim := &resourceapi.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "shared", UID: "shared", Namespace: "default"},
+				Status: resourceapi.ResourceClaimStatus{
+					Allocation: &resourceapi.AllocationResult{},
+					ReservedFor: []resourceapi.ResourceClaimConsumerReference{
+						drautils.PodClaimConsumerReference(pod),
+						drautils.PodClaimConsumerReference(otherPod),
+					},
+				},
+			}
+			want := baseClaim.DeepCopy()
+			snapshot := NewSnapshot(map[ResourceClaimId]*resourceapi.ResourceClaim{GetClaimId(baseClaim): baseClaim}, nil, nil, nil)
+
+			snapshot.Fork()
+			if err := tc.mutate(snapshot); err != nil {
+				t.Fatalf("%s(): unexpected error: %v", tc.name, err)
+			}
+			snapshot.Revert()
+
+			if diff := cmp.Diff(want, baseClaim); diff != "" {
+				t.Errorf("the base layer claim object was mutated in place (-want +got): %s", diff)
+			}
+			reverted, found := snapshot.getResourceClaim(GetClaimId(baseClaim))
+			if !found {
+				t.Fatalf("claim %v missing from the snapshot after Revert()", GetClaimId(baseClaim))
+			}
+			if diff := cmp.Diff(want, reverted); diff != "" {
+				t.Errorf("claim changed past Revert() (-want +got): %s", diff)
+			}
+		})
+	}
+}
