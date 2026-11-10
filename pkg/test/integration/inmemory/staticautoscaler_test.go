@@ -235,3 +235,161 @@ func TestFixNodeGroupSize_ZeroOrMaxNodeScaling(t *testing.T) {
 		assert.Equal(t, 4, targetSize)
 	})
 }
+
+// TestFixNodeGroupSize_SlowCloudProviderDoesNotBlockLoop verifies that fixNodeGroupSize decreases
+// the target size in the background: a slow cloud provider call doesn't block the loop, which
+// scales up another node group in the same iteration.
+func TestFixNodeGroupSize_SlowCloudProviderDoesNotBlockLoop(t *testing.T) {
+	const (
+		maxNodeProvisionTime = 10 * time.Second
+		cloudOperationDelay  = 10 * time.Minute
+	)
+	testConfig := integration.NewTestConfig().
+		WithOverrides(
+			integration.WithCloudProviderName("gce"),
+			integration.WithMaxNodeProvisionTime(maxNodeProvisionTime),
+		)
+
+	options := testConfig.ResolveOptions()
+	infra := integration.SetupInfrastructure(t)
+	fakes := infra.Fakes
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := test.GetTestContextWithCancel(t)
+		defer synctestutils.TearDown(cancel)
+
+		autoscaler, _, err := integration.DefaultAutoscalingBuilder(options, infra).Build(ctx)
+		assert.NoError(t, err)
+
+		// A node group with 2 small nodes, whose cloud provider operations take a long time to complete.
+		slowTemplate := test.BuildTestNode("slow-ng-node", 1000, 1000, test.IsReady(true))
+		slowNg := fakes.CloudProvider.AddNodeGroup(
+			"slow-ng",
+			fakecloudprovider.WithNodes(slowTemplate, 2),
+			fakecloudprovider.WithNGSize(0, 10),
+			fakecloudprovider.WithCloudOperationDelay(cloudOperationDelay),
+		)
+		// A node group with 1 big node, whose cloud provider operations complete immediately.
+		fastNode := test.BuildTestNode("fast-ng-node-0", 4000, 4000, test.IsReady(true))
+		fastNg := fakes.CloudProvider.AddNodeGroup("fast-ng", fakecloudprovider.WithNode(fastNode), fakecloudprovider.WithNGSize(1, 10))
+
+		// Add pods running on each node to prevent scale-down from deleting them.
+		fakes.K8s.AddPod(test.BuildScheduledTestPod("slow-pod-0", 600, 100, "slow-ng-node-0"))
+		fakes.K8s.AddPod(test.BuildScheduledTestPod("slow-pod-1", 600, 100, "slow-ng-node-1"))
+		fakes.K8s.AddPod(test.BuildScheduledTestPod("fast-pod-0", 2400, 100, "fast-ng-node-0"))
+
+		// First cycle: Autoscaler initializes cluster state with the registered nodes.
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, time.Second)
+
+		// Simulate discrepancy: TargetSize is 4 in cloud provider, but only 2 nodes exist.
+		slowNg.SetTargetSize(4)
+
+		// Second cycle: Autoscaler observes the discrepancy (2 registered nodes vs target 4).
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, time.Second)
+
+		// A pending pod that only fits on a new node of the fast node group.
+		fakes.K8s.AddPod(test.BuildTestPod("pending-pod", 2000, 100, test.MarkUnschedulable()))
+
+		// Third cycle: Advance time past MaxNodeProvisionTime. fixNodeGroupSize starts decreasing the
+		// target size of the slow node group in the background, so the iteration doesn't wait for the
+		// slow cloud provider call: the pending pod gets a new node in the same iteration, while the
+		// target size decrease is still in flight. (Had the iteration waited for the call, the call
+		// would have already completed by now.)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, maxNodeProvisionTime+time.Second)
+		fastSize, err := fastNg.TargetSize(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, 2, fastSize, "the pending pod should get a new node in the same iteration")
+		slowSize, err := slowNg.TargetSize(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, 4, slowSize, "the target size decrease should still be in flight")
+
+		// Once the slow cloud provider call completes, the target size is fixed.
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, cloudOperationDelay+time.Second)
+		slowSize, err = slowNg.TargetSize(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, 2, slowSize)
+	})
+}
+
+// TestRemoveOldUnregisteredNodes_SlowCloudProviderDoesNotBlockLoop verifies that long-unregistered
+// nodes are removed in the background: a slow cloud provider call doesn't block the loop, which
+// scales up another node group in the same iteration.
+func TestRemoveOldUnregisteredNodes_SlowCloudProviderDoesNotBlockLoop(t *testing.T) {
+	const (
+		maxNodeProvisionTime = 10 * time.Second
+		cloudOperationDelay  = 10 * time.Minute
+	)
+	testConfig := integration.NewTestConfig().
+		WithOverrides(
+			integration.WithCloudProviderName("gce"),
+			integration.WithMaxNodeProvisionTime(maxNodeProvisionTime),
+		)
+
+	options := testConfig.ResolveOptions()
+	infra := integration.SetupInfrastructure(t)
+	fakes := infra.Fakes
+	// Unregistered nodes have no Node objects, CA identifies them by their instance IDs only.
+	fakes.CloudProvider.ConfigureNodeGroupForNodeBehavior(true)
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := test.GetTestContextWithCancel(t)
+		defer synctestutils.TearDown(cancel)
+
+		autoscaler, _, err := integration.DefaultAutoscalingBuilder(options, infra).Build(ctx)
+		assert.NoError(t, err)
+
+		// A node group with 2 small nodes, whose cloud provider operations take a long time to complete.
+		slowTemplate := test.BuildTestNode("slow-ng-node", 1000, 1000, test.IsReady(true))
+		slowNg := fakes.CloudProvider.AddNodeGroup(
+			"slow-ng",
+			fakecloudprovider.WithNodes(slowTemplate, 2),
+			fakecloudprovider.WithNGSize(0, 10),
+			fakecloudprovider.WithCloudOperationDelay(cloudOperationDelay),
+		)
+		// A node group with 1 big node, whose cloud provider operations complete immediately.
+		fastNode := test.BuildTestNode("fast-ng-node-0", 4000, 4000, test.IsReady(true))
+		fastNg := fakes.CloudProvider.AddNodeGroup("fast-ng", fakecloudprovider.WithNode(fastNode), fakecloudprovider.WithNGSize(1, 10))
+
+		// Add pods running on each node to prevent scale-down from deleting them.
+		fakes.K8s.AddPod(test.BuildScheduledTestPod("slow-pod-0", 600, 100, "slow-ng-node-0"))
+		slowPod1 := test.BuildScheduledTestPod("slow-pod-1", 600, 100, "slow-ng-node-1")
+		fakes.K8s.AddPod(slowPod1)
+		fakes.K8s.AddPod(test.BuildScheduledTestPod("fast-pod-0", 2400, 100, "fast-ng-node-0"))
+
+		// First cycle: Autoscaler initializes cluster state with the registered nodes.
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, time.Second)
+
+		// Simulate a node disappearing from k8s while its instance stays in the cloud provider, i.e.
+		// the instance becoming unregistered.
+		fakes.K8s.DeletePod(slowPod1.Namespace, slowPod1.Name)
+		fakes.K8s.DeleteNode("slow-ng-node-1")
+
+		// Second cycle: Autoscaler observes the unregistered node.
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, time.Second)
+
+		// A pending pod that only fits on a new node of the fast node group.
+		fakes.K8s.AddPod(test.BuildTestPod("pending-pod", 2000, 100, test.MarkUnschedulable()))
+
+		// Third cycle: Advance time past MaxNodeProvisionTime. The autoscaler starts removing the
+		// unregistered node in the background, so the iteration doesn't wait for the slow cloud
+		// provider call: the pending pod gets a new node in the same iteration, while the removal is
+		// still in flight. (Had the iteration waited for the call, the call would have already
+		// completed by now.)
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, maxNodeProvisionTime+time.Second)
+		fastSize, err := fastNg.TargetSize(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, 2, fastSize, "the pending pod should get a new node in the same iteration")
+		slowInstances, err := slowNg.Nodes(ctx)
+		assert.NoError(t, err)
+		assert.Len(t, slowInstances, 2, "the unregistered node removal should still be in flight")
+
+		// Once the slow cloud provider call completes, the unregistered node is gone.
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, cloudOperationDelay+time.Second)
+		slowInstances, err = slowNg.Nodes(ctx)
+		assert.NoError(t, err)
+		assert.Len(t, slowInstances, 1)
+		slowSize, err := slowNg.TargetSize(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, slowSize)
+	})
+}
