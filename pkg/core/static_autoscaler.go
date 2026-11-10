@@ -549,14 +549,12 @@ func (a *StaticAutoscaler) reconcileCluster(ctx context.Context, currentTime tim
 	// Check if there has been a constant difference between the number of nodes in k8s and
 	// the number of nodes on the cloud provider side.
 	// TODO: andrewskim - add protection for ready AWS nodes.
-	fixingSomething, err := a.fixNodeGroupSize(ctx, currentTime)
-	if err != nil {
+	// The target sizes are fixed in the background, so nothing has changed yet when this
+	// returns and the iteration can continue; the new sizes are picked up by UpdateNodes in
+	// a subsequent iteration, like any other target size change made outside of this loop.
+	if _, err := a.fixNodeGroupSize(ctx, currentTime); err != nil {
 		logger.Error(err, "Failed to fix node group sizes")
 		return false, caerrors.ToAutoscalerError(caerrors.CloudProviderError, err)
-	}
-	if fixingSomething {
-		logger.V(0).Info("Started fixing some node group target size, skipping the iteration")
-		return true, nil
 	}
 
 	metrics.UpdateLastTime(metrics.Autoscaling, time.Now())
