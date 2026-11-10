@@ -30,7 +30,6 @@ import (
 // The zero value is ready to use.
 type asyncNodeGroupOps struct {
 	mu       sync.Mutex
-	wg       sync.WaitGroup
 	inFlight map[string]bool
 }
 
@@ -46,23 +45,14 @@ func (a *asyncNodeGroupOps) tryStart(nodeGroupId string, op func()) bool {
 		a.inFlight = make(map[string]bool)
 	}
 	a.inFlight[nodeGroupId] = true
-	a.wg.Add(1)
-	go func() {
-		defer a.finish(nodeGroupId)
-		op()
-	}()
+	go a.run(nodeGroupId, op)
 	return true
 }
 
-func (a *asyncNodeGroupOps) finish(nodeGroupId string) {
+// run runs op and then marks the node group as free for the next operation.
+func (a *asyncNodeGroupOps) run(nodeGroupId string, op func()) {
+	op()
 	a.mu.Lock()
 	delete(a.inFlight, nodeGroupId)
 	a.mu.Unlock()
-	a.wg.Done()
-}
-
-// wait blocks until all operations that are currently in flight have finished. It is meant
-// for tests, which need deterministic results of the asynchronous operations.
-func (a *asyncNodeGroupOps) wait() {
-	a.wg.Wait()
 }
