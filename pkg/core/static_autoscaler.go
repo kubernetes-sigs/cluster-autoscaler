@@ -526,14 +526,11 @@ func (a *StaticAutoscaler) reconcileCluster(ctx context.Context, currentTime tim
 	unregisteredNodes := a.clusterStateRegistry.GetUnregisteredNodes()
 	if len(unregisteredNodes) > 0 {
 		logger.V(1).Info("unregistered nodes present", "unregisteredNodesCount", len(unregisteredNodes))
-		removingAny, err := a.removeOldUnregisteredNodes(ctx, unregisteredNodes,
+		_, err := a.removeOldUnregisteredNodes(ctx, unregisteredNodes,
 			a.clusterStateRegistry, currentTime, autoscalingCtx.LogRecorder)
 		// There was a problem with removing unregistered nodes. Retry in the next loop.
 		if err != nil {
 			logger.Info("Failed to remove unregistered nodes", "err", err)
-		}
-		if removingAny {
-			logger.V(0).Info("Started removing some unregistered nodes")
 		}
 	}
 
@@ -1105,7 +1102,8 @@ func (a *StaticAutoscaler) isScaleDownInCooldown(currentTime time.Time) bool {
 
 // fixNodeGroupSize sets the target size of node groups to the current number of nodes in them
 // if the difference was constant for a prolonged time. The target sizes are changed in the
-// background. Returns true if it started fixing something.
+// background, one operation per node group at a time. Returns true if it started fixing
+// something.
 func (a *StaticAutoscaler) fixNodeGroupSize(ctx context.Context, currentTime time.Time) (bool, error) {
 	logger := klog.FromContext(ctx)
 	fixing := false
@@ -1130,15 +1128,17 @@ func (a *StaticAutoscaler) fixNodeGroupSize(ctx context.Context, currentTime tim
 			delta := incorrectSize.CurrentSize - incorrectSize.ExpectedSize
 			if delta < 0 {
 				started := a.asyncNodeGroupOps.tryStart(nodeGroup.Id(), func() {
-					logger.V(0).Info("Decreasing size", "nodeGroupId", nodeGroup.Id(), "targetSize", incorrectSize.ExpectedSize, "size", incorrectSize.CurrentSize, "delta", delta)
 					if err := nodeGroup.DecreaseTargetSize(ctx, delta); err != nil {
-						logger.Error(err, "Failed to decrease node group size", "nodeGroupId", nodeGroup.Id(), "delta", delta)
+						logger.Error(err, "Failed to decrease node group target size", "nodeGroupId", nodeGroup.Id(), "delta", delta)
+						return
 					}
+					logger.V(0).Info("Decreased node group target size", "nodeGroupId", nodeGroup.Id(), "delta", delta)
 				})
 				if !started {
-					logger.V(2).Info("Previous operation on node group still in progress, not fixing its size now", "nodeGroupId", nodeGroup.Id())
+					logger.V(5).Info("Previous target size decrease of node group still in progress, not starting another one", "nodeGroupId", nodeGroup.Id())
 					continue
 				}
+				logger.V(0).Info("Decreasing node group target size in the background", "nodeGroupId", nodeGroup.Id(), "targetSize", incorrectSize.ExpectedSize, "size", incorrectSize.CurrentSize, "delta", delta)
 				fixing = true
 			}
 		}
@@ -1147,7 +1147,9 @@ func (a *StaticAutoscaler) fixNodeGroupSize(ctx context.Context, currentTime tim
 }
 
 // removeOldUnregisteredNodes removes unregistered nodes if needed. The nodes are removed in the
-// background. Returns true if it started removing anything and error if such occurred.
+// background, one batch per node group at a time: nodes that become eligible for removal while
+// a batch is in flight are removed in a later batch. Returns true if it started removing
+// anything and error if such occurred.
 func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUnregisteredNodes []clusterstate.UnregisteredNode,
 	csr *clusterstate.ClusterStateRegistry, currentTime time.Time, logRecorder *utils.LogEventRecorder) (bool, error) {
 
@@ -1161,7 +1163,6 @@ func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUn
 	removingAny := false
 	for nodeGroupId, unregisteredNodesToDelete := range unregisteredNodesToRemove {
 		nodeGroup := nodeGroups[nodeGroupId]
-		logger.V(0).Info("Removing unregistered nodes for node group", "nodesCount", len(unregisteredNodesToDelete), "nodeGroupId", nodeGroupId)
 		if !a.ForceDeleteLongUnregisteredNodes {
 			size, err := nodeGroup.TargetSize(ctx)
 			if err != nil {
@@ -1194,9 +1195,10 @@ func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUn
 			a.deleteUnregisteredNodes(ctx, nodeGroup, nodesToDelete, csr, logRecorder)
 		})
 		if !started {
-			logger.V(2).Info("Previous operation on node group still in progress, not removing its unregistered nodes now", "nodeGroupId", nodeGroupId)
+			logger.V(5).Info("Previous batch of unregistered nodes of node group still being removed, not starting another one", "nodeGroupId", nodeGroupId, "nodesCount", len(nodesToDelete))
 			continue
 		}
+		logger.V(0).Info("Removing a batch of unregistered nodes from node group in the background, the next batch will be started once it finishes", "nodesCount", len(nodesToDelete), "nodeGroupId", nodeGroupId)
 		removingAny = true
 	}
 	return removingAny, nil
@@ -1218,6 +1220,7 @@ func (a *StaticAutoscaler) deleteUnregisteredNodes(ctx context.Context, nodeGrou
 		}
 		return
 	}
+	logger.V(0).Info("Removed unregistered nodes from node group", "nodesCount", len(nodesToDelete), "nodeGroupId", nodeGroup.Id())
 	for _, node := range nodesToDelete {
 		logRecorder.Eventf(apiv1.EventTypeNormal, "DeleteUnregistered",
 			"Removed unregistered node %v", node.Name)
@@ -1275,7 +1278,8 @@ func toNodes(unregisteredNodes []clusterstate.UnregisteredNode) []*apiv1.Node {
 	return nodes
 }
 
-// deleteCreatedNodesWithErrors deletes nodes that failed to be created, in the background.
+// deleteCreatedNodesWithErrors deletes nodes that failed to be created. The nodes are deleted in
+// the background, one batch per node group at a time.
 func (a *StaticAutoscaler) deleteCreatedNodesWithErrors(ctx context.Context) {
 	// We always schedule deleting of incoming errornous nodes
 	// TODO[lukaszos] Consider adding logic to not retry delete every loop iteration
@@ -1285,8 +1289,6 @@ func (a *StaticAutoscaler) deleteCreatedNodesWithErrors(ctx context.Context) {
 
 	for nodeGroupId, nodesToDelete := range nodesToDeleteByNodeGroupId {
 		var err error
-		logger.V(1).Info("Deleting node group because of create errors", "nodesToDeleteCount", len(nodesToDelete), "nodeGroupId", nodeGroupId)
-
 		nodeGroup := nodeGroups[nodeGroupId]
 		if nodeGroup == nil {
 			err = fmt.Errorf("node group %s not found", nodeGroupId)
@@ -1294,7 +1296,7 @@ func (a *StaticAutoscaler) deleteCreatedNodesWithErrors(ctx context.Context) {
 			nodesToDelete, err = overrideNodesToDeleteForZeroOrMax(ctx, a.NodeGroupDefaults, nodeGroup, nodesToDelete)
 		}
 		if err != nil {
-			logger.Info("Error while trying to delete nodes", "nodeGroupId", nodeGroupId, "err", err)
+			logger.Info("Failed to determine which nodes with create errors to delete", "nodeGroupId", nodeGroupId, "err", err)
 			metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonCreateErrors, metrics.NodeDeletionFailed)
 			continue
 		}
@@ -1306,8 +1308,10 @@ func (a *StaticAutoscaler) deleteCreatedNodesWithErrors(ctx context.Context) {
 			a.deleteNodesWithErrors(ctx, nodeGroup, nodesToDelete)
 		})
 		if !started {
-			logger.V(2).Info("Previous operation on node group still in progress, not deleting its nodes with create errors now", "nodeGroupId", nodeGroupId)
+			logger.V(5).Info("Previous batch of nodes with create errors of node group still being deleted, not starting another one", "nodeGroupId", nodeGroupId, "nodesCount", len(nodesToDelete))
+			continue
 		}
+		logger.V(1).Info("Deleting a batch of nodes with create errors from node group in the background, the next batch will be started once it finishes", "nodesCount", len(nodesToDelete), "nodeGroupId", nodeGroupId)
 	}
 }
 
@@ -1322,6 +1326,7 @@ func (a *StaticAutoscaler) deleteNodesWithErrors(ctx context.Context, nodeGroup 
 	}
 	a.clusterStateRegistry.InvalidateNodeInstancesCacheEntry(ctx, nodeGroup)
 	metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonCreateErrors, metrics.NodeDeletionSucceeded)
+	logger.V(0).Info("Deleted nodes with create errors from node group", "nodesCount", len(nodesToDelete), "nodeGroupId", nodeGroup.Id())
 }
 
 // overrideNodesToDeleteForZeroOrMax returns a list of nodes to delete, taking into account that
