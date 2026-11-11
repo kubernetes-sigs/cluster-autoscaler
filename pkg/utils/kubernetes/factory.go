@@ -26,6 +26,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	kube_record "k8s.io/client-go/tools/record"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -37,10 +38,28 @@ const (
 	defaultBurstSize = 1
 	// Number of distinct event keys in the rate limiting cache.
 	defaultLRUCache = 8192
+	// Exact message client-go event recorder logs when its event queue is full and an event is dropped.
+	// Must match generateEvent() in client-go record/event.go
+	droppedEventLogMessage = "Unable to record event: too many queued events, dropped event"
 )
 
 // CreateEventRecorder creates an event recorder to send custom events to Kubernetes to be recorded for targeted Kubernetes objects
 func CreateEventRecorder(ctx context.Context, kubeClient clientset.Interface, recordDuplicatedEvents bool) kube_record.EventRecorder {
+	return createEventRecorder(ctx, kubeClient, recordDuplicatedEvents)
+}
+
+// CreateEventRecorderWithSuppressErrorQuota creates an event recorder with error logs limited by the SuppressErrorQuota.
+// The caller is responsible for calling Flush on the returned SuppressErrorQuota once per autoscaler loop.
+func CreateEventRecorderWithSuppressErrorQuota(ctx context.Context, kubeClient clientset.Interface, recordDuplicatedEvents bool) (kube_record.EventRecorder, *SuppressErrorQuota) {
+	suppressedErrorLogs := map[string]string{
+		droppedEventLogMessage: "NotTriggerScaleUp",
+	}
+	quota := NewSuppressErrorQuota(suppressedErrorLogs)
+	recorder := createEventRecorder(ctx, kubeClient, recordDuplicatedEvents).WithLogger(quota.Logger(klog.FromContext(ctx)))
+	return recorder, quota
+}
+
+func createEventRecorder(ctx context.Context, kubeClient clientset.Interface, recordDuplicatedEvents bool) kube_record.EventRecorderLogger {
 	var eventBroadcaster kube_record.EventBroadcaster
 	if recordDuplicatedEvents {
 		eventBroadcaster = kube_record.NewBroadcaster()
