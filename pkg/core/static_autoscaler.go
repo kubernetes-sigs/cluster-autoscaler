@@ -337,6 +337,7 @@ func (a *StaticAutoscaler) RunOnce(ctx context.Context, currentTime time.Time) c
 	a.processorCallbacks.reset()
 	a.DebuggingSnapshotter.StartDataCollection(ctx)
 	defer a.DebuggingSnapshotter.Flush(ctx)
+	defer a.RecorderSuppressErrorQuota.Flush(ctx)
 	if a.capacityBufferPodsRegistry != nil {
 		a.capacityBufferPodsRegistry.Clear()
 	}
