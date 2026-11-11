@@ -108,6 +108,9 @@ type AutoscalingKubeClients struct {
 	ClientSet kube_client.Interface
 	// Recorder for recording events.
 	Recorder kube_record.EventRecorder
+	// RecorderSuppressErrorQuota limits the "dropped event" error logs whose Event
+	// reason is configured. It has to be flushed once per autoscaler loop.
+	RecorderSuppressErrorQuota *kube_util.SuppressErrorQuota
 	// LogRecorder can be used to collect log messages to expose via Events on some central object.
 	LogRecorder *utils.LogEventRecorder
 }
@@ -167,7 +170,7 @@ func NewAutoscalingContext(
 // NewAutoscalingKubeClients builds AutoscalingKubeClients out of basic client.
 func NewAutoscalingKubeClients(ctx context.Context, opts config.AutoscalingOptions, kubeClient kube_client.Interface, informerFactory informers.SharedInformerFactory) *AutoscalingKubeClients {
 	listerRegistry := kube_util.NewListerRegistryWithDefaultListers(informerFactory)
-	kubeEventRecorder := kube_util.CreateEventRecorder(ctx, kubeClient, opts.RecordDuplicatedEvents)
+	kubeEventRecorder, recorderSuppressErrorQuota := kube_util.CreateEventRecorderWithSuppressErrorQuota(ctx, kubeClient, opts.RecordDuplicatedEvents)
 	logRecorder, err := utils.NewStatusMapRecorder(kubeClient, opts.ConfigNamespace, kubeEventRecorder, opts.WriteStatusConfigMap, opts.StatusConfigMapName)
 	if err != nil {
 		klog.Error("Failed to initialize status configmap, unable to write status events")
@@ -177,9 +180,10 @@ func NewAutoscalingKubeClients(ctx context.Context, opts config.AutoscalingOptio
 	}
 
 	return &AutoscalingKubeClients{
-		ListerRegistry: listerRegistry,
-		ClientSet:      kubeClient,
-		Recorder:       kubeEventRecorder,
-		LogRecorder:    logRecorder,
+		ListerRegistry:             listerRegistry,
+		ClientSet:                  kubeClient,
+		Recorder:                   kubeEventRecorder,
+		RecorderSuppressErrorQuota: recorderSuppressErrorQuota,
+		LogRecorder:                logRecorder,
 	}
 }
