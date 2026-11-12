@@ -77,3 +77,79 @@ func TestAutoscalerBuilderNoError(t *testing.T) {
 		time.Sleep(1 * time.Second)
 	})
 }
+
+func TestAutoscalerBuilderScaleDownStrategy(t *testing.T) {
+	testCases := []struct {
+		name              string
+		scaleDownStrategy string
+		wantErr           bool
+	}{
+		{
+			name:              "valid strategy",
+			scaleDownStrategy: "Utilization=1",
+		},
+		{
+			name:              "valid strategy trim whitespaces",
+			scaleDownStrategy: "Utilization  =  1  ",
+		},
+		{
+			name:              "invalid negative weight",
+			scaleDownStrategy: "Utilization=-42",
+			wantErr:           true,
+		},
+		{
+			name:              "invalid zero weight",
+			scaleDownStrategy: "Utilization=0",
+			wantErr:           true,
+		},
+		{
+			name:              "invalid weight format",
+			scaleDownStrategy: "Utilization=4.5.6",
+			wantErr:           true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := testutils.GetTestContextWithCancel(t)
+
+				options := config.AutoscalingOptions{
+					CloudProviderName: "gce",
+					EstimatorName:     estimator.BinpackingEstimatorName,
+					ExpanderNames:     expander.LeastWasteExpanderName,
+					ScaleDownStrategy: tc.scaleDownStrategy,
+				}
+
+				kubeClient := fake.NewClientset()
+				mgr, err := manager.New(&rest.Config{}, manager.Options{
+					Metrics: metricsserver.Options{
+						BindAddress: "0",
+					},
+					HealthProbeBindAddress: "0",
+				})
+				assert.NoError(t, err)
+
+				autoscaler, trigger, err := New(options).
+					WithDebuggingSnapshotter(debuggingsnapshot.NewDebuggingSnapshotter(false)).
+					WithManager(mgr).
+					WithKubeClient(kubeClient).
+					WithInformerFactory(informers.NewSharedInformerFactory(kubeClient, 0)).
+					WithCloudProvider(test.NewCloudProvider(nil)).
+					WithPodObserver(&loop.UnschedulablePodObserver{}).
+					Build(ctx)
+
+				if tc.wantErr {
+					assert.Error(t, err)
+					assert.Nil(t, autoscaler)
+					assert.Nil(t, trigger)
+				} else {
+					assert.NoError(t, err)
+					assert.NotNil(t, autoscaler)
+					assert.NotNil(t, trigger)
+				}
+				cancel()
+				time.Sleep(1 * time.Second)
+			})
+		})
+	}
+}
