@@ -25,7 +25,9 @@ import (
 // operations (removing long unregistered nodes, deleting nodes that failed to be created,
 // fixing node group target sizes) that are not latency critical, so that a slow or hanging
 // cloud provider call doesn't block the main loop, and so that the same operation isn't
-// re-issued every iteration while the previous one is still in progress.
+// re-issued every iteration while the previous one is still in progress. The limit is per node
+// group, not per kind of operation: e.g. unregistered nodes aren't removed from a node group
+// while its target size is being decreased, and vice versa.
 //
 // The zero value is ready to use.
 type asyncNodeGroupOps struct {

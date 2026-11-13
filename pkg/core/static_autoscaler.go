@@ -1102,8 +1102,8 @@ func (a *StaticAutoscaler) isScaleDownInCooldown(currentTime time.Time) bool {
 
 // fixNodeGroupSize sets the target size of node groups to the current number of nodes in them
 // if the difference was constant for a prolonged time. The target sizes are changed in the
-// background, one operation per node group at a time. Returns true if it started fixing
-// something.
+// background, one operation per node group at a time (see asyncNodeGroupOps). Returns true if
+// it started fixing something.
 func (a *StaticAutoscaler) fixNodeGroupSize(ctx context.Context, currentTime time.Time) (bool, error) {
 	logger := klog.FromContext(ctx)
 	fixing := false
@@ -1135,7 +1135,7 @@ func (a *StaticAutoscaler) fixNodeGroupSize(ctx context.Context, currentTime tim
 					logger.V(0).Info("Decreased node group target size", "nodeGroupId", nodeGroup.Id(), "delta", delta)
 				})
 				if !started {
-					logger.V(5).Info("Previous target size decrease of node group still in progress, not starting another one", "nodeGroupId", nodeGroup.Id())
+					logger.V(5).Info("Not starting target size decrease of node group, another background operation on the node group is still in progress", "nodeGroupId", nodeGroup.Id())
 					continue
 				}
 				logger.V(0).Info("Decreasing node group target size in the background", "nodeGroupId", nodeGroup.Id(), "targetSize", incorrectSize.ExpectedSize, "size", incorrectSize.CurrentSize, "delta", delta)
@@ -1147,9 +1147,10 @@ func (a *StaticAutoscaler) fixNodeGroupSize(ctx context.Context, currentTime tim
 }
 
 // removeOldUnregisteredNodes removes unregistered nodes if needed. The nodes are removed in the
-// background, one batch per node group at a time: nodes that become eligible for removal while
-// a batch is in flight are removed in a later batch. Returns true if it started removing
-// anything and error if such occurred.
+// background, one batch per node group at a time (see asyncNodeGroupOps): nodes that become
+// eligible for removal while a batch, or another background operation on the node group, is in
+// flight are removed in a later batch. Returns true if it started removing anything and error if
+// such occurred.
 func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUnregisteredNodes []clusterstate.UnregisteredNode,
 	csr *clusterstate.ClusterStateRegistry, currentTime time.Time, logRecorder *utils.LogEventRecorder) (bool, error) {
 
@@ -1195,7 +1196,7 @@ func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUn
 			a.deleteUnregisteredNodes(ctx, nodeGroup, nodesToDelete, csr, logRecorder)
 		})
 		if !started {
-			logger.V(5).Info("Previous batch of unregistered nodes of node group still being removed, not starting another one", "nodeGroupId", nodeGroupId, "nodesCount", len(nodesToDelete))
+			logger.V(5).Info("Not starting removal of unregistered nodes from node group, another background operation on the node group is still in progress", "nodeGroupId", nodeGroupId, "nodesCount", len(nodesToDelete))
 			continue
 		}
 		logger.V(0).Info("Removing a batch of unregistered nodes from node group in the background, the next batch will be started once it finishes", "nodesCount", len(nodesToDelete), "nodeGroupId", nodeGroupId)
@@ -1284,7 +1285,7 @@ func toNodes(unregisteredNodes []clusterstate.UnregisteredNode) []*apiv1.Node {
 }
 
 // deleteCreatedNodesWithErrors deletes nodes that failed to be created. The nodes are deleted in
-// the background, one batch per node group at a time.
+// the background, one batch per node group at a time (see asyncNodeGroupOps).
 func (a *StaticAutoscaler) deleteCreatedNodesWithErrors(ctx context.Context) {
 	// We always schedule deleting of incoming errornous nodes
 	// TODO[lukaszos] Consider adding logic to not retry delete every loop iteration
@@ -1313,7 +1314,7 @@ func (a *StaticAutoscaler) deleteCreatedNodesWithErrors(ctx context.Context) {
 			a.deleteNodesWithErrors(ctx, nodeGroup, nodesToDelete)
 		})
 		if !started {
-			logger.V(5).Info("Previous batch of nodes with create errors of node group still being deleted, not starting another one", "nodeGroupId", nodeGroupId, "nodesCount", len(nodesToDelete))
+			logger.V(5).Info("Not starting deletion of nodes with create errors from node group, another background operation on the node group is still in progress", "nodeGroupId", nodeGroupId, "nodesCount", len(nodesToDelete))
 			continue
 		}
 		logger.V(1).Info("Deleting a batch of nodes with create errors from node group in the background, the next batch will be started once it finishes", "nodesCount", len(nodesToDelete), "nodeGroupId", nodeGroupId)
