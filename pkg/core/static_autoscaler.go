@@ -23,6 +23,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/utils/integer"
@@ -114,6 +115,7 @@ type StaticAutoscaler struct {
 }
 
 type staticAutoscalerProcessorCallbacks struct {
+	mu                      sync.RWMutex
 	disableScaleDownForLoop bool
 	extraValues             map[string]interface{}
 	scaleDownPlanner        scaledown.Planner
@@ -130,19 +132,27 @@ func newStaticAutoscalerProcessorCallbacks() *staticAutoscalerProcessorCallbacks
 }
 
 func (callbacks *staticAutoscalerProcessorCallbacks) DisableScaleDownForLoop() {
+	callbacks.mu.Lock()
+	defer callbacks.mu.Unlock()
 	callbacks.disableScaleDownForLoop = true
 }
 
 func (callbacks *staticAutoscalerProcessorCallbacks) SetExtraValue(key string, value interface{}) {
+	callbacks.mu.Lock()
+	defer callbacks.mu.Unlock()
 	callbacks.extraValues[key] = value
 }
 
 func (callbacks *staticAutoscalerProcessorCallbacks) GetExtraValue(key string) (value interface{}, found bool) {
+	callbacks.mu.RLock()
+	defer callbacks.mu.RUnlock()
 	value, found = callbacks.extraValues[key]
 	return
 }
 
 func (callbacks *staticAutoscalerProcessorCallbacks) reset() {
+	callbacks.mu.Lock()
+	defer callbacks.mu.Unlock()
 	callbacks.disableScaleDownForLoop = false
 	callbacks.extraValues = make(map[string]interface{})
 }
