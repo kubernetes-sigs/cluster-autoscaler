@@ -71,6 +71,9 @@ func PodSpecSemanticallyEqual(p1 apiv1.PodSpec, p2 apiv1.PodSpec) bool {
 }
 
 func sanitizePodSpec(podSpec apiv1.PodSpec) apiv1.PodSpec {
+	// podSpec is a shallow copy: copy the container slices so that the helpers below don't modify the caller's pod.
+	podSpec.Containers = append([]apiv1.Container(nil), podSpec.Containers...)
+	podSpec.InitContainers = append([]apiv1.Container(nil), podSpec.InitContainers...)
 	dropProjectedVolumesAndMounts(&podSpec)
 	dropHostname(&podSpec)
 	dropEnv(&podSpec)
