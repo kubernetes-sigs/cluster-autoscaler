@@ -151,6 +151,7 @@ type ScaleUpStatusInfo struct {
 	PodsTriggeredScaleUp    []string
 	PodsRemainUnschedulable []string
 	PodsAwaitEvaluation     []string
+	ConsideredNodeGroups    []string
 }
 
 // WasSuccessful returns true iff scale up was successful
