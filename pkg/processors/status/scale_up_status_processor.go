@@ -44,6 +44,9 @@ type ScaleUpStatus struct {
 	ConsideredNodeGroups     []cloudprovider.NodeGroup
 	FailedCreationNodeGroups []cloudprovider.NodeGroup
 	FailedResizeNodeGroups   []cloudprovider.NodeGroup
+	// FailedResizeErrors preserves the error for each attempted, failed resize, keyed by node group ID.
+	// The combined ScaleUpError may not preserve individual error types or wrapping chains.
+	FailedResizeErrors map[string]errors.AutoscalerError
 }
 
 // NoScaleUpInfo contains information about a pod that didn't trigger scale-up.

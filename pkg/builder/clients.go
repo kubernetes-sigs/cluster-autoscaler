@@ -79,7 +79,17 @@ func (b *AutoscalerBuilder) buildProvisioningRequest(
 	}
 	klog.V(2).Info("Successful initial Provisioning Request sync")
 
-	injector := provreq.NewProvisioningRequestPodsInjector(client, opts.ProvisioningRequestInitialBackoffTime, opts.ProvisioningRequestMaxBackoffTime, opts.ProvisioningRequestMaxBackoffCacheSize, opts.CheckCapacityBatchProcessing, opts.CheckCapacityProcessorInstance)
+	injector := provreq.NewProvisioningRequestPodsInjectorWithOptions(client, provreq.PodsInjectorOptions{
+		InitialBackoffTime:              opts.ProvisioningRequestInitialBackoffTime,
+		MaxBackoffTime:                  opts.ProvisioningRequestMaxBackoffTime,
+		MaxBackoffCacheSize:             opts.ProvisioningRequestMaxBackoffCacheSize,
+		CheckCapacityBatchProcessing:    opts.CheckCapacityBatchProcessing,
+		CheckCapacityProcessorInstance:  opts.CheckCapacityProcessorInstance,
+		BestEffortAtomicBatchProcessing: opts.BestEffortAtomicBatchProcessing,
+		BestEffortAtomicMaxBatchSize:    opts.BestEffortAtomicProvisioningRequestMaxBatchSize,
+		KubeClientBurst:                 opts.KubeClientOpts.KubeClientBurst,
+		BestEffortAtomicBatchSizeTTL:    opts.BestEffortAtomicProvisioningRequestBatchSizeTTL,
+	})
 	podListProcessor.AddProcessor(injector)
 
 	var provisioningRequestPodsInjector *provreq.ProvisioningRequestPodsInjector
@@ -88,9 +98,13 @@ func (b *AutoscalerBuilder) buildProvisioningRequest(
 		provisioningRequestPodsInjector = injector
 	}
 
+	if autoscalingOptions.BestEffortAtomicBatchProcessing {
+		klog.Infof("Batch processing for best-effort-atomic requests is enabled with max batch size %d.", autoscalingOptions.BestEffortAtomicProvisioningRequestMaxBatchSize)
+	}
+
 	provreqOrchestrator := provreqorchestrator.New(client, []provreqorchestrator.ProvisioningClass{
 		checkcapacity.New(client, provisioningRequestPodsInjector),
-		besteffortatomic.New(client),
+		besteffortatomic.NewWithPodsInjector(client, injector),
 	})
 
 	scaleUpOrchestrator := provreqorchestrator.NewWrapperOrchestrator(provreqOrchestrator)
