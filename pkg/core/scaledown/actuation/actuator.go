@@ -22,9 +22,11 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
@@ -44,6 +46,7 @@ import (
 	csisnapshot "sigs.k8s.io/cluster-autoscaler/pkg/simulator/csi/snapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/drainability/rules"
 	drasnapshot "sigs.k8s.io/cluster-autoscaler/pkg/simulator/dynamicresources/snapshot"
+	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/options"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/utilization"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
@@ -305,6 +308,7 @@ func (a *Actuator) deleteAsyncDrain(ctx context.Context, NodeGroupViews []*budge
 
 func (a *Actuator) deleteNodesAsync(ctx context.Context, nodes []*apiv1.Node, nodeGroup cloudprovider.NodeGroup, drain bool, force bool, batchSize int, nodeDeleteDelayAfterTaint time.Duration) {
 	logger := klog.FromContext(ctx)
+	var pdbs []*policyv1.PodDisruptionBudget
 	var remainingPdbTracker pdb.RemainingPdbTracker
 	var registry kube_util.ListerRegistry
 
@@ -317,6 +321,16 @@ func (a *Actuator) deleteNodesAsync(ctx context.Context, nodes []*apiv1.Node, no
 		time.Sleep(nodeDeleteDelayAfterTaint)
 	}
 
+	opts, err := nodeGroup.GetOptions(ctx, a.autoscalingCtx.NodeGroupDefaults)
+	if err != nil && err != cloudprovider.ErrNotImplemented {
+		nodeDeleteResult := status.NodeDeleteResult{ResultType: status.NodeDeleteErrorInternal, Err: errors.NewAutoscalerErrorf(errors.InternalError, "GetOptions returned error %v", err)}
+		for _, node := range nodes {
+			a.nodeDeletionScheduler.AbortNodeDeletionDueToError(ctx, node, nodeGroup.Id(), drain, "failed to get autoscaling options for a node group", nodeDeleteResult)
+		}
+		return
+	}
+	isAtomic := opts != nil && opts.ZeroOrMaxNodeScaling
+
 	clusterSnapshot, err := a.createSnapshot(ctx, nodes)
 	if err != nil {
 		nodeDeleteResult := status.NodeDeleteResult{ResultType: status.NodeDeleteErrorInternal, Err: errors.NewAutoscalerErrorf(errors.InternalError, "createSnapshot returned error %v", err)}
@@ -327,7 +341,7 @@ func (a *Actuator) deleteNodesAsync(ctx context.Context, nodes []*apiv1.Node, no
 	}
 
 	if drain {
-		pdbs, err := a.autoscalingCtx.PodDisruptionBudgetLister().List()
+		pdbs, err = a.autoscalingCtx.PodDisruptionBudgetLister().List()
 		if err != nil {
 			nodeDeleteResult := status.NodeDeleteResult{ResultType: status.NodeDeleteErrorInternal, Err: errors.NewAutoscalerErrorf(errors.InternalError, "podDisruptionBudgetLister.List returned error %v", err)}
 			for _, node := range nodes {
@@ -336,7 +350,13 @@ func (a *Actuator) deleteNodesAsync(ctx context.Context, nodes []*apiv1.Node, no
 			return
 		}
 		remainingPdbTracker = pdb.NewBasicRemainingPdbTracker()
-		remainingPdbTracker.SetPdbs(pdbs)
+		if err := remainingPdbTracker.SetPdbs(pdbs); err != nil {
+			nodeDeleteResult := status.NodeDeleteResult{ResultType: status.NodeDeleteErrorInternal, Err: errors.NewAutoscalerErrorf(errors.InternalError, "remainingPdbTracker.SetPdbs returned error %v", err)}
+			for _, node := range nodes {
+				a.nodeDeletionScheduler.AbortNodeDeletionDueToError(ctx, node, nodeGroup.Id(), drain, "failed to initialize pod disruption budget tracker", nodeDeleteResult)
+			}
+			return
+		}
 		registry = a.autoscalingCtx.ListerRegistry
 	}
 
@@ -344,9 +364,12 @@ func (a *Actuator) deleteNodesAsync(ctx context.Context, nodes []*apiv1.Node, no
 		batchSize = len(nodes)
 	}
 
+	var candidates []nodeDrainCandidate
+	validationFailed := false
 	for _, node := range nodes {
 		nodeInfo, err := clusterSnapshot.GetNodeInfo(node.Name)
 		if err != nil {
+			validationFailed = true
 			nodeDeleteResult := status.NodeDeleteResult{ResultType: status.NodeDeleteErrorInternal, Err: errors.NewAutoscalerErrorf(errors.InternalError, "nodeInfos.Get for %q returned error: %v", node.Name, err)}
 			a.nodeDeletionScheduler.AbortNodeDeletionDueToError(ctx, node, nodeGroup.Id(), drain, "failed to get node info", nodeDeleteResult)
 			continue
@@ -354,6 +377,7 @@ func (a *Actuator) deleteNodesAsync(ctx context.Context, nodes []*apiv1.Node, no
 
 		podMoveInfo, err := simulator.GetPodsToMove(ctx, nodeInfo, a.deleteOptions, a.drainabilityRules, registry, remainingPdbTracker, time.Now())
 		if err != nil {
+			validationFailed = true
 			nodeDeleteResult := status.NodeDeleteResult{ResultType: status.NodeDeleteErrorInternal, Err: errors.NewAutoscalerErrorf(errors.InternalError, "GetPodsToMove for %q returned error: %v", node.Name, err)}
 			a.nodeDeletionScheduler.AbortNodeDeletion(ctx, node, nodeGroup.Id(), drain, "failed to get pods to move on node", nodeDeleteResult, true)
 			continue
@@ -361,24 +385,144 @@ func (a *Actuator) deleteNodesAsync(ctx context.Context, nodes []*apiv1.Node, no
 
 		if !drain {
 			if len(podMoveInfo.Pods) != 0 {
+				validationFailed = true
 				nodeDeleteResult := status.NodeDeleteResult{ResultType: status.NodeDeleteErrorInternal, Err: errors.NewAutoscalerErrorf(errors.InternalError, "failed to delete empty node %q, new pods scheduled", node.Name)}
 				a.nodeDeletionScheduler.AbortNodeDeletion(ctx, node, nodeGroup.Id(), drain, "node is not empty", nodeDeleteResult, true)
 				continue
 			}
 			if len(podMoveInfo.OnCompletionPods) != 0 {
+				validationFailed = true
 				nodeDeleteResult := status.NodeDeleteResult{ResultType: status.NodeDeleteErrorInternal, Err: errors.NewAutoscalerErrorf(errors.InternalError, "failed to delete empty node %q, active on-completion pods present", node.Name)}
 				a.nodeDeletionScheduler.AbortNodeDeletion(ctx, node, nodeGroup.Id(), drain, "active on-completion pods present", nodeDeleteResult, true)
 				continue
 			}
 		}
 
-		if force {
-			go a.nodeDeletionScheduler.scheduleForceDeletion(ctx, nodeInfo, nodeGroup, batchSize, drain)
+		if !isAtomic {
+			if force {
+				go a.nodeDeletionScheduler.scheduleForceDeletion(ctx, nodeInfo, nodeGroup, batchSize, drain)
+			} else {
+				go a.nodeDeletionScheduler.ScheduleDeletion(ctx, nodeInfo, nodeGroup, batchSize, drain)
+			}
 			continue
 		}
 
-		go a.nodeDeletionScheduler.ScheduleDeletion(ctx, nodeInfo, nodeGroup, batchSize, drain)
+		candidates = append(candidates, nodeDrainCandidate{
+			nodeInfo: nodeInfo,
+			pods:     podMoveInfo.Pods,
+		})
 	}
+
+	if !isAtomic {
+		return
+	}
+
+	if validationFailed {
+		a.abortCandidatesForFailedGroup(ctx, candidates, nodeGroup.Id(), drain)
+		return
+	}
+
+	if !drain || force {
+		for _, candidate := range candidates {
+			if force {
+				go a.nodeDeletionScheduler.scheduleForceDeletion(ctx, candidate.nodeInfo, nodeGroup, batchSize, drain)
+			} else {
+				go a.nodeDeletionScheduler.ScheduleDeletion(ctx, candidate.nodeInfo, nodeGroup, batchSize, drain)
+			}
+		}
+		return
+	}
+
+	batches := buildDrainBatches(candidates, pdbs)
+	for i, batch := range batches {
+		errs := make([]error, len(batch))
+		var wg sync.WaitGroup
+		for j, candidate := range batch {
+			wg.Add(1)
+			go func(idx int, c nodeDrainCandidate) {
+				defer wg.Done()
+				errs[idx] = a.nodeDeletionScheduler.ScheduleDeletion(ctx, c.nodeInfo, nodeGroup, batchSize, drain)
+			}(j, candidate)
+		}
+		wg.Wait()
+		if goerrors.Join(errs...) != nil {
+			for _, remainingBatch := range batches[i+1:] {
+				a.abortCandidatesForFailedGroup(ctx, remainingBatch, nodeGroup.Id(), drain)
+			}
+			return
+		}
+	}
+}
+
+type nodeDrainCandidate struct {
+	nodeInfo *framework.NodeInfo
+	pods     []*apiv1.Pod
+}
+
+func (a *Actuator) abortCandidatesForFailedGroup(ctx context.Context, candidates []nodeDrainCandidate, nodeGroupId string, drain bool) {
+	nodeDeleteResult := status.NodeDeleteResult{
+		ResultType: status.NodeDeleteErrorFailedToDelete,
+		Err:        errors.NewAutoscalerError(errors.TransientError, "couldn't scale down other nodes in this node group"),
+	}
+	for _, candidate := range candidates {
+		a.nodeDeletionScheduler.AbortNodeDeletionDueToError(ctx, candidate.nodeInfo.Node(), nodeGroupId, drain, "scale down failed for node group as a whole", nodeDeleteResult)
+	}
+}
+
+// buildDrainBatches partitions drain candidates into waves that can be drained in parallel
+// without exceeding PDB DisruptionsAllowed budgets, so that each subsequent wave gets a full
+// pod eviction timeout window after the previous wave completes.
+func buildDrainBatches(candidates []nodeDrainCandidate, pdbs []*policyv1.PodDisruptionBudget) [][]nodeDrainCandidate {
+	if len(candidates) == 0 {
+		return nil
+	}
+	if len(pdbs) == 0 {
+		return [][]nodeDrainCandidate{candidates}
+	}
+
+	var batches [][]nodeDrainCandidate
+	remaining := candidates
+	for len(remaining) > 0 {
+		tracker := pdb.NewBasicRemainingPdbTracker()
+		if err := tracker.SetPdbs(pdbs); err != nil {
+			batches = append(batches, remaining)
+			break
+		}
+		initialAllowed := make(map[*policyv1.PodDisruptionBudget]int32, len(pdbs))
+		for _, p := range tracker.GetPdbs() {
+			initialAllowed[p] = p.Status.DisruptionsAllowed
+		}
+
+		var batch []nodeDrainCandidate
+		var nextRemaining []nodeDrainCandidate
+		for _, candidate := range remaining {
+			canRemove, inParallel, _ := tracker.CanRemovePods(candidate.pods)
+			if canRemove && (inParallel || hasUnmodifiedMatchingPdbs(tracker, initialAllowed, candidate.pods)) {
+				batch = append(batch, candidate)
+				tracker.RemovePods(candidate.pods)
+			} else {
+				nextRemaining = append(nextRemaining, candidate)
+			}
+		}
+		if len(batch) == 0 {
+			batch = append(batch, remaining[0])
+			nextRemaining = remaining[1:]
+		}
+		batches = append(batches, batch)
+		remaining = nextRemaining
+	}
+	return batches
+}
+
+func hasUnmodifiedMatchingPdbs(tracker pdb.RemainingPdbTracker, initialAllowed map[*policyv1.PodDisruptionBudget]int32, pods []*apiv1.Pod) bool {
+	for _, pod := range pods {
+		for _, p := range tracker.MatchingPdbs(pod) {
+			if p.Status.DisruptionsAllowed != initialAllowed[p] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (a *Actuator) scaleDownNodeToReport(ctx context.Context, node *apiv1.Node, drain bool) (*status.ScaleDownNode, error) {

@@ -27,7 +27,11 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	policyv1beta1 "k8s.io/api/policy/v1beta1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	core "k8s.io/client-go/testing"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	testprovider "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
@@ -44,14 +48,39 @@ type testIteration struct {
 	toSchedule            []*budgets.NodeGroupView
 	toAbort               []*budgets.NodeGroupView
 	toScheduleAfterAbort  []*budgets.NodeGroupView
+	drain                 bool
+	pods                  map[string][]*apiv1.Pod
+	failedPodDrain        map[string]bool
+	wantScheduleErrs      map[string]bool
+	wantEvictedPods       []string
 	wantDeleted           int
 	wantNodeDeleteResults map[string]status.NodeDeleteResult
+}
+
+type errorOptionsNodeGroup struct {
+	*testprovider.TestNodeGroup
+	err error
+}
+
+func (ng *errorOptionsNodeGroup) GetOptions(context.Context, config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error) {
+	return nil, ng.err
 }
 
 func TestScheduleDeletion(t *testing.T) {
 	testNg := testprovider.NewTestNodeGroup("test", 100, 0, 3, true, false, "n1-standard-2", nil, nil)
 	atomic2 := sizedNodeGroup("atomic-2", 2, true, false)
 	atomic4 := sizedNodeGroup("atomic-4", 4, true, false)
+	errNg := &errorOptionsNodeGroup{
+		TestNodeGroup: sizedNodeGroup("err-ng", 1, true, false),
+		err:           fmt.Errorf("options unavailable"),
+	}
+
+	atomic4Pods := map[string][]*apiv1.Pod{
+		"atomic-4-node-0": removablePods(1, "atomic-4-node-0"),
+		"atomic-4-node-1": removablePods(1, "atomic-4-node-1"),
+		"atomic-4-node-2": removablePods(1, "atomic-4-node-2"),
+		"atomic-4-node-3": removablePods(1, "atomic-4-node-3"),
+	}
 
 	testCases := []struct {
 		name       string
@@ -101,7 +130,10 @@ func TestScheduleDeletion(t *testing.T) {
 				),
 				toAbort:              generateNodeGroupViewList(atomic4, 2, 3),
 				toScheduleAfterAbort: generateNodeGroupViewList(atomic4, 3, 4),
-				wantDeleted:          2,
+				wantScheduleErrs: map[string]bool{
+					"atomic-4-node-3": true,
+				},
+				wantDeleted: 2,
 				wantNodeDeleteResults: map[string]status.NodeDeleteResult{
 					"atomic-4-node-0": {ResultType: status.NodeDeleteErrorFailedToDelete, Err: cmpopts.AnyError},
 					"atomic-4-node-1": {ResultType: status.NodeDeleteErrorFailedToDelete, Err: cmpopts.AnyError},
@@ -117,6 +149,9 @@ func TestScheduleDeletion(t *testing.T) {
 					toSchedule:           generateNodeGroupViewList(atomic4, 0, 2),
 					toAbort:              generateNodeGroupViewList(atomic4, 2, 3),
 					toScheduleAfterAbort: generateNodeGroupViewList(atomic4, 3, 4),
+					wantScheduleErrs: map[string]bool{
+						"atomic-4-node-3": true,
+					},
 					wantNodeDeleteResults: map[string]status.NodeDeleteResult{
 						"atomic-4-node-0": {ResultType: status.NodeDeleteErrorFailedToDelete, Err: cmpopts.AnyError},
 						"atomic-4-node-1": {ResultType: status.NodeDeleteErrorFailedToDelete, Err: cmpopts.AnyError},
@@ -130,6 +165,64 @@ func TestScheduleDeletion(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "atomic node group drain failure returns error and skips eviction on subsequent nodes",
+			iterations: []testIteration{
+				{
+					toSchedule:           generateNodeGroupViewList(atomic4, 0, 3),
+					toScheduleAfterAbort: generateNodeGroupViewList(atomic4, 3, 4),
+					drain:                true,
+					pods:                 atomic4Pods,
+					failedPodDrain: map[string]bool{
+						"atomic-4-node-2-pod-0": true,
+					},
+					wantScheduleErrs: map[string]bool{
+						"atomic-4-node-2": true,
+						"atomic-4-node-3": true,
+					},
+					wantEvictedPods: []string{
+						"atomic-4-node-0-pod-0",
+						"atomic-4-node-1-pod-0",
+					},
+					wantNodeDeleteResults: map[string]status.NodeDeleteResult{
+						"atomic-4-node-0": {ResultType: status.NodeDeleteErrorFailedToDelete, Err: cmpopts.AnyError},
+						"atomic-4-node-1": {ResultType: status.NodeDeleteErrorFailedToDelete, Err: cmpopts.AnyError},
+						"atomic-4-node-2": {
+							ResultType: status.NodeDeleteErrorFailedToEvictPods,
+							Err:        cmpopts.AnyError,
+							PodEvictionResults: map[string]status.PodEvictionResult{
+								"atomic-4-node-2-pod-0": {Pod: removablePod("atomic-4-node-2-pod-0", "atomic-4-node-2"), TimedOut: true, Err: cmpopts.AnyError},
+							},
+						},
+						"atomic-4-node-3": {ResultType: status.NodeDeleteErrorFailedToDelete, Err: cmpopts.AnyError},
+					},
+				},
+				{
+					toSchedule: generateNodeGroupViewList(atomic4, 0, 4),
+					drain:      true,
+					pods:       atomic4Pods,
+					wantEvictedPods: []string{
+						"atomic-4-node-0-pod-0",
+						"atomic-4-node-1-pod-0",
+						"atomic-4-node-2-pod-0",
+						"atomic-4-node-3-pod-0",
+					},
+					wantDeleted: 4,
+				},
+			},
+		},
+		{
+			name: "GetOptions error returns error and aborts node deletion",
+			iterations: []testIteration{{
+				toSchedule: generateNodeGroupViewList(errNg, 0, 1),
+				wantScheduleErrs: map[string]bool{
+					"err-ng-node-0": true,
+				},
+				wantNodeDeleteResults: map[string]status.NodeDeleteResult{
+					"err-ng-node-0": {ResultType: status.NodeDeleteErrorInternal, Err: cmpopts.AnyError},
+				},
+			}},
+		},
 	}
 	for _, tc := range testCases {
 		tc := tc
@@ -138,10 +231,24 @@ func TestScheduleDeletion(t *testing.T) {
 				return nil
 			}).Build()
 
+			var currentFailedPodDrain map[string]bool
+			var gotEvictedPods []string
+			fakeClient := &fake.Clientset{}
+			fakeClient.Fake.AddReactor("get", "pods", func(core.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewNotFound(apiv1.Resource("pod"), "missing")
+			})
+			fakeClient.Fake.AddReactor("create", "pods", func(action core.Action) (bool, runtime.Object, error) {
+				eviction := action.(core.CreateAction).GetObject().(*policyv1beta1.Eviction)
+				if currentFailedPodDrain[eviction.Name] {
+					return true, nil, fmt.Errorf("simulated eviction error")
+				}
+				gotEvictedPods = append(gotEvictedPods, eviction.Name)
+				return true, nil, nil
+			})
+
 			batcher := &countingBatcher{}
 			tracker := deletiontracker.NewNodeDeletionTracker(0)
 			opts := config.AutoscalingOptions{}
-			fakeClient := &fake.Clientset{}
 			podLister := kube_util.NewTestPodLister([]*apiv1.Pod{})
 			pdbLister := kube_util.NewTestPodDisruptionBudgetLister([]*policyv1.PodDisruptionBudget{})
 			dsLister, err := kube_util.NewTestDaemonSetLister([]*appsv1.DaemonSet{})
@@ -153,12 +260,24 @@ func TestScheduleDeletion(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Couldn't set up autoscaling context: %v", err)
 			}
-			scheduler := NewGroupDeletionScheduler(&autoscalingCtx, tracker, batcher, Evictor{EvictionRetryTime: 0, PodEvictionHeadroom: DefaultPodEvictionHeadroom})
+			scheduler := NewGroupDeletionScheduler(&autoscalingCtx, tracker, batcher, Evictor{
+				EvictionRetryTime:                0,
+				PodEvictionHeadroom:              DefaultPodEvictionHeadroom,
+				shutdownGracePeriodByPodPriority: SingleRuleDrainConfig(0),
+			})
 
 			for i, ti := range tc.iterations {
+				currentFailedPodDrain = ti.failedPodDrain
+				gotEvictedPods = nil
+
 				allBuckets := append(append(ti.toSchedule, ti.toAbort...), ti.toScheduleAfterAbort...)
 				for _, bucket := range allBuckets {
-					bucket.Group.(*testprovider.TestNodeGroup).SetCloudProvider(provider)
+					switch ng := bucket.Group.(type) {
+					case *testprovider.TestNodeGroup:
+						ng.SetCloudProvider(provider)
+					case *errorOptionsNodeGroup:
+						ng.TestNodeGroup.SetCloudProvider(provider)
+					}
 					provider.InsertNodeGroup(bucket.Group)
 					for _, node := range bucket.Nodes {
 						provider.AddNode(bucket.Group.Id(), node)
@@ -170,22 +289,25 @@ func TestScheduleDeletion(t *testing.T) {
 				tracker.ClearResultsNotNewerThan(time.Now())
 
 				ctx := test.GetTestContext(t)
-				if err := scheduleAll(ctx, ti.toSchedule, scheduler, tracker); err != nil {
+				if err := scheduleAll(ctx, ti.toSchedule, scheduler, tracker, ti.drain, ti.pods, ti.wantScheduleErrs); err != nil {
 					t.Fatal(err)
 				}
 				for _, bucket := range ti.toAbort {
 					for _, node := range bucket.Nodes {
 						nodeDeleteResult := status.NodeDeleteResult{ResultType: status.NodeDeleteErrorFailedToDelete, Err: cmpopts.AnyError}
 						tracker.StartDeletion(bucket.Group.Id(), node.Name)
-						scheduler.AbortNodeDeletionDueToError(ctx, node, bucket.Group.Id(), false, "simulated abort", nodeDeleteResult)
+						scheduler.AbortNodeDeletionDueToError(ctx, node, bucket.Group.Id(), ti.drain, "simulated abort", nodeDeleteResult)
 					}
 				}
-				if err := scheduleAll(ctx, ti.toScheduleAfterAbort, scheduler, tracker); err != nil {
+				if err := scheduleAll(ctx, ti.toScheduleAfterAbort, scheduler, tracker, ti.drain, ti.pods, ti.wantScheduleErrs); err != nil {
 					t.Fatal(err)
 				}
 
 				if batcher.addedNodes != ti.wantDeleted {
 					t.Errorf("Incorrect number of deleted nodes in iteration %v, want %v but got %v", i, ti.wantDeleted, batcher.addedNodes)
+				}
+				if diff := cmp.Diff(ti.wantEvictedPods, gotEvictedPods, cmpopts.EquateEmpty()); diff != "" {
+					t.Errorf("Evicted pods diff in iteration %v (-want +got):\n%s", i, diff)
 				}
 				gotDeletionResult, _ := tracker.DeletionResults()
 				if diff := cmp.Diff(ti.wantNodeDeleteResults, gotDeletionResult, cmpopts.EquateEmpty(), cmpopts.EquateErrors()); diff != "" {
@@ -211,15 +333,22 @@ func (b *countingBatcher) AddNodes(ctx context.Context, nodes []*apiv1.Node, nod
 	b.addedNodes += len(nodes)
 }
 
-func scheduleAll(ctx context.Context, toSchedule []*budgets.NodeGroupView, scheduler *GroupDeletionScheduler, tracker *deletiontracker.NodeDeletionTracker) error {
+func scheduleAll(ctx context.Context, toSchedule []*budgets.NodeGroupView, scheduler *GroupDeletionScheduler, tracker *deletiontracker.NodeDeletionTracker, drain bool, pods map[string][]*apiv1.Pod, wantScheduleErrs map[string]bool) error {
 	for _, bucket := range toSchedule {
 		bucketSize, err := bucket.Group.TargetSize(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to get target size for node group %q: %s", bucket.Group.Id(), err)
 		}
 		for _, node := range bucket.Nodes {
-			tracker.StartDeletion(bucket.Group.Id(), node.Name)
-			scheduler.ScheduleDeletion(ctx, framework.NewTestNodeInfo(node), bucket.Group, bucketSize, false)
+			if drain {
+				tracker.StartDeletionWithDrain(bucket.Group.Id(), node.Name)
+			} else {
+				tracker.StartDeletion(bucket.Group.Id(), node.Name)
+			}
+			gotErr := scheduler.ScheduleDeletion(ctx, framework.NewTestNodeInfo(node, pods[node.Name]...), bucket.Group, bucketSize, drain)
+			if wantErr := wantScheduleErrs[node.Name]; (gotErr != nil) != wantErr {
+				return fmt.Errorf("ScheduleDeletion(%q) returned err=%v, wantErr=%v", node.Name, gotErr, wantErr)
+			}
 		}
 	}
 	return nil

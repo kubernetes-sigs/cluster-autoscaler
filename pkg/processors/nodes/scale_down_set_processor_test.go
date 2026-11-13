@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/core/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
-	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
+	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 )
 
@@ -361,10 +361,10 @@ func TestAtomicResizeFilterUnremovableNodes(t *testing.T) {
 				provider.AddNode(node.nodeGroup, node.node)
 				nodes = append(nodes, node.node)
 			}
+			listers := kube_util.NewListerRegistry(kube_util.NewTestNodeLister(nodes), nil, nil, nil, nil, nil, nil, nil, nil)
 			context, _ := NewScaleTestAutoscalingContext(config.AutoscalingOptions{
 				NodeGroupDefaults: config.NodeGroupAutoscalingOptions{},
-			}, &fake.Clientset{}, nil, provider, nil, nil, nil)
-			clustersnapshot.InitializeClusterSnapshotOrDie(t, context.ClusterSnapshot, nodes, nil)
+			}, &fake.Clientset{}, listers, provider, nil, nil, nil)
 
 			toBeRemoved, unRemovable := processor.FilterUnremovableNodes(gocontext.Background(), &context, tc.scaleDownContext, candidates)
 
