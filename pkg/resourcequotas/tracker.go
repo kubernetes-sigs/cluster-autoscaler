@@ -19,6 +19,7 @@ package resourcequotas
 import (
 	gocontext "context"
 	"errors"
+	"maps"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
@@ -64,6 +65,17 @@ func newTracker(quotaStatuses []*quotaStatus, nodeCache *nodeResourcesCache) *Tr
 		quotaStatuses: quotaStatuses,
 		nodeCache:     nodeCache,
 	}
+}
+
+// Clone returns a copy of the Tracker that can consume quota without changing the original.
+// It copies the remaining limits but shares the Quota values and the node resources cache,
+// which only memoizes per node group.
+func (t *Tracker) Clone() *Tracker {
+	statuses := make([]*quotaStatus, len(t.quotaStatuses))
+	for i, qs := range t.quotaStatuses {
+		statuses[i] = &quotaStatus{quota: qs.quota, limitsLeft: maps.Clone(qs.limitsLeft)}
+	}
+	return newTracker(statuses, t.nodeCache)
 }
 
 // ConsumeQuota checks if a delta is within limits and applies it. Delta is applied only if it can be applied entirely.
