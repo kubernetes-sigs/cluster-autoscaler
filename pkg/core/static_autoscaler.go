@@ -111,6 +111,10 @@ type StaticAutoscaler struct {
 	initialized                bool
 	taintConfig                taints.TaintConfig
 	capacityBufferPodsRegistry *fakepods.Registry
+	// asyncNodeGroupOps runs the cloud provider operations of cluster reconciliation (removing
+	// long unregistered nodes, deleting nodes with create errors, fixing node group sizes) in
+	// the background, so that they don't block the main loop.
+	asyncNodeGroupOps asyncNodeGroupOps
 }
 
 type staticAutoscalerProcessorCallbacks struct {
@@ -522,14 +526,11 @@ func (a *StaticAutoscaler) reconcileCluster(ctx context.Context, currentTime tim
 	unregisteredNodes := a.clusterStateRegistry.GetUnregisteredNodes()
 	if len(unregisteredNodes) > 0 {
 		logger.V(1).Info("unregistered nodes present", "unregisteredNodesCount", len(unregisteredNodes))
-		removedAny, err := a.removeOldUnregisteredNodes(ctx, unregisteredNodes,
+		_, err := a.removeOldUnregisteredNodes(ctx, unregisteredNodes,
 			a.clusterStateRegistry, currentTime, autoscalingCtx.LogRecorder)
 		// There was a problem with removing unregistered nodes. Retry in the next loop.
 		if err != nil {
 			logger.Info("Failed to remove unregistered nodes", "err", err)
-		}
-		if removedAny {
-			logger.V(0).Info("Some unregistered nodes were removed")
 		}
 	}
 
@@ -545,14 +546,12 @@ func (a *StaticAutoscaler) reconcileCluster(ctx context.Context, currentTime tim
 	// Check if there has been a constant difference between the number of nodes in k8s and
 	// the number of nodes on the cloud provider side.
 	// TODO: andrewskim - add protection for ready AWS nodes.
-	fixedSomething, err := fixNodeGroupSize(ctx, autoscalingCtx, a.clusterStateRegistry, currentTime)
-	if err != nil {
+	// The target sizes are fixed in the background, so nothing has changed yet when this
+	// returns and the iteration can continue; the new sizes are picked up by UpdateNodes in
+	// a subsequent iteration, like any other target size change made outside of this loop.
+	if _, err := a.fixNodeGroupSize(ctx, currentTime); err != nil {
 		logger.Error(err, "Failed to fix node group sizes")
 		return false, caerrors.ToAutoscalerError(caerrors.CloudProviderError, err)
-	}
-	if fixedSomething {
-		logger.V(0).Info("Some node group target size was fixed, skipping the iteration")
-		return true, nil
 	}
 
 	metrics.UpdateLastTime(metrics.Autoscaling, time.Now())
@@ -1101,23 +1100,24 @@ func (a *StaticAutoscaler) isScaleDownInCooldown(currentTime time.Time) bool {
 		a.lastScaleDownDeleteTime.Add(a.ScaleDownDelayAfterDelete).After(currentTime)
 }
 
-// Sets the target size of node groups to the current number of nodes in them
-// if the difference was constant for a prolonged time. Returns true if managed
-// to fix something.
-func fixNodeGroupSize(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, clusterStateRegistry *clusterstate.ClusterStateRegistry, currentTime time.Time) (bool, error) {
+// fixNodeGroupSize sets the target size of node groups to the current number of nodes in them
+// if the difference was constant for a prolonged time. The target sizes are changed in the
+// background, one operation per node group at a time (see asyncNodeGroupOps). Returns true if
+// it started fixing something.
+func (a *StaticAutoscaler) fixNodeGroupSize(ctx context.Context, currentTime time.Time) (bool, error) {
 	logger := klog.FromContext(ctx)
-	fixed := false
-	for _, nodeGroup := range autoscalingCtx.CloudProvider.NodeGroups(ctx) {
-		incorrectSize := clusterStateRegistry.GetIncorrectNodeGroupSize(nodeGroup.Id())
+	fixing := false
+	for _, nodeGroup := range a.CloudProvider.NodeGroups(ctx) {
+		incorrectSize := a.clusterStateRegistry.GetIncorrectNodeGroupSize(nodeGroup.Id())
 		if incorrectSize == nil {
 			continue
 		}
-		maxNodeProvisionTime, err := clusterStateRegistry.MaxNodeProvisionTime(ctx, nodeGroup)
+		maxNodeProvisionTime, err := a.clusterStateRegistry.MaxNodeProvisionTime(ctx, nodeGroup)
 		if err != nil {
 			return false, fmt.Errorf("failed to retrieve maxNodeProvisionTime for nodeGroup %s", nodeGroup.Id())
 		}
 		if incorrectSize.FirstObserved.Add(maxNodeProvisionTime).Before(currentTime) {
-			opts, err := nodeGroup.GetOptions(ctx, autoscalingCtx.NodeGroupDefaults)
+			opts, err := nodeGroup.GetOptions(ctx, a.NodeGroupDefaults)
 			if err != nil && err != cloudprovider.ErrNotImplemented {
 				return false, fmt.Errorf("failed to get options for nodeGroup %s: %v", nodeGroup.Id(), err)
 			}
@@ -1127,19 +1127,30 @@ func fixNodeGroupSize(ctx context.Context, autoscalingCtx *ca_context.Autoscalin
 			}
 			delta := incorrectSize.CurrentSize - incorrectSize.ExpectedSize
 			if delta < 0 {
-				logger.V(0).Info("Decreasing size", "nodeGroupId", nodeGroup.Id(), "targetSize", incorrectSize.ExpectedSize, "size", incorrectSize.CurrentSize, "delta", delta)
-				if err := nodeGroup.DecreaseTargetSize(ctx, delta); err != nil {
-					return fixed, fmt.Errorf("failed to decrease %s: %v", nodeGroup.Id(), err)
+				started := a.asyncNodeGroupOps.tryStart(nodeGroup.Id(), func() {
+					if err := nodeGroup.DecreaseTargetSize(ctx, delta); err != nil {
+						logger.Error(err, "Failed to decrease node group target size", "nodeGroupId", nodeGroup.Id(), "delta", delta)
+						return
+					}
+					logger.V(0).Info("Decreased node group target size", "nodeGroupId", nodeGroup.Id(), "delta", delta)
+				})
+				if !started {
+					logger.V(5).Info("Not starting target size decrease of node group, another background operation on the node group is still in progress", "nodeGroupId", nodeGroup.Id())
+					continue
 				}
-				fixed = true
+				logger.V(0).Info("Decreasing node group target size in the background", "nodeGroupId", nodeGroup.Id(), "targetSize", incorrectSize.ExpectedSize, "size", incorrectSize.CurrentSize, "delta", delta)
+				fixing = true
 			}
 		}
 	}
-	return fixed, nil
+	return fixing, nil
 }
 
-// removeOldUnregisteredNodes removes unregistered nodes if needed. Returns true
-// if anything was removed and error if such occurred.
+// removeOldUnregisteredNodes removes unregistered nodes if needed. The nodes are removed in the
+// background, one batch per node group at a time (see asyncNodeGroupOps): nodes that become
+// eligible for removal while a batch, or another background operation on the node group, is in
+// flight are removed in a later batch. Returns true if it started removing anything and error if
+// such occurred.
 func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUnregisteredNodes []clusterstate.UnregisteredNode,
 	csr *clusterstate.ClusterStateRegistry, currentTime time.Time, logRecorder *utils.LogEventRecorder) (bool, error) {
 
@@ -1150,10 +1161,9 @@ func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUn
 	}
 
 	nodeGroups := a.nodeGroupsById(ctx)
-	removedAny := false
+	removingAny := false
 	for nodeGroupId, unregisteredNodesToDelete := range unregisteredNodesToRemove {
 		nodeGroup := nodeGroups[nodeGroupId]
-		logger.V(0).Info("Removing unregistered nodes for node group", "nodesCount", len(unregisteredNodesToDelete), "nodeGroupId", nodeGroupId)
 		if !a.ForceDeleteLongUnregisteredNodes {
 			size, err := nodeGroup.TargetSize(ctx)
 			if err != nil {
@@ -1182,36 +1192,59 @@ func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUn
 			continue
 		}
 
-		if a.ForceDeleteLongUnregisteredNodes {
-			err = nodeGroup.ForceDeleteNodes(ctx, nodesToDelete)
-			if err == cloudprovider.ErrNotImplemented {
-				err = nodeGroup.DeleteNodes(ctx, nodesToDelete)
-			}
-		} else {
-			err = nodeGroup.DeleteNodes(ctx, nodesToDelete)
+		started := a.asyncNodeGroupOps.tryStart(nodeGroupId, func() {
+			a.deleteUnregisteredNodes(ctx, nodeGroup, nodesToDelete, csr, logRecorder)
+		})
+		if !started {
+			logger.V(5).Info("Not starting removal of unregistered nodes from node group, another background operation on the node group is still in progress", "nodeGroupId", nodeGroupId, "nodesCount", len(nodesToDelete))
+			continue
 		}
-		csr.InvalidateNodeInstancesCacheEntry(ctx, nodeGroup)
-		// Removing the nodes decreased the node group target size, which could make an active scale-up request look
-		// fulfilled before it times out, so the removal has to be registered as a failed scale-up.
+		logger.V(0).Info("Removing a batch of unregistered nodes from node group in the background, the next batch will be started once it finishes", "nodesCount", len(nodesToDelete), "nodeGroupId", nodeGroupId)
+		// Removing the nodes decreases the node group target size, which could make an active scale-up
+		// request look fulfilled before it times out, so the removal has to be registered as a failed
+		// scale-up. It's registered right away, rather than once the removal completes, so that no
+		// iteration can observe the decreased target size before the removal is registered.
 		csr.RegisterRemovedUnregisteredNodes(ctx, nodeGroup, len(nodesToDelete), currentTime)
-		if err != nil {
-			metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonOldUnregistered, metrics.NodeDeletionFailed)
-			logger.Info("Failed to remove unregistered nodes from node group", "nodesToDeleteCount", len(nodesToDelete), "nodeGroupId", nodeGroupId, "err", err)
-			for _, node := range nodesToDelete {
-				logRecorder.Eventf(apiv1.EventTypeWarning, "DeleteUnregisteredFailed",
-					"Failed to remove node %s: %v", node.Name, err)
-			}
-			return removedAny, err
-		}
-		for _, node := range nodesToDelete {
-			logRecorder.Eventf(apiv1.EventTypeNormal, "DeleteUnregistered",
-				"Removed unregistered node %v", node.Name)
-		}
-		metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonOldUnregistered, metrics.NodeDeletionSucceeded)
-		metrics.RegisterOldUnregisteredNodesRemoved(len(nodesToDelete))
-		removedAny = true
+		removingAny = true
 	}
-	return removedAny, nil
+	return removingAny, nil
+}
+
+// deleteUnregisteredNodes deletes the given unregistered nodes from the node group and reports
+// the result.
+func (a *StaticAutoscaler) deleteUnregisteredNodes(ctx context.Context, nodeGroup cloudprovider.NodeGroup, nodesToDelete []*apiv1.Node,
+	csr *clusterstate.ClusterStateRegistry, logRecorder *utils.LogEventRecorder) {
+	logger := klog.FromContext(ctx)
+	err := deleteNodesFromNodeGroup(ctx, nodeGroup, nodesToDelete, a.ForceDeleteLongUnregisteredNodes)
+	csr.InvalidateNodeInstancesCacheEntry(ctx, nodeGroup)
+	if err != nil {
+		metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonOldUnregistered, metrics.NodeDeletionFailed)
+		logger.Info("Failed to remove unregistered nodes from node group", "nodesToDeleteCount", len(nodesToDelete), "nodeGroupId", nodeGroup.Id(), "err", err)
+		for _, node := range nodesToDelete {
+			logRecorder.Eventf(apiv1.EventTypeWarning, "DeleteUnregisteredFailed",
+				"Failed to remove node %s: %v", node.Name, err)
+		}
+		return
+	}
+	logger.V(0).Info("Removed unregistered nodes from node group", "nodesCount", len(nodesToDelete), "nodeGroupId", nodeGroup.Id())
+	for _, node := range nodesToDelete {
+		logRecorder.Eventf(apiv1.EventTypeNormal, "DeleteUnregistered",
+			"Removed unregistered node %v", node.Name)
+	}
+	metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonOldUnregistered, metrics.NodeDeletionSucceeded)
+	metrics.RegisterOldUnregisteredNodesRemoved(len(nodesToDelete))
+}
+
+// deleteNodesFromNodeGroup deletes the nodes from the node group. If force is set, the node
+// group's constraints (like its min size) are ignored, for cloud providers that support it.
+func deleteNodesFromNodeGroup(ctx context.Context, nodeGroup cloudprovider.NodeGroup, nodes []*apiv1.Node, force bool) error {
+	if force {
+		err := nodeGroup.ForceDeleteNodes(ctx, nodes)
+		if !errors.Is(err, cloudprovider.ErrNotImplemented) {
+			return err
+		}
+	}
+	return nodeGroup.DeleteNodes(ctx, nodes)
 }
 
 // oldUnregisteredNodes returns old unregistered nodes grouped by their node group id.
@@ -1251,6 +1284,8 @@ func toNodes(unregisteredNodes []clusterstate.UnregisteredNode) []*apiv1.Node {
 	return nodes
 }
 
+// deleteCreatedNodesWithErrors deletes nodes that failed to be created. The nodes are deleted in
+// the background, one batch per node group at a time (see asyncNodeGroupOps).
 func (a *StaticAutoscaler) deleteCreatedNodesWithErrors(ctx context.Context) {
 	// We always schedule deleting of incoming errornous nodes
 	// TODO[lukaszos] Consider adding logic to not retry delete every loop iteration
@@ -1258,40 +1293,46 @@ func (a *StaticAutoscaler) deleteCreatedNodesWithErrors(ctx context.Context) {
 	nodeGroups := a.nodeGroupsById(ctx)
 	nodesToDeleteByNodeGroupId := a.clusterStateRegistry.GetCreatedNodesWithErrors()
 
-	deletedAny := false
-
 	for nodeGroupId, nodesToDelete := range nodesToDeleteByNodeGroupId {
 		var err error
-		logger.V(1).Info("Deleting node group because of create errors", "nodesToDeleteCount", len(nodesToDelete), "nodeGroupId", nodeGroupId)
-
 		nodeGroup := nodeGroups[nodeGroupId]
 		if nodeGroup == nil {
 			err = fmt.Errorf("node group %s not found", nodeGroupId)
-		} else if nodesToDelete, err = overrideNodesToDeleteForZeroOrMax(ctx, a.NodeGroupDefaults, nodeGroup, nodesToDelete); err == nil && len(nodesToDelete) > 0 {
-			if a.ForceDeleteFailedNodes {
-				err = nodeGroup.ForceDeleteNodes(ctx, nodesToDelete)
-				if errors.Is(err, cloudprovider.ErrNotImplemented) {
-					err = nodeGroup.DeleteNodes(ctx, nodesToDelete)
-				}
-			} else {
-				err = nodeGroup.DeleteNodes(ctx, nodesToDelete)
-			}
+		} else {
+			nodesToDelete, err = overrideNodesToDeleteForZeroOrMax(ctx, a.NodeGroupDefaults, nodeGroup, nodesToDelete)
 		}
-
 		if err != nil {
-			logger.Info("Error while trying to delete nodes", "nodeGroupId", nodeGroupId, "err", err)
+			logger.Info("Failed to determine which nodes with create errors to delete", "nodeGroupId", nodeGroupId, "err", err)
 			metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonCreateErrors, metrics.NodeDeletionFailed)
-		} else if len(nodesToDelete) > 0 {
-			deletedAny = true
-			a.clusterStateRegistry.InvalidateNodeInstancesCacheEntry(ctx, nodeGroup)
-			metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonCreateErrors, metrics.NodeDeletionSucceeded)
+			continue
 		}
-	}
+		if len(nodesToDelete) == 0 {
+			continue
+		}
 
-	if deletedAny {
-		logger.V(0).Info("Some nodes that failed to create were removed, recalculating cluster state.")
-		a.clusterStateRegistry.Recalculate(ctx)
+		started := a.asyncNodeGroupOps.tryStart(nodeGroupId, func() {
+			a.deleteNodesWithErrors(ctx, nodeGroup, nodesToDelete)
+		})
+		if !started {
+			logger.V(5).Info("Not starting deletion of nodes with create errors from node group, another background operation on the node group is still in progress", "nodeGroupId", nodeGroupId, "nodesCount", len(nodesToDelete))
+			continue
+		}
+		logger.V(1).Info("Deleting a batch of nodes with create errors from node group in the background, the next batch will be started once it finishes", "nodesCount", len(nodesToDelete), "nodeGroupId", nodeGroupId)
 	}
+}
+
+// deleteNodesWithErrors deletes the given nodes that failed to be created from the node group
+// and reports the result.
+func (a *StaticAutoscaler) deleteNodesWithErrors(ctx context.Context, nodeGroup cloudprovider.NodeGroup, nodesToDelete []*apiv1.Node) {
+	logger := klog.FromContext(ctx)
+	if err := deleteNodesFromNodeGroup(ctx, nodeGroup, nodesToDelete, a.ForceDeleteFailedNodes); err != nil {
+		logger.Info("Error while trying to delete nodes", "nodeGroupId", nodeGroup.Id(), "err", err)
+		metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonCreateErrors, metrics.NodeDeletionFailed)
+		return
+	}
+	a.clusterStateRegistry.InvalidateNodeInstancesCacheEntry(ctx, nodeGroup)
+	metrics.RegisterNodesDeleted(len(nodesToDelete), metrics.NodeDeletionReasonCreateErrors, metrics.NodeDeletionSucceeded)
+	logger.V(0).Info("Deleted nodes with create errors from node group", "nodesCount", len(nodesToDelete), "nodeGroupId", nodeGroup.Id())
 }
 
 // overrideNodesToDeleteForZeroOrMax returns a list of nodes to delete, taking into account that
