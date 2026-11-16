@@ -52,14 +52,14 @@ var snapshots = map[string]func() (clustersnapshot.ClusterSnapshot, error){
 		if err != nil {
 			return nil, err
 		}
-		return NewPredicateSnapshot(store.NewBasicSnapshotStore(), fwHandle, true, 1, true, 0), nil
+		return NewPredicateSnapshot(store.NewBasicSnapshotStore(), fwHandle, 1, true, 0), nil
 	},
 	"delta": func() (clustersnapshot.ClusterSnapshot, error) {
 		fwHandle, err := framework.NewTestFrameworkHandle()
 		if err != nil {
 			return nil, err
 		}
-		return NewPredicateSnapshot(store.NewDeltaSnapshotStore(), fwHandle, true, 1, true, 0), nil
+		return NewPredicateSnapshot(store.NewDeltaSnapshotStore(), fwHandle, 1, true, 0), nil
 	},
 }
 
@@ -2102,7 +2102,7 @@ func TestSetClusterStateConcurrentDRA(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Set parallelism to 8 to ensure the workqueue utilizes multiple goroutines.
-	snapshot := NewPredicateSnapshot(store.NewBasicSnapshotStore(), fwHandle, true, 8, false, 0)
+	snapshot := NewPredicateSnapshot(store.NewBasicSnapshotStore(), fwHandle, 8, false, 0)
 
 	err = snapshot.SetClusterState(context.Background(), nodes, pods, draSnap, nil)
 	assert.NoError(t, err)
@@ -2147,7 +2147,7 @@ func TestSetClusterStateMissingCSINode(t *testing.T) {
 				store, err := snapshotFactory()
 				assert.NoError(t, err)
 
-				snapshot := NewPredicateSnapshot(store, fwHandle, true, 1, tc.enableCSINodeAwareScheduling, 0)
+				snapshot := NewPredicateSnapshot(store, fwHandle, 1, tc.enableCSINodeAwareScheduling, 0)
 
 				if err := snapshot.SetClusterState(context.Background(), []*apiv1.Node{node}, nil, nil, tc.csiSnapshot); err != nil {
 					t.Fatalf("SetClusterState(): unexpected error: %v", err)

@@ -762,7 +762,6 @@ func BenchmarkRunOnceScaleUpDRA(b *testing.B) {
 		config: func(opts *config.AutoscalingOptions) {
 			opts.MaxNodesPerScaleUp = maxNGSize
 			opts.ScaleUpFromZero = true
-			opts.DynamicResourceAllocationEnabled = true
 		},
 	}
 	s.run(b)
@@ -801,7 +800,6 @@ func BenchmarkRunOnceScaleDownDRA(b *testing.B) {
 			opts.ScaleDownNonEmptyCandidatesCount = 2000
 			opts.ScaleDownUnreadyEnabled = true
 			opts.ScaleDownSimulationTimeout = 60 * time.Second
-			opts.DynamicResourceAllocationEnabled = true
 		},
 	}
 	s.run(b)

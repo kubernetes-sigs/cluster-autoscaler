@@ -44,9 +44,8 @@ type optionsPatch func(options *config.AutoscalingOptions)
 
 func defaultOptions() *config.AutoscalingOptions {
 	return &config.AutoscalingOptions{
-		DynamicResourceAllocationEnabled: false,
-		UnremovableNodeRecheckTimeout:    5 * time.Minute,
-		ScaleDownUnreadyEnabled:          true,
+		UnremovableNodeRecheckTimeout: 5 * time.Minute,
+		ScaleDownUnreadyEnabled:       true,
 		NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
 			ScaleDownUtilizationThreshold:    config.DefaultScaleDownUtilizationThreshold,
 			ScaleDownGpuUtilizationThreshold: config.DefaultScaleDownGpuUtilizationThreshold,
@@ -80,12 +79,6 @@ func withScaleDownUnreadyEnabled(v bool) optionsPatch {
 func withScaleDownUtilizationThreshold(v float64) optionsPatch {
 	return func(o *config.AutoscalingOptions) {
 		o.NodeGroupDefaults.ScaleDownUtilizationThreshold = v
-	}
-}
-
-func withDRAEnabled(v bool) optionsPatch {
-	return func(o *config.AutoscalingOptions) {
-		o.DynamicResourceAllocationEnabled = v
 	}
 }
 
@@ -248,21 +241,12 @@ func getTestCases(now time.Time) []testCase {
 			optsPatches:     []optionsPatch{withScaleDownUnreadyEnabled(false)},
 		},
 		{
-			desc:            "Node is not filtered out because of DRA issues if DRA is disabled",
-			nodes:           []*apiv1.Node{regularNode},
-			pods:            []*apiv1.Pod{smallPod},
-			draSnapshot:     drasnapshot.NewSnapshot(nil, map[string][]*resourceapi.ResourceSlice{"regular": {regularNodeIncompleteResourceSlice}}, nil, nil),
-			wantUnneeded:    []string{"regular"},
-			wantUnremovable: []*simulator.UnremovableNode{},
-		},
-		{
 			desc:            "Node is filtered out because of DRA issues if DRA is enabled",
 			nodes:           []*apiv1.Node{regularNode},
 			pods:            []*apiv1.Pod{smallPod},
 			draSnapshot:     drasnapshot.NewSnapshot(nil, map[string][]*resourceapi.ResourceSlice{"regular": {regularNodeIncompleteResourceSlice}}, nil, nil),
 			wantUnneeded:    []string{},
 			wantUnremovable: []*simulator.UnremovableNode{{Node: regularNode, Reason: simulator.UnexpectedError}},
-			optsPatches:     []optionsPatch{withDRAEnabled(true)},
 		},
 	}
 

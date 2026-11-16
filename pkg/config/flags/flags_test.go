@@ -644,10 +644,6 @@ func TestAutoscalingFlagsValidationEdgeCases(t *testing.T) {
 			Flags:   []string{"--max-concurrent-nodes-tainting=0"},
 			WantErr: true,
 		},
-		"InvalidDRA": {
-			Flags:   []string{"--enable-dynamic-resource-allocation=false"},
-			WantErr: true,
-		},
 		"BypassedSchedulerSubset": {
 			Flags:   []string{"--allowed-scheduler-names=default-scheduler", "--bypassed-scheduler-names=custom-scheduler"},
 			WantErr: true,

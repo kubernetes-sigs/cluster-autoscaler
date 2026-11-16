@@ -97,7 +97,7 @@ func DefaultProcessors(options config.AutoscalingOptions) *AutoscalingProcessors
 		NodeGroupManager:            nodegroups.NewDefaultNodeGroupManager(),
 		AsyncNodeGroupStateChecker:  asyncnodegroups.NewDefaultAsyncNodeGroupStateChecker(),
 		NodeGroupConfigProcessor:    nodegroupconfig.NewDefaultNodeGroupConfigProcessor(options.NodeGroupDefaults),
-		CustomResourcesProcessor:    customresources.NewDefaultCustomResourcesProcessor(options.DynamicResourceAllocationEnabled, options.CSINodeAwareSchedulingEnabled),
+		CustomResourcesProcessor:    customresources.NewDefaultCustomResourcesProcessor(options.CSINodeAwareSchedulingEnabled),
 		ActionableClusterProcessor:  actionablecluster.NewDefaultActionableClusterProcessor(),
 		TemplateNodeInfoProvider:    nodeinfosprovider.NewDefaultTemplateNodeInfoProvider(nil, false),
 		ScaleDownCandidatesNotifier: scaledowncandidates.NewObserversList(),

@@ -18,6 +18,7 @@ package customresources
 
 import (
 	"context"
+
 	apiv1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
@@ -33,11 +34,8 @@ type DefaultCustomResourcesProcessor struct {
 }
 
 // NewDefaultCustomResourcesProcessor returns an instance of DefaultCustomResourcesProcessor.
-func NewDefaultCustomResourcesProcessor(draEnabled bool, csiEnabled bool) CustomResourcesProcessor {
-	customProcessors := []CustomResourcesProcessor{&GpuCustomResourcesProcessor{}}
-	if draEnabled {
-		customProcessors = append(customProcessors, NewDraCustomResourcesProcessor())
-	}
+func NewDefaultCustomResourcesProcessor(csiEnabled bool) CustomResourcesProcessor {
+	customProcessors := []CustomResourcesProcessor{&GpuCustomResourcesProcessor{}, NewDraCustomResourcesProcessor()}
 	if csiEnabled {
 		customProcessors = append(customProcessors, &CSICustomResourcesProcessor{})
 	}

@@ -57,5 +57,5 @@ func NewCustomTestSnapshotAndHandle(snapshotStore clustersnapshot.ClusterSnapsho
 	if err != nil {
 		return nil, nil, err
 	}
-	return predicate.NewPredicateSnapshot(snapshotStore, testFwHandle, true, 1, false, 0), testFwHandle, nil
+	return predicate.NewPredicateSnapshot(snapshotStore, testFwHandle, 1, false, 0), testFwHandle, nil
 }
