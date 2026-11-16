@@ -48,24 +48,23 @@ const (
 // for parsing and building the AutoscalingOptions struct from commandline flags.
 type AutoscalingFlags struct {
 	// Flags that require post-processing to be converted to the AutoscalingOptions struct
-	schedulerConfigFile        string
-	coresTotal                 string
-	memoryTotal                string
-	drainPriorityConfig        string
-	gpuTotal                   []string
-	nodeGroups                 []string
-	nodeGroupAutodiscovery     []string
-	startupTaints              []string
-	statusTaints               []string
-	bypassedSchedulers         []string
-	allowedSchedulers          []string
-	maxGracefulTerminationSec  int
-	kubeClientQPS              float64
-	clusterSnapshotParallelism int
-	startupTaintPrefixes       []string
-	balancingIgnoreLabels      []string
-	balancingLabels            []string
-	schedulerVerbosity         int
+	schedulerConfigFile       string
+	coresTotal                string
+	memoryTotal               string
+	drainPriorityConfig       string
+	gpuTotal                  []string
+	nodeGroups                []string
+	nodeGroupAutodiscovery    []string
+	startupTaints             []string
+	statusTaints              []string
+	bypassedSchedulers        []string
+	allowedSchedulers         []string
+	maxGracefulTerminationSec int
+	kubeClientQPS             float64
+	startupTaintPrefixes      []string
+	balancingIgnoreLabels     []string
+	balancingLabels           []string
+	schedulerVerbosity        int
 	// The AutoscalingOptions struct that will be populated by the flags
 	// as a result of parsing the flags
 	o config.AutoscalingOptions
@@ -216,7 +215,6 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 
 	// Deprecated flags
 	fs.BoolVar(&p.o.DynamicResourceAllocationEnabled, "enable-dynamic-resource-allocation", true, "Handle DRA (Dynamic Resource Allocation) objects, locked to true.")
-	fs.IntVar(&p.clusterSnapshotParallelism, "cluster-snapshot-parallelism", 16, "Maximum parallelism of cluster snapshot creation (Deprecated, use predicate-parallelism instead)")
 	fs.BoolVar(&p.o.ScaleDownEnabled, "scale-down-enabled", true, "[Deprecated] Should CA scale down the cluster")
 
 	// Properties specific to the cloud provider, but kept for the sake of POC
