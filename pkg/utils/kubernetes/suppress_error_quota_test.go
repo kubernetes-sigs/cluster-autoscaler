@@ -103,7 +103,7 @@ func TestSuppressErrorQuota(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			baseLogger := ktesting.NewLogger(t, ktesting.NewConfig(ktesting.BufferLogs(true)))
 			ctx := klog.NewContext(context.Background(), baseLogger.WithValues("iterationId", "test"))
-			suppressErrorQuota := NewSuppressErrorQuota(map[string]string{droppedEventLogMessage: suppressEventReason})
+			suppressErrorQuota := NewSuppressErrorQuota(droppedEventLogMessage, suppressEventReason)
 			if tc.nilQuota {
 				suppressErrorQuota = nil
 			}
@@ -134,6 +134,8 @@ func TestSuppressErrorQuota(t *testing.T) {
 			for _, summary := range summaries {
 				assert.Equal(t, []any{"iterationId", "test"}, summary.WithKVList)
 				assert.Equal(t, []any{
+					"message", droppedEventLogMessage,
+					"eventReason", suppressEventReason,
 					"totalErrors", tc.wantLoggedPerLoop + tc.wantSuppressedPerLoop,
 					"loggedErrors", tc.wantLoggedPerLoop,
 					"suppressedErrors", tc.wantSuppressedPerLoop,

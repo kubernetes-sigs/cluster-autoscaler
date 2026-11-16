@@ -51,10 +51,7 @@ func CreateEventRecorder(ctx context.Context, kubeClient clientset.Interface, re
 // CreateEventRecorderWithSuppressErrorQuota creates an event recorder with error logs limited by the SuppressErrorQuota.
 // The caller is responsible for calling Flush on the returned SuppressErrorQuota once per autoscaler loop.
 func CreateEventRecorderWithSuppressErrorQuota(ctx context.Context, kubeClient clientset.Interface, recordDuplicatedEvents bool) (kube_record.EventRecorder, *SuppressErrorQuota) {
-	suppressedErrorLogs := map[string]string{
-		droppedEventLogMessage: "NotTriggerScaleUp",
-	}
-	quota := NewSuppressErrorQuota(suppressedErrorLogs)
+	quota := NewSuppressErrorQuota(droppedEventLogMessage, "NotTriggerScaleUp")
 	recorder := createEventRecorder(ctx, kubeClient, recordDuplicatedEvents).WithLogger(quota.Logger(klog.FromContext(ctx)))
 	return recorder, quota
 }
