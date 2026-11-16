@@ -19,7 +19,6 @@ package flags
 import (
 	"flag"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -58,7 +57,6 @@ type AutoscalingFlags struct {
 	nodeGroupAutodiscovery     []string
 	startupTaints              []string
 	statusTaints               []string
-	ignoreTaints               []string
 	bypassedSchedulers         []string
 	allowedSchedulers          []string
 	maxGracefulTerminationSec  int
@@ -217,7 +215,6 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&p.o.InterPodAffinityHostnameFastPath, "enable-inter-pod-affinity-hostname-fast-path", false, "Enable the InterPodAffinityHostnameFastPath scheduler feature gate.")
 
 	// Deprecated flags
-	fs.StringArrayVar(&p.ignoreTaints, "ignore-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group (Deprecated, use startup-taints instead)")
 	fs.BoolVar(&p.o.DynamicResourceAllocationEnabled, "enable-dynamic-resource-allocation", true, "Handle DRA (Dynamic Resource Allocation) objects, locked to true.")
 	fs.IntVar(&p.clusterSnapshotParallelism, "cluster-snapshot-parallelism", 16, "Maximum parallelism of cluster snapshot creation (Deprecated, use predicate-parallelism instead)")
 	fs.BoolVar(&p.o.ScaleDownEnabled, "scale-down-enabled", true, "[Deprecated] Should CA scale down the cluster")
@@ -237,7 +234,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&p.memoryTotal, "memory-total", minMaxFlagString(0, config.DefaultMaxClusterMemory), "Minimum and maximum number of gigabytes of memory in cluster, in the format <min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers.")
 	fs.IntVar(&p.maxGracefulTerminationSec, "max-graceful-termination-sec", MaxGracefulTerminationSecDefault, "Maximum number of seconds CA waits for pod termination when trying to scale down a node. This flag is mutually exclusion with drain-priority-config flag which allows more configuration options.")
 	fs.StringArrayVar(&p.gpuTotal, "gpu-total", []string{}, "Minimum and maximum number of different GPUs in cluster, in the format <gpu_type>:<min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers. Can be passed multiple times. CURRENTLY THIS FLAG ONLY WORKS ON GKE.")
-	fs.StringArrayVar(&p.startupTaints, "startup-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group (Equivalent to ignore-taint)")
+	fs.StringArrayVar(&p.startupTaints, "startup-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group")
 	fs.StringArrayVar(&p.statusTaints, "status-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group but nodes will not be treated as unready")
 	fs.StringSliceVar(&p.bypassedSchedulers, "bypassed-scheduler-names", []string{}, "Names of schedulers to bypass. If set to non-empty value, CA will not wait for pods to reach a certain age before triggering a scale-up.")
 	fs.StringSliceVar(&p.allowedSchedulers, "allowed-scheduler-names", []string{}, "If set to non-empty value, CA will proceed only with pods targeting schedulers in the list, from the list of unschedulable and scheduler unprocessed pods")
@@ -333,7 +330,7 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 
 	p.o.AllowedSchedulers = allowedSchedulers
 	p.o.BypassedSchedulers = scheduler_util.SchedulersMap(p.bypassedSchedulers)
-	p.o.StartupTaints = slices.Concat(p.ignoreTaints, p.startupTaints)
+	p.o.StartupTaints = p.startupTaints
 	p.o.MaxGracefulTerminationSec = p.maxGracefulTerminationSec
 	p.o.NodeGroupAutoDiscovery = p.nodeGroupAutodiscovery
 	p.o.DrainPriorityConfig = drainPriorityConfigMap
