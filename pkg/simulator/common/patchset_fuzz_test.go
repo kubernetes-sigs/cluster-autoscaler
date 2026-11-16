@@ -222,6 +222,9 @@ func FuzzPatchSetDifferential(f *testing.F) {
 			if len(ps.patches) != len(ref.states) {
 				fail("got %d patches, want %d", len(ps.patches), len(ref.states))
 			}
+			if !maps.Equal(ps.effective, ref.effective()) {
+				fail("effective map got %v, want %v", ps.effective, ref.effective())
+			}
 		}
 	})
 }
