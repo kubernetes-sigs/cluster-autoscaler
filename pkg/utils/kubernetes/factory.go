@@ -41,6 +41,9 @@ const (
 	// Exact message client-go event recorder logs when its event queue is full and an event is dropped.
 	// Must match generateEvent() in client-go record/event.go
 	droppedEventLogMessage = "Unable to record event: too many queued events, dropped event"
+	// maxDroppedEventErrorLogsPerLoop is the number of droppedEventLogMessage error logs
+	// emitted per autoscaler loop. The rest are suppressed and only reported as a count.
+	maxDroppedEventErrorLogsPerLoop = 30
 )
 
 // CreateEventRecorder creates an event recorder to send custom events to Kubernetes to be recorded for targeted Kubernetes objects
@@ -51,7 +54,7 @@ func CreateEventRecorder(ctx context.Context, kubeClient clientset.Interface, re
 // CreateEventRecorderWithSuppressErrorQuota creates an event recorder with error logs limited by the SuppressErrorQuota.
 // The caller is responsible for calling Flush on the returned SuppressErrorQuota once per autoscaler loop.
 func CreateEventRecorderWithSuppressErrorQuota(ctx context.Context, kubeClient clientset.Interface, recordDuplicatedEvents bool) (kube_record.EventRecorder, *SuppressErrorQuota) {
-	quota := NewSuppressErrorQuota(droppedEventLogMessage, "NotTriggerScaleUp")
+	quota := NewSuppressErrorQuota(droppedEventLogMessage, "NotTriggerScaleUp", maxDroppedEventErrorLogsPerLoop)
 	recorder := createEventRecorder(ctx, kubeClient, recordDuplicatedEvents).WithLogger(quota.Logger(klog.FromContext(ctx)))
 	return recorder, quota
 }

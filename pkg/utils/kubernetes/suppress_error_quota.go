@@ -25,34 +25,30 @@ import (
 	"k8s.io/klog/v2"
 )
 
-const (
-	// maxLimitedErrorLogsPerLoop is the number of limited error logs emitted per
-	// autoscaler loop. The rest are suppressed and only reported as a count by
-	// SuppressErrorQuota.Flush.
-	maxLimitedErrorLogsPerLoop = 30
-	// suppressedErrorsSummaryMessage is the message of the error log emitted by
-	// SuppressErrorQuota.Flush when some error logs were suppressed. The suppressed
-	// message, event reason and counts are attached to it as key/value pairs:
-	// message, eventReason, totalErrors, loggedErrors and suppressedErrors.
-	suppressedErrorsSummaryMessage = "Some repeated error logs were suppressed since the end of the previous autoscaler loop"
-)
+// suppressedErrorsSummaryMessage is the message of the error log emitted by
+// SuppressErrorQuota.Flush when some error logs were suppressed. The suppressed
+// message, event reason and counts are attached to it as key/value pairs:
+// message, eventReason, totalErrors, loggedErrors and suppressedErrors.
+const suppressedErrorsSummaryMessage = "Some repeated error logs were suppressed since the end of the previous autoscaler loop"
 
 // SuppressErrorQuota caps how many error logs with a given message and event reason
 // are emitted per CA loop, so that a burst of identical errors doesn't flood the logs.
-// The maxLimitedErrorLogsPerLoop is shared by all loggers returned by Logger and is
-// reset on every Flush, which is called once at the end of every CA loop.
+// The limit is shared by all loggers returned by Logger and is reset on every Flush,
+// which is called once at the end of every CA loop.
 type SuppressErrorQuota struct {
 	message         string
 	eventReason     string
+	limit           int
 	mu              sync.Mutex
 	loggedCount     int
 	suppressedCount int
 }
 
-// NewSuppressErrorQuota returns a SuppressErrorQuota which limits error logs with
-// the given message whose event reason is eventReason.
-func NewSuppressErrorQuota(message, eventReason string) *SuppressErrorQuota {
-	return &SuppressErrorQuota{message: message, eventReason: eventReason}
+// NewSuppressErrorQuota returns a SuppressErrorQuota which emits at most limit error
+// logs per CA loop with the given message whose event reason is eventReason. The rest
+// are suppressed and only reported as a count by Flush.
+func NewSuppressErrorQuota(message, eventReason string, limit int) *SuppressErrorQuota {
+	return &SuppressErrorQuota{message: message, eventReason: eventReason, limit: limit}
 }
 
 // Logger returns a copy of base whose LogSink limits matching error logs against q's per-loop quota.
@@ -96,19 +92,6 @@ func (q *SuppressErrorQuota) Flush(ctx context.Context) {
 	}
 }
 
-// allow checks whether an error log fits in the current loop quota.
-// The log is counted as logged or suppressed.
-func (q *SuppressErrorQuota) allow() bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.loggedCount < maxLimitedErrorLogsPerLoop {
-		q.loggedCount++
-		return true
-	}
-	q.suppressedCount++
-	return false
-}
-
 // eventReason returns the Reason of the *v1.Event passed under the "event" key.
 func eventReason(keysAndValues []any) string {
 	for i := 0; i+1 < len(keysAndValues); i += 2 {
@@ -147,9 +130,18 @@ func (s *suppressErrorQuotaLogSink) Info(level int, msg string, keysAndValues ..
 // - msg is the quota's message and
 // - Error contains key "event" whose Event reason is the quota's eventReason and
 // - the quota in the current CA loop is used up.
+// Matching error logs are counted as logged or suppressed.
 func (s *suppressErrorQuotaLogSink) Error(err error, msg string, keysAndValues ...any) {
-	if msg == s.quota.message && eventReason(keysAndValues) == s.quota.eventReason && !s.quota.allow() {
-		return
+	q := s.quota
+	if msg == q.message && eventReason(keysAndValues) == q.eventReason {
+		q.mu.Lock()
+		if q.loggedCount >= q.limit {
+			q.suppressedCount++
+			q.mu.Unlock()
+			return
+		}
+		q.loggedCount++
+		q.mu.Unlock()
 	}
 	s.delegate.Error(err, msg, keysAndValues...)
 }

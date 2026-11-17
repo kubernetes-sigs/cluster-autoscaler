@@ -26,121 +26,139 @@ import (
 	"k8s.io/klog/v2/ktesting"
 )
 
+const (
+	testQuotaLimit          = 3
+	testSuppressEventReason = "NotTriggerScaleUp"
+)
+
 func TestSuppressErrorQuota(t *testing.T) {
-	suppressEventReason := "NotTriggerScaleUp"
-	otherErrorMessage := "Some other error"
-	otherEventReason := "NotSuppressedReason"
 	for name, tc := range map[string]struct {
-		nilQuota              bool
-		noEventKey            bool
-		message               string
-		eventReason           string
-		errorsPerLoop         int
-		loops                 int
-		wantLoggedPerLoop     int
-		wantSummaries         int
-		wantSuppressedPerLoop int
+		nilQuota       bool
+		noEventKey     bool
+		message        string
+		eventReason    string
+		errorLogs      int
+		wantLogged     int
+		wantSuppressed int
 	}{
 		"nil quota no limit": {
-			nilQuota:          true,
-			message:           droppedEventLogMessage,
-			eventReason:       suppressEventReason,
-			errorsPerLoop:     maxLimitedErrorLogsPerLoop + 5,
-			loops:             1,
-			wantLoggedPerLoop: maxLimitedErrorLogsPerLoop + 5,
+			nilQuota:    true,
+			message:     droppedEventLogMessage,
+			eventReason: testSuppressEventReason,
+			errorLogs:   5,
+			wantLogged:  5,
 		},
 		"under quota": {
-			message:           droppedEventLogMessage,
-			eventReason:       suppressEventReason,
-			errorsPerLoop:     maxLimitedErrorLogsPerLoop,
-			loops:             1,
-			wantLoggedPerLoop: maxLimitedErrorLogsPerLoop,
+			message:     droppedEventLogMessage,
+			eventReason: testSuppressEventReason,
+			errorLogs:   2,
+			wantLogged:  2,
 		},
 		"over quota": {
-			message:               droppedEventLogMessage,
-			eventReason:           suppressEventReason,
-			errorsPerLoop:         maxLimitedErrorLogsPerLoop + 5,
-			loops:                 1,
-			wantLoggedPerLoop:     maxLimitedErrorLogsPerLoop,
-			wantSummaries:         1,
-			wantSuppressedPerLoop: 5,
+			message:        droppedEventLogMessage,
+			eventReason:    testSuppressEventReason,
+			errorLogs:      5,
+			wantLogged:     3,
+			wantSuppressed: 2,
 		},
 		"other error messages not limited": {
-			message:               otherErrorMessage,
-			eventReason:           suppressEventReason,
-			errorsPerLoop:         maxLimitedErrorLogsPerLoop + 5,
-			loops:                 1,
-			wantLoggedPerLoop:     maxLimitedErrorLogsPerLoop + 5,
-			wantSuppressedPerLoop: 0,
-			wantSummaries:         0,
+			message:     "Some other error",
+			eventReason: testSuppressEventReason,
+			errorLogs:   5,
+			wantLogged:  5,
 		},
 		"other event reasons not limited": {
-			message:               droppedEventLogMessage,
-			eventReason:           otherEventReason,
-			errorsPerLoop:         maxLimitedErrorLogsPerLoop + 5,
-			loops:                 2,
-			wantLoggedPerLoop:     maxLimitedErrorLogsPerLoop + 5,
-			wantSuppressedPerLoop: 0,
-			wantSummaries:         0,
+			message:     droppedEventLogMessage,
+			eventReason: "NotSuppressedReason",
+			errorLogs:   5,
+			wantLogged:  5,
 		},
 		"errors without event key not limited": {
-			noEventKey:        true,
-			message:           droppedEventLogMessage,
-			errorsPerLoop:     maxLimitedErrorLogsPerLoop + 5,
-			loops:             1,
-			wantLoggedPerLoop: maxLimitedErrorLogsPerLoop + 5,
-		},
-		"quota resets after flush": {
-			message:               droppedEventLogMessage,
-			eventReason:           suppressEventReason,
-			errorsPerLoop:         maxLimitedErrorLogsPerLoop + 5,
-			loops:                 2,
-			wantLoggedPerLoop:     maxLimitedErrorLogsPerLoop,
-			wantSuppressedPerLoop: 5,
-			wantSummaries:         2,
+			noEventKey: true,
+			message:    droppedEventLogMessage,
+			errorLogs:  5,
+			wantLogged: 5,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			baseLogger := ktesting.NewLogger(t, ktesting.NewConfig(ktesting.BufferLogs(true)))
 			ctx := klog.NewContext(context.Background(), baseLogger.WithValues("iterationId", "test"))
-			suppressErrorQuota := NewSuppressErrorQuota(droppedEventLogMessage, suppressEventReason)
+			quota := NewSuppressErrorQuota(droppedEventLogMessage, testSuppressEventReason, testQuotaLimit)
 			if tc.nilQuota {
-				suppressErrorQuota = nil
+				quota = nil
 			}
+			logger := quota.Logger(baseLogger)
 			ev := &v1.Event{Reason: tc.eventReason}
-			logger := suppressErrorQuota.Logger(baseLogger)
-			for range tc.loops {
-				for range tc.errorsPerLoop {
-					if tc.noEventKey {
-						logger.Error(nil, tc.message)
-					} else {
-						logger.Error(nil, tc.message, "event", ev)
-					}
-				}
-				suppressErrorQuota.Flush(ctx)
-			}
-			var logged int
-			var summaries []ktesting.LogEntry
-			for _, entry := range baseLogger.GetSink().(ktesting.Underlier).GetBuffer().Data() {
-				switch entry.Message {
-				case tc.message:
-					logged++
-				case suppressedErrorsSummaryMessage:
-					summaries = append(summaries, entry)
+			for range tc.errorLogs {
+				if tc.noEventKey {
+					logger.Error(nil, tc.message)
+				} else {
+					logger.Error(nil, tc.message, "event", ev)
 				}
 			}
-			assert.Equal(t, tc.wantLoggedPerLoop*tc.loops, logged)
-			assert.Len(t, summaries, tc.wantSummaries)
-			for _, summary := range summaries {
-				assert.Equal(t, []any{"iterationId", "test"}, summary.WithKVList)
-				assert.Equal(t, []any{
-					"message", droppedEventLogMessage,
-					"eventReason", suppressEventReason,
-					"totalErrors", tc.wantLoggedPerLoop + tc.wantSuppressedPerLoop,
-					"loggedErrors", tc.wantLoggedPerLoop,
-					"suppressedErrors", tc.wantSuppressedPerLoop,
-				}, summary.ParameterKVList)
+			quota.Flush(ctx)
+
+			logged, summaries := loggedErrorsAndSummaries(baseLogger, tc.message)
+			assert.Equal(t, tc.wantLogged, logged)
+			if tc.wantSuppressed == 0 {
+				assert.Empty(t, summaries)
+				return
+			}
+			if assert.Len(t, summaries, 1) {
+				assertSummary(t, summaries[0], tc.wantLogged, tc.wantSuppressed)
 			}
 		})
 	}
+}
+
+func TestSuppressErrorQuotaFlushResetsQuota(t *testing.T) {
+	baseLogger := ktesting.NewLogger(t, ktesting.NewConfig(ktesting.BufferLogs(true)))
+	ctx := klog.NewContext(context.Background(), baseLogger.WithValues("iterationId", "test"))
+	quota := NewSuppressErrorQuota(droppedEventLogMessage, testSuppressEventReason, testQuotaLimit)
+	logger := quota.Logger(baseLogger)
+	ev := &v1.Event{Reason: testSuppressEventReason}
+
+	loops := 2
+	errorLogs := 5 // per loop
+	wantSuppressedPerLoop := 2
+
+	for range loops {
+		for range errorLogs {
+			logger.Error(nil, droppedEventLogMessage, "event", ev)
+		}
+		quota.Flush(ctx)
+	}
+	logged, summaries := loggedErrorsAndSummaries(baseLogger, droppedEventLogMessage)
+	assert.Equal(t, loops*testQuotaLimit, logged)
+	if assert.Len(t, summaries, loops) {
+		for _, summary := range summaries {
+			assertSummary(t, summary, testQuotaLimit, wantSuppressedPerLoop)
+		}
+	}
+}
+
+func loggedErrorsAndSummaries(baseLogger klog.Logger, message string) (int, []ktesting.LogEntry) {
+	var logged int
+	var summaries []ktesting.LogEntry
+	for _, entry := range baseLogger.GetSink().(ktesting.Underlier).GetBuffer().Data() {
+		switch entry.Message {
+		case message:
+			logged++
+		case suppressedErrorsSummaryMessage:
+			summaries = append(summaries, entry)
+		}
+	}
+	return logged, summaries
+}
+
+func assertSummary(t *testing.T, summary ktesting.LogEntry, wantLogged, wantSuppressed int) {
+	t.Helper()
+	assert.Equal(t, []any{"iterationId", "test"}, summary.WithKVList)
+	assert.Equal(t, []any{
+		"message", droppedEventLogMessage,
+		"eventReason", testSuppressEventReason,
+		"totalErrors", wantLogged + wantSuppressed,
+		"loggedErrors", wantLogged,
+		"suppressedErrors", wantSuppressed,
+	}, summary.ParameterKVList)
 }
