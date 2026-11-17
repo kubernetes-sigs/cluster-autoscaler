@@ -2081,6 +2081,72 @@ func TestHandleInstanceCreationErrors(t *testing.T) {
 	mockMetrics.AssertCalled(t, "RegisterFailedNodeCreations", metrics.FailedScaleUpReason("RESOURCE_POOL_EXHAUSTED"), 2)
 }
 
+func TestUpdateNodesNotifiesFailedScaleUpsWithoutLock(t *testing.T) {
+	testCases := []struct {
+		name          string
+		scaleUpAge    time.Duration
+		instanceError *cloudprovider.InstanceErrorInfo
+	}{
+		{name: "scale-up timed out", scaleUpAge: 3 * time.Minute},
+		{name: "instance creation error", instanceError: &cloudprovider.InstanceErrorInfo{ErrorClass: cloudprovider.OutOfResourcesErrorClass}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			provider := testprovider.NewTestCloudProviderBuilder().Build()
+			nodeGroup := &creatingInstanceNodeGroup{TestNodeGroup: provider.BuildNodeGroup("ng1", 0, 10, 1, true, false, "", nil), errorInfo: tc.instanceError}
+			provider.InsertNodeGroup(nodeGroup)
+			logRecorder, _ := utils.NewStatusMapRecorder(&fake.Clientset{}, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
+			notifier := nodegroupchange.NewNodeGroupChangeObserversList()
+			csr := newTestClusterStateRegistry(provider, logRecorder, WithScaleStateNotifier(notifier))
+			observer := &lockingObserver{csr: csr}
+			notifier.Register(observer)
+			csr.RegisterScaleUp(context.Background(), nodeGroup, 1, now.Add(-tc.scaleUpAge))
+
+			assertNodesUpdatedWithin(t, csr, now, 10*time.Second)
+			assert.Equal(t, 1, observer.failedScaleUps)
+		})
+	}
+}
+
+type creatingInstanceNodeGroup struct {
+	*testprovider.TestNodeGroup
+	errorInfo *cloudprovider.InstanceErrorInfo
+}
+
+func (ng *creatingInstanceNodeGroup) Nodes(context.Context) ([]cloudprovider.Instance, error) {
+	return []cloudprovider.Instance{{
+		Id:     "ng1-1",
+		Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceCreating, ErrorInfo: ng.errorInfo},
+	}}, nil
+}
+
+type lockingObserver struct {
+	nodegroupchange.NodeGroupChangeObserver
+	csr            *ClusterStateRegistry
+	failedScaleUps int
+}
+
+func (o *lockingObserver) RegisterFailedScaleUp(_ context.Context, _ cloudprovider.NodeGroup, _ int, _ cloudprovider.InstanceErrorInfo, _ time.Time) {
+	// Takes the ClusterStateRegistry lock, so notifying under that lock deadlocks.
+	o.csr.GetUnregisteredNodes()
+	o.failedScaleUps++
+}
+
+func assertNodesUpdatedWithin(t *testing.T, csr *ClusterStateRegistry, now time.Time, timeout time.Duration) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		done <- csr.UpdateNodes(context.Background(), nil, now)
+	}()
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(timeout):
+		t.Fatal("UpdateNodes deadlocked: failed scale-up observers were notified under the ClusterStateRegistry lock")
+	}
+}
+
 func TestFailedScaleUpWithDra(t *testing.T) {
 	now := time.Now()
 
