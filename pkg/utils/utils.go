@@ -18,6 +18,7 @@ package utils
 
 import (
 	"context"
+	"slices"
 
 	apiv1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -71,6 +72,9 @@ func PodSpecSemanticallyEqual(p1 apiv1.PodSpec, p2 apiv1.PodSpec) bool {
 }
 
 func sanitizePodSpec(podSpec apiv1.PodSpec) apiv1.PodSpec {
+	// podSpec is a shallow copy: copy the container slices so that the helpers below don't modify the caller's pod.
+	podSpec.Containers = slices.Clone(podSpec.Containers)
+	podSpec.InitContainers = slices.Clone(podSpec.InitContainers)
 	dropProjectedVolumesAndMounts(&podSpec)
 	dropHostname(&podSpec)
 	dropEnv(&podSpec)
