@@ -155,7 +155,7 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 		return nil, nil, fmt.Errorf("informerFactory is missing: ensure WithInformerFactory() is called")
 	}
 
-	fwHandle, err := framework.NewHandle(ctx, b.informerFactory, autoscalingOptions.SchedulerConfig, autoscalingOptions.DynamicResourceAllocationEnabled, autoscalingOptions.CSINodeAwareSchedulingEnabled)
+	fwHandle, err := framework.NewHandle(ctx, b.informerFactory, autoscalingOptions.SchedulerConfig, autoscalingOptions.CSINodeAwareSchedulingEnabled)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -166,7 +166,7 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 	opts := coreoptions.AutoscalerOptions{
 		AutoscalingOptions:     autoscalingOptions,
 		FrameworkHandle:        fwHandle,
-		ClusterSnapshot:        predicate.NewPredicateSnapshot(snapshotStore, fwHandle, autoscalingOptions.DynamicResourceAllocationEnabled, autoscalingOptions.PredicateParallelism, autoscalingOptions.CSINodeAwareSchedulingEnabled, autoscalingOptions.SchedulerVerbosityOffset),
+		ClusterSnapshot:        predicate.NewPredicateSnapshot(snapshotStore, fwHandle, autoscalingOptions.PredicateParallelism, autoscalingOptions.CSINodeAwareSchedulingEnabled, autoscalingOptions.SchedulerVerbosityOffset),
 		KubeClient:             b.kubeClient,
 		InformerFactory:        b.informerFactory,
 		AutoscalingKubeClients: b.kubeClients,

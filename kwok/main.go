@@ -224,16 +224,6 @@ func main() {
 		klog.Fatalf("Failed to parse flags: %v", err)
 	}
 
-	// The DRA feature controls whether the DRA scheduler plugin is selected in scheduler framework. The local DRA flag controls whether
-	// DRA logic is enabled in Cluster Autoscaler. The 2 values should be in sync - enabling DRA logic in CA without selecting the DRA scheduler
-	// plugin doesn't actually do anything, and selecting the DRA scheduler plugin without enabling DRA logic in CA means the plugin is not set up
-	// correctly and can panic.
-	if autoscalingOpts.DynamicResourceAllocationEnabled != featureGate.Enabled(features.DynamicResourceAllocation) {
-		if err := featureGate.SetFromMap(map[string]bool{string(features.DynamicResourceAllocation): autoscalingOpts.DynamicResourceAllocationEnabled}); err != nil {
-			klog.Fatalf("couldn't set the DRA feature gate to %v: %v", autoscalingOpts.DynamicResourceAllocationEnabled, err)
-		}
-	}
-
 	if autoscalingOpts.InterPodAffinityHostnameFastPath != featureGate.Enabled(features.InterPodAffinityHostnameFastPath) {
 		if err := featureGate.SetFromMap(map[string]bool{string(features.InterPodAffinityHostnameFastPath): autoscalingOpts.InterPodAffinityHostnameFastPath}); err != nil {
 			klog.Fatalf("couldn't set the InterPodAffinityHostnameFastPath feature gate to %v: %v", autoscalingOpts.InterPodAffinityHostnameFastPath, err)

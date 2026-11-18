@@ -82,14 +82,14 @@ func initializeDefaultOptions(ctx context.Context, opts *coreoptions.AutoscalerO
 		opts.AutoscalingKubeClients = ca_context.NewAutoscalingKubeClients(ctx, opts.AutoscalingOptions, opts.KubeClient, opts.InformerFactory)
 	}
 	if opts.FrameworkHandle == nil {
-		fwHandle, err := framework.NewHandle(ctx, opts.InformerFactory, opts.SchedulerConfig, opts.DynamicResourceAllocationEnabled, opts.CSINodeAwareSchedulingEnabled)
+		fwHandle, err := framework.NewHandle(ctx, opts.InformerFactory, opts.SchedulerConfig, opts.CSINodeAwareSchedulingEnabled)
 		if err != nil {
 			return err
 		}
 		opts.FrameworkHandle = fwHandle
 	}
 	if opts.ClusterSnapshot == nil {
-		opts.ClusterSnapshot = predicate.NewPredicateSnapshot(store.NewBasicSnapshotStore(), opts.FrameworkHandle, opts.DynamicResourceAllocationEnabled, opts.PredicateParallelism, opts.CSINodeAwareSchedulingEnabled, opts.SchedulerVerbosityOffset)
+		opts.ClusterSnapshot = predicate.NewPredicateSnapshot(store.NewBasicSnapshotStore(), opts.FrameworkHandle, opts.PredicateParallelism, opts.CSINodeAwareSchedulingEnabled, opts.SchedulerVerbosityOffset)
 	}
 	if opts.RemainingPdbTracker == nil {
 		opts.RemainingPdbTracker = pdb.NewBasicRemainingPdbTracker()
@@ -119,7 +119,7 @@ func initializeDefaultOptions(ctx context.Context, opts *coreoptions.AutoscalerO
 	if opts.DrainabilityRules == nil {
 		opts.DrainabilityRules = rules.Default(opts.DeleteOptions)
 	}
-	if opts.DraProvider == nil && opts.DynamicResourceAllocationEnabled {
+	if opts.DraProvider == nil {
 		opts.DraProvider = draprovider.NewProviderFromInformers(informerFactory)
 	}
 	if opts.CloudProvider == nil {

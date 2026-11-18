@@ -141,7 +141,7 @@ func (c *Checker) unremovableReasonAndNodeUtilization(ctx context.Context, autos
 	}
 
 	gpuConfig := autoscalingCtx.CloudProvider.GetNodeGpuConfig(ctx, node)
-	utilInfo, err := utilization.Calculate(ctx, nodeInfo, ignoreDaemonSetsUtilization, autoscalingCtx.IgnoreMirrorPodsUtilization, autoscalingCtx.DynamicResourceAllocationEnabled, gpuConfig, timestamp)
+	utilInfo, err := utilization.Calculate(ctx, nodeInfo, ignoreDaemonSetsUtilization, autoscalingCtx.IgnoreMirrorPodsUtilization, true, gpuConfig, timestamp)
 	if err != nil {
 		logger.Info("Failed to calculate utilization for node", "node", klog.KObj(node), "err", err)
 		return simulator.UnexpectedError, nil

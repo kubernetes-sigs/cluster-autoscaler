@@ -392,7 +392,7 @@ func (a *StaticAutoscaler) initializeLoopState(ctx context.Context, state *loopS
 	stateUpdateStart := time.Now()
 
 	var draSnapshot *drasnapshot.Snapshot
-	if a.AutoscalingContext.DynamicResourceAllocationEnabled && a.AutoscalingContext.DraProvider != nil {
+	if a.AutoscalingContext.DraProvider != nil {
 		var err error
 		draSnapshot, err = a.AutoscalingContext.DraProvider.Snapshot()
 		if err != nil {
