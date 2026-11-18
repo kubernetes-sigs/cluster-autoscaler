@@ -345,11 +345,18 @@ func (csr *ClusterStateRegistry) RegisterScaleDown(nodeGroup cloudprovider.NodeG
 	csr.scaleDownRequests = append(csr.scaleDownRequests, request)
 }
 
+type failedScaleUp struct {
+	nodeGroup cloudprovider.NodeGroup
+	delta     int
+	errorInfo cloudprovider.InstanceErrorInfo
+}
+
 // To be executed under a lock.
-func (csr *ClusterStateRegistry) updateScaleRequests(ctx context.Context, currentTime time.Time) {
+func (csr *ClusterStateRegistry) updateScaleRequests(ctx context.Context, currentTime time.Time) []failedScaleUp {
 	// clean up stale backoff info
 	logger := klog.FromContext(ctx)
 	csr.backoff.RemoveStaleBackoffData(currentTime)
+	var failedScaleUps []failedScaleUp
 
 	for nodeGroupName, scaleUpRequest := range csr.scaleUpRequests {
 		if csr.asyncNodeGroupStateChecker.IsUpcoming(scaleUpRequest.NodeGroup) {
@@ -367,11 +374,15 @@ func (csr *ClusterStateRegistry) updateScaleRequests(ctx context.Context, curren
 			csr.logRecorder.Eventf(apiv1.EventTypeWarning, "ScaleUpTimedOut",
 				"Nodes added to group %s failed to register within %v",
 				scaleUpRequest.NodeGroup.Id(), currentTime.Sub(scaleUpRequest.Time))
-			csr.scaleStateNotifier.RegisterFailedScaleUp(ctx, scaleUpRequest.NodeGroup, scaleUpRequest.Increase, cloudprovider.InstanceErrorInfo{
-				ErrorClass:   cloudprovider.OtherErrorClass,
-				ErrorCode:    string(metrics.Timeout),
-				ErrorMessage: fmt.Sprintf("Scale-up timed out for node group %v after %v", nodeGroupName, currentTime.Sub(scaleUpRequest.Time)),
-			}, currentTime)
+			failedScaleUps = append(failedScaleUps, failedScaleUp{
+				nodeGroup: scaleUpRequest.NodeGroup,
+				delta:     scaleUpRequest.Increase,
+				errorInfo: cloudprovider.InstanceErrorInfo{
+					ErrorClass:   cloudprovider.OtherErrorClass,
+					ErrorCode:    string(metrics.Timeout),
+					ErrorMessage: fmt.Sprintf("Scale-up timed out for node group %v after %v", nodeGroupName, currentTime.Sub(scaleUpRequest.Time)),
+				},
+			})
 
 			// Attempt to revert the failed scale-up by decreasing target size.
 			// This prevents cloud providers from indefinitely retrying failed provisioning attempts.
@@ -397,6 +408,7 @@ func (csr *ClusterStateRegistry) updateScaleRequests(ctx context.Context, curren
 		}
 	}
 	csr.scaleDownRequests = newScaleDownRequests
+	return failedScaleUps
 }
 
 // Doesn't need csr lock, because both templateNodeInfoRegistry and backoff are thread-safe.
@@ -461,16 +473,20 @@ func (csr *ClusterStateRegistry) UpdateNodes(ctx context.Context, nodes []*apiv1
 	if err != nil {
 		return err
 	}
-	csr.updateClusterStateRegistry(ctx, nodes,
+	failedScaleUps := csr.updateClusterStateRegistry(ctx, nodes,
 		cloudProviderNodeInstances,
 		currentTime,
 		targetSizes,
 	)
+	// Notify outside the ClusterStateRegistry lock, because observers may take their own locks.
+	for _, f := range failedScaleUps {
+		csr.scaleStateNotifier.RegisterFailedScaleUp(ctx, f.nodeGroup, f.delta, f.errorInfo, currentTime)
+	}
 	return nil
 }
 
 func (csr *ClusterStateRegistry) updateClusterStateRegistry(ctx context.Context, nodes []*apiv1.Node,
-	cloudProviderNodeInstances map[string][]cloudprovider.Instance, currentTime time.Time, targetSizes map[string]int) {
+	cloudProviderNodeInstances map[string][]cloudprovider.Instance, currentTime time.Time, targetSizes map[string]int) []failedScaleUp {
 	cloudProviderNodesRemoved := csr.getCloudProviderDeletedNodes(ctx, nodes)
 	notRegistered := getNotRegisteredNodes(nodes, cloudProviderNodeInstances, currentTime)
 
@@ -487,11 +503,12 @@ func (csr *ClusterStateRegistry) updateClusterStateRegistry(ctx context.Context,
 	// update acceptable ranges based on requests from last loop and targetSizes
 	// updateScaleRequests relies on acceptableRanges being up to date
 	csr.updateAcceptableRanges(ctx, targetSizes)
-	csr.updateScaleRequests(ctx, currentTime)
-	csr.handleInstanceCreationErrors(ctx, currentTime)
+	failedScaleUps := csr.updateScaleRequests(ctx, currentTime)
+	failedScaleUps = append(failedScaleUps, csr.handleInstanceCreationErrors(ctx, currentTime)...)
 	//  recalculate acceptable ranges after removing timed out requests
 	csr.updateAcceptableRanges(ctx, targetSizes)
 	csr.updateIncorrectNodeGroupSizes(ctx, currentTime)
+	return failedScaleUps
 }
 
 // Recalculate cluster state after scale-ups or scale-downs were registered.
@@ -1323,15 +1340,18 @@ func (csr *ClusterStateRegistry) GetAutoscaledNodesCount() (currentSize, targetS
 	return currentSize, targetSize
 }
 
-func (csr *ClusterStateRegistry) handleInstanceCreationErrors(ctx context.Context, currentTime time.Time) {
+// To be executed under a lock.
+func (csr *ClusterStateRegistry) handleInstanceCreationErrors(ctx context.Context, currentTime time.Time) []failedScaleUp {
 	nodeGroups := csr.getRunningNodeGroups(ctx)
 
+	var failedScaleUps []failedScaleUp
 	for _, nodeGroup := range nodeGroups {
-		csr.handleInstanceCreationErrorsForNodeGroup(ctx, nodeGroup,
+		failedScaleUps = append(failedScaleUps, csr.handleInstanceCreationErrorsForNodeGroup(ctx, nodeGroup,
 			csr.cloudProviderNodeInstances[nodeGroup.Id()],
 			csr.previousCloudProviderNodeInstances[nodeGroup.Id()],
-			currentTime)
+			currentTime)...)
 	}
+	return failedScaleUps
 }
 
 func (csr *ClusterStateRegistry) handleInstanceCreationErrorsForNodeGroup(
@@ -1339,9 +1359,10 @@ func (csr *ClusterStateRegistry) handleInstanceCreationErrorsForNodeGroup(
 	nodeGroup cloudprovider.NodeGroup,
 	currentInstances []cloudprovider.Instance,
 	previousInstances []cloudprovider.Instance,
-	currentTime time.Time) {
+	currentTime time.Time) []failedScaleUp {
 
 	logger := klog.FromContext(ctx)
+	var failedScaleUps []failedScaleUp
 	_, currentUniqueErrorMessagesForErrorCode, currentErrorCodeToInstance := csr.buildInstanceToErrorCodeMappings(currentInstances)
 	previousInstanceToErrorCode, _, _ := csr.buildInstanceToErrorCodeMappings(previousInstances)
 
@@ -1376,13 +1397,18 @@ func (csr *ClusterStateRegistry) handleInstanceCreationErrorsForNodeGroup(
 				csr.buildErrorMessageEventString(currentUniqueErrorMessagesForErrorCode[errorCode]))
 			// Decrease the scale up request by the number of deleted nodes
 			csr.registerOrUpdateScaleUpNoLock(ctx, nodeGroup, -len(unseenInstanceIds), currentTime)
-			csr.scaleStateNotifier.RegisterFailedScaleUp(ctx, nodeGroup, len(unseenInstanceIds), cloudprovider.InstanceErrorInfo{
-				ErrorClass:   errorCode.class,
-				ErrorCode:    errorCode.code,
-				ErrorMessage: csr.buildErrorMessageEventString(currentUniqueErrorMessagesForErrorCode[errorCode]),
-			}, currentTime)
+			failedScaleUps = append(failedScaleUps, failedScaleUp{
+				nodeGroup: nodeGroup,
+				delta:     len(unseenInstanceIds),
+				errorInfo: cloudprovider.InstanceErrorInfo{
+					ErrorClass:   errorCode.class,
+					ErrorCode:    errorCode.code,
+					ErrorMessage: csr.buildErrorMessageEventString(currentUniqueErrorMessagesForErrorCode[errorCode]),
+				},
+			})
 		}
 	}
+	return failedScaleUps
 }
 
 func (csr *ClusterStateRegistry) buildErrorMessageEventString(uniqErrorMessages []string) string {
