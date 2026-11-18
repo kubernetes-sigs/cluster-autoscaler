@@ -18,6 +18,8 @@ package provreq
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -35,6 +37,10 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqwrapper"
 )
 
+// maxUnevaluatedPicks is how many consecutive loops a picked ProvisioningRequest is injected while
+// no provisioning class evaluates it, so that a request which is never evaluated doesn't block others.
+const maxUnevaluatedPicks = 10
+
 // ProvisioningRequestPodsInjector creates in-memory pods from ProvisioningRequest and inject them to unscheduled pods list.
 type ProvisioningRequestPodsInjector struct {
 	initialRetryTime                   time.Duration
@@ -45,6 +51,16 @@ type ProvisioningRequestPodsInjector struct {
 	lastProvisioningRequestProcessTime time.Time
 	checkCapacityBatchProcessing       bool
 	checkCapacityProcessorInstance     string
+	unevaluatedPick                    *pick
+	releasedPicks                      *lru.Cache
+}
+
+// pick is a ProvisioningRequest that was injected and is not evaluated by a provisioning class yet.
+type pick struct {
+	key string
+	// provisionedTransition is the LastTransitionTime of the Provisioned condition at pick time, nil if absent.
+	provisionedTransition *metav1.Time
+	loops                 int
 }
 
 // IsAvailableForProvisioning checks if the provisioning request is the correct state for processing and provisioning has not been attempted recently.
@@ -52,6 +68,7 @@ func (p *ProvisioningRequestPodsInjector) IsAvailableForProvisioning(pr *provreq
 	conditions := pr.Status.Conditions
 	if apimeta.IsStatusConditionTrue(conditions, v1.Failed) || apimeta.IsStatusConditionTrue(conditions, v1.Provisioned) {
 		p.backoffDuration.Remove(key(pr))
+		p.releasedPicks.Remove(key(pr))
 		return false
 	}
 	provisioned := apimeta.FindStatusCondition(conditions, v1.Provisioned)
@@ -111,12 +128,24 @@ func (p *ProvisioningRequestPodsInjector) shouldMarkAsAccepted(ctx context.Conte
 }
 
 // GetPodsFromNextRequest picks one ProvisioningRequest meeting the condition passed using isSupportedClass function, marks it as accepted and returns pods from it.
+// The same ProvisioningRequest is picked again until a provisioning class evaluates it, then the one waiting longest for an evaluation is picked.
 func (p *ProvisioningRequestPodsInjector) GetPodsFromNextRequest(ctx context.Context) ([]*apiv1.Pod, error) {
 	logger := klog.FromContext(ctx)
 	provReqs, err := p.client.ProvisioningRequests(ctx)
 	if err != nil {
 		return nil, err
 	}
+	if pr := p.repeatUnevaluatedPick(ctx, provReqs); pr != nil {
+		podsFromProvReq, err := provreqpods.PodsForProvisioningRequest(pr)
+		if err == nil {
+			p.UpdateLastProcessTime()
+			return podsFromProvReq, nil
+		}
+		logger.Error(err, "Failed to get pods for ProvisioningRequest", "provReq", klog.KObj(pr))
+		p.MarkAsFailed(ctx, pr, provreqconditions.FailedToCreatePodsReason, err.Error())
+		p.unevaluatedPick = nil
+	}
+	p.sortByWaitingTime(provReqs)
 	for _, pr := range provReqs {
 		if !p.isSupportedClass(ctx, pr) {
 			continue
@@ -137,12 +166,110 @@ func (p *ProvisioningRequestPodsInjector) GetPodsFromNextRequest(ctx context.Con
 			if err := p.MarkAsAccepted(ctx, pr); err != nil {
 				continue
 			}
+			p.unevaluatedPick = newPick(pr)
 			return podsFromProvReq, nil
 		}
 		p.UpdateLastProcessTime()
 		return podsFromProvReq, nil
 	}
 	return nil, nil
+}
+
+// repeatUnevaluatedPick returns the previously picked ProvisioningRequest until a provisioning class
+// evaluates it, so that it doesn't lose its turn in loops which don't scale up ProvisioningRequest pods.
+// Repeating skips the backoff check, which would double the backoff of a retried request on every loop,
+// and skips rewriting the Accepted condition. Like a new pick, a repeat starts the next loop right away.
+func (p *ProvisioningRequestPodsInjector) repeatUnevaluatedPick(ctx context.Context, provReqs []*provreqwrapper.ProvisioningRequest) *provreqwrapper.ProvisioningRequest {
+	last := p.unevaluatedPick
+	p.unevaluatedPick = nil
+	if last == nil {
+		return nil
+	}
+	pr := findByKey(provReqs, last.key)
+	if pr == nil || last.isEvaluatedOrFailed(pr) {
+		p.releasedPicks.Remove(last.key)
+		return nil
+	}
+	if last.loops >= maxUnevaluatedPicks {
+		klog.FromContext(ctx).V(2).Info("ProvisioningRequest not evaluated after max picks, picking another one", "provReq", klog.KObj(pr), "picks", last.loops)
+		p.releasedPicks.Add(last.key, p.clock.Now())
+		return nil
+	}
+	last.loops++
+	p.unevaluatedPick = last
+	return pr
+}
+
+// sortByWaitingTime orders ProvisioningRequests starting from the one waiting longest for an evaluation.
+func (p *ProvisioningRequestPodsInjector) sortByWaitingTime(provReqs []*provreqwrapper.ProvisioningRequest) {
+	type waiting struct {
+		pr    *provreqwrapper.ProvisioningRequest
+		since time.Time
+	}
+	queue := make([]waiting, 0, len(provReqs))
+	for _, pr := range provReqs {
+		queue = append(queue, waiting{pr: pr, since: p.waitingSince(pr)})
+	}
+	slices.SortFunc(queue, func(a, b waiting) int {
+		if c := a.since.Compare(b.since); c != 0 {
+			return c
+		}
+		if c := strings.Compare(a.pr.Namespace, b.pr.Namespace); c != 0 {
+			return c
+		}
+		return strings.Compare(a.pr.Name, b.pr.Name)
+	})
+	for i, w := range queue {
+		provReqs[i] = w.pr
+	}
+}
+
+// waitingSince returns when the ProvisioningRequest started waiting for its next evaluation: the latest of
+// its creation, its last Provisioned transition and the release of its pick.
+func (p *ProvisioningRequestPodsInjector) waitingSince(pr *provreqwrapper.ProvisioningRequest) time.Time {
+	since := pr.CreationTimestamp.Time
+	if apimeta.IsStatusConditionTrue(pr.Status.Conditions, v1.Failed) || apimeta.IsStatusConditionTrue(pr.Status.Conditions, v1.Provisioned) {
+		return since
+	}
+	if provisioned := apimeta.FindStatusCondition(pr.Status.Conditions, v1.Provisioned); provisioned != nil && provisioned.LastTransitionTime.After(since) {
+		since = provisioned.LastTransitionTime.Time
+	}
+	if val, found := p.releasedPicks.Get(key(pr)); found {
+		if releasedAt, ok := val.(time.Time); ok && releasedAt.After(since) {
+			since = releasedAt
+		}
+	}
+	return since
+}
+
+func newPick(pr *provreqwrapper.ProvisioningRequest) *pick {
+	picked := &pick{key: key(pr), loops: 1}
+	if provisioned := apimeta.FindStatusCondition(pr.Status.Conditions, v1.Provisioned); provisioned != nil {
+		picked.provisionedTransition = provisioned.LastTransitionTime.DeepCopy()
+	}
+	return picked
+}
+
+// isEvaluatedOrFailed checks if a provisioning class updated the Provisioned condition since the pick, or the request failed.
+func (pk *pick) isEvaluatedOrFailed(pr *provreqwrapper.ProvisioningRequest) bool {
+	conditions := pr.Status.Conditions
+	if apimeta.IsStatusConditionTrue(conditions, v1.Failed) {
+		return true
+	}
+	provisioned := apimeta.FindStatusCondition(conditions, v1.Provisioned)
+	if provisioned == nil {
+		return false
+	}
+	return provisioned.Status != metav1.ConditionFalse || !provisioned.LastTransitionTime.Equal(pk.provisionedTransition)
+}
+
+func findByKey(provReqs []*provreqwrapper.ProvisioningRequest, prKey string) *provreqwrapper.ProvisioningRequest {
+	for _, pr := range provReqs {
+		if key(pr) == prKey {
+			return pr
+		}
+	}
+	return nil
 }
 
 // ProvisioningRequestWithPods contains a ProvisioningRequest Wrapper
@@ -212,6 +339,7 @@ func NewProvisioningRequestPodsInjector(client *provreqclient.ProvisioningReques
 		lastProvisioningRequestProcessTime: time.Now(),
 		checkCapacityBatchProcessing:       checkCapacityBatchProcessing,
 		checkCapacityProcessorInstance:     checkCapacityProcessorInstance,
+		releasedPicks:                      lru.New(maxCacheSize),
 	}
 }
 
