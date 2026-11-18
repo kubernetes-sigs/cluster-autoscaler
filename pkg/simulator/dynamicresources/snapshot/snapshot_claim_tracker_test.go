@@ -17,17 +17,25 @@ limitations under the License.
 package snapshot
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuretesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/dynamic-resource-allocation/cel"
 	"k8s.io/dynamic-resource-allocation/structured"
 	schedulerinterface "k8s.io/kube-scheduler/framework"
+	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 )
 
@@ -241,6 +249,194 @@ func TestSnapshotClaimTrackerSignalClaimPendingAllocation(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.allocatedClaim, claimAfterSignal); diff != "" {
 				t.Errorf("Claim in unexpected state after snapshotClaimTracker.SignalClaimPendingAllocation() (-want +got): %s", diff)
+			}
+		})
+	}
+}
+
+// TestSnapshotClaimTrackerBorrowedCollectionsAreReadOnly guards the "Borrowed collections"
+// contract documented on ListAllAllocatedDevices and GatherAllocatedState.
+//
+// Both hand back the snapshot's own live collections, which is only safe because the code
+// they are handed to - the structured allocator behind the DRA scheduler plugin - only reads
+// them. fwk.ResourceClaimTracker does not promise that, so nothing but this test stops a
+// Kubernetes bump from quietly starting to write through the alias and skewing a snapshot
+// that is never recomputed.
+//
+// So: hand the real allocator the real borrowed collections, let it allocate, and check that
+// it did not touch them.
+func TestSnapshotClaimTrackerBorrowedCollectionsAreReadOnly(t *testing.T) {
+	const (
+		driver    = "driver.example.com"
+		className = "example-class"
+		nodeName  = "node-1"
+		poolName  = "pool-1"
+	)
+
+	// Both allocator variants that can be reached through structured.NewAllocator: the
+	// stable one takes only AllocatedDevices, the incubating one takes the whole
+	// AllocatedState including the shared devices and the aggregated capacity.
+	//
+	// GatherAllocatedState only fills the latter two in when Kubernetes'
+	// DRAConsumableCapacity gate is on, so the gate has to move with the allocator variant -
+	// otherwise the incubating case would be handed two empty collections and the
+	// assertions on them would hold no matter what the allocator did.
+	for _, tc := range []struct {
+		name               string
+		allocatorFeatures  structured.Features
+		consumableCapacity bool
+	}{
+		{name: "stable", allocatorFeatures: structured.Features{}},
+		{name: "incubating/ConsumableCapacity", allocatorFeatures: structured.Features{ConsumableCapacity: true}, consumableCapacity: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			featuretesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DRAConsumableCapacity, tc.consumableCapacity)
+			ctx := context.Background()
+
+			devices := make([]resourceapi.Device, 4)
+			for i := range devices {
+				devices[i] = resourceapi.Device{Name: fmt.Sprintf("device-%d", i)}
+			}
+			slice := &resourceapi.ResourceSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "slice-1", UID: "slice-1"},
+				Spec: resourceapi.ResourceSliceSpec{
+					NodeName: ptr.To(nodeName),
+					Driver:   driver,
+					Pool:     resourceapi.ResourcePool{Name: poolName, ResourceSliceCount: 1},
+					Devices:  devices,
+				},
+			}
+			deviceClass := &resourceapi.DeviceClass{
+				ObjectMeta: metav1.ObjectMeta{Name: className},
+				Spec: resourceapi.DeviceClassSpec{
+					Selectors: []resourceapi.DeviceSelector{
+						{CEL: &resourceapi.CELDeviceSelector{Expression: fmt.Sprintf("device.driver == %q", driver)}},
+					},
+				},
+			}
+
+			// An already-allocated claim, so the borrowed collections are not empty and the
+			// allocator has something to read out of them.
+			allocated := &resourceapi.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "allocated", UID: "allocated", Namespace: "default"},
+				Status: resourceapi.ResourceClaimStatus{
+					Allocation: &resourceapi.AllocationResult{
+						Devices: resourceapi.DeviceAllocationResult{
+							Results: []resourceapi.DeviceRequestAllocationResult{
+								{Request: "req", Driver: driver, Pool: poolName, Device: "device-0"},
+							},
+						},
+					},
+				},
+			}
+
+			// A claim holding a share of a device, so AllocatedSharedDeviceIDs and
+			// AggregatedCapacity are populated too and the assertions on them are not
+			// comparing one empty collection to another.
+			shared := &resourceapi.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "shared", UID: "shared", Namespace: "default"},
+				Status: resourceapi.ResourceClaimStatus{
+					Allocation: &resourceapi.AllocationResult{
+						Devices: resourceapi.DeviceAllocationResult{
+							Results: []resourceapi.DeviceRequestAllocationResult{
+								{
+									Request: "req", Driver: driver, Pool: poolName, Device: "device-1",
+									ShareID: ptr.To(types.UID("share-a")),
+									ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{
+										"memory": *resource.NewQuantity(4, resource.DecimalSI),
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			snapshot := NewSnapshot(
+				map[ResourceClaimId]*resourceapi.ResourceClaim{
+					GetClaimId(allocated): allocated,
+					GetClaimId(shared):    shared,
+				},
+				map[string][]*resourceapi.ResourceSlice{nodeName: {slice}},
+				nil,
+				map[string]*resourceapi.DeviceClass{className: deviceClass},
+			)
+
+			state, err := snapshot.ResourceClaims().GatherAllocatedState()
+			if err != nil {
+				t.Fatalf("GatherAllocatedState(): %v", err)
+			}
+			borrowedDevices, err := snapshot.ResourceClaims().ListAllAllocatedDevices()
+			if err != nil {
+				t.Fatalf("ListAllAllocatedDevices(): %v", err)
+			}
+
+			wantDevices := state.AllocatedDevices.Clone()
+			wantSharedDeviceIDs := state.AllocatedSharedDeviceIDs.Clone()
+			wantCapacity := state.AggregatedCapacity.Clone()
+			wantAllDevices := borrowedDevices.Clone()
+
+			// An assertion that a collection did not change is worthless if the collection
+			// was empty to begin with, so check the fixture actually filled them.
+			if len(wantDevices) == 0 || len(wantAllDevices) == 0 {
+				t.Fatalf("fixture produced no allocated devices: %d dedicated, %d total", len(wantDevices), len(wantAllDevices))
+			}
+			if tc.consumableCapacity && (len(wantSharedDeviceIDs) == 0 || len(wantCapacity) == 0) {
+				t.Fatalf("fixture produced no sharing to guard: %d shared device IDs, %d capacity entries",
+					len(wantSharedDeviceIDs), len(wantCapacity))
+			}
+
+			pending := &resourceapi.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "pending", UID: "pending", Namespace: "default"},
+				Spec: resourceapi.ResourceClaimSpec{
+					Devices: resourceapi.DeviceClaim{
+						Requests: []resourceapi.DeviceRequest{
+							{
+								Name: "req",
+								Exactly: &resourceapi.ExactDeviceRequest{
+									DeviceClassName: className,
+									AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
+									Count:           1,
+								},
+							},
+						},
+					},
+				},
+			}
+
+			allocator, err := structured.NewAllocator(
+				ctx,
+				tc.allocatorFeatures,
+				*state,
+				snapshot.DeviceClasses(),
+				[]*resourceapi.ResourceSlice{slice},
+				cel.NewCache(10, cel.Features{EnableConsumableCapacity: tc.allocatorFeatures.ConsumableCapacity}),
+			)
+			if err != nil {
+				t.Fatalf("structured.NewAllocator(): %v", err)
+			}
+
+			results, err := allocator.Allocate(ctx, test.BuildTestNode(nodeName, 1000, 1000), []*resourceapi.ResourceClaim{pending})
+			if err != nil {
+				t.Fatalf("Allocate(): %v", err)
+			}
+			// A no-op allocation would read nothing and pass the assertions below for the
+			// wrong reason.
+			if len(results) != 1 {
+				t.Fatalf("Allocate(): got %d results, want 1 - the allocation has to actually run", len(results))
+			}
+
+			if diff := cmp.Diff(wantDevices, state.AllocatedDevices); diff != "" {
+				t.Errorf("the allocator modified the borrowed AllocatedDevices (-before +after): %s", diff)
+			}
+			if diff := cmp.Diff(wantSharedDeviceIDs, state.AllocatedSharedDeviceIDs); diff != "" {
+				t.Errorf("the allocator modified the borrowed AllocatedSharedDeviceIDs (-before +after): %s", diff)
+			}
+			if diff := cmp.Diff(wantCapacity, state.AggregatedCapacity); diff != "" {
+				t.Errorf("the allocator modified the borrowed AggregatedCapacity (-before +after): %s", diff)
+			}
+			if diff := cmp.Diff(wantAllDevices, borrowedDevices); diff != "" {
+				t.Errorf("the allocator modified the borrowed ListAllAllocatedDevices set (-before +after): %s", diff)
 			}
 		})
 	}

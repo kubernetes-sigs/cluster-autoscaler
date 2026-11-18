@@ -1056,3 +1056,110 @@ func BenchmarkPatchSetNew(b *testing.B) {
 		})
 	}
 }
+
+func TestPatchSetRevertWith(t *testing.T) {
+	tests := map[string]struct {
+		patchLayers []map[string]*int
+		// wantReverted maps every key the callback should see to the effective value
+		// FindValue must already return for it during the callback (nil: not found).
+		wantReverted map[string]*int
+		wantAfter    map[string]int
+	}{
+		"EmptyPatchSet": {
+			patchLayers:  []map[string]*int{},
+			wantReverted: map[string]*int{},
+			wantAfter:    map[string]int{},
+		},
+		// The base layer is never dropped, so the callback must not see its keys.
+		"BaseLayerOnly_NoOp": {
+			patchLayers:  []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2)}},
+			wantReverted: map[string]*int{},
+			wantAfter:    map[string]int{"a": 1, "b": 2},
+		},
+		"TopLayerEmpty": {
+			patchLayers:  []map[string]*int{{"a": ptr.To(1)}, {}},
+			wantReverted: map[string]*int{},
+			wantAfter:    map[string]int{"a": 1},
+		},
+		"ModifiedKeys_RestoredFromLowerLayer": {
+			patchLayers:  []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2)}, {"a": ptr.To(10)}},
+			wantReverted: map[string]*int{"a": ptr.To(1)},
+			wantAfter:    map[string]int{"a": 1, "b": 2},
+		},
+		"AddedKey_Disappears": {
+			patchLayers:  []map[string]*int{{"a": ptr.To(1)}, {"c": ptr.To(3)}},
+			wantReverted: map[string]*int{"c": nil},
+			wantAfter:    map[string]int{"a": 1},
+		},
+		"DeletedKey_Restored": {
+			patchLayers:  []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2)}, {"b": nil}},
+			wantReverted: map[string]*int{"b": ptr.To(2)},
+			wantAfter:    map[string]int{"a": 1, "b": 2},
+		},
+		"DeletedKey_DeletedInLowerLayerToo": {
+			patchLayers:  []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2)}, {"b": nil}, {"b": nil}},
+			wantReverted: map[string]*int{"b": nil},
+			wantAfter:    map[string]int{"a": 1},
+		},
+		"OnlyTopLayerKeysReported": {
+			patchLayers: []map[string]*int{
+				{"a": ptr.To(1), "b": ptr.To(2)},
+				{"b": ptr.To(20), "c": ptr.To(3)},
+				{"c": ptr.To(30), "a": nil, "d": ptr.To(4)},
+			},
+			wantReverted: map[string]*int{"a": ptr.To(1), "c": ptr.To(3), "d": nil},
+			wantAfter:    map[string]int{"a": 1, "b": 20, "c": 3},
+		},
+	}
+
+	for testName, test := range tests {
+		t.Run(testName, func(t *testing.T) {
+			patchset := buildTestPatchSet(t, test.patchLayers)
+
+			gotReverted := map[string]bool{}
+			patchset.RevertWith(func(key string) {
+				if gotReverted[key] {
+					t.Errorf("RevertWith(): key %q reported more than once", key)
+				}
+				gotReverted[key] = true
+
+				want, expected := test.wantReverted[key]
+				if !expected {
+					t.Errorf("RevertWith(): unexpected key %q reported", key)
+					return
+				}
+				// The effective value has to be repaired before the callback runs.
+				got, found := patchset.FindValue(key)
+				if want == nil && found {
+					t.Errorf("RevertWith(): during callback FindValue(%q) = %v, want not found", key, got)
+				}
+				if want != nil && (!found || got != *want) {
+					t.Errorf("RevertWith(): during callback FindValue(%q) = (%v, %v), want (%v, true)", key, got, found, *want)
+				}
+			})
+
+			if len(gotReverted) != len(test.wantReverted) {
+				t.Errorf("RevertWith() reported %v, want keys of %v", gotReverted, test.wantReverted)
+			}
+			if got := patchset.AsMap(); !maps.Equal(got, test.wantAfter) {
+				t.Errorf("after RevertWith() AsMap() = %v, want %v", got, test.wantAfter)
+			}
+		})
+	}
+}
+
+func TestPatchSetRevertWithNilCallbackMatchesRevert(t *testing.T) {
+	layers := []map[string]*int{
+		{"a": ptr.To(1), "b": ptr.To(2)},
+		{"b": nil, "c": ptr.To(3), "a": ptr.To(10)},
+	}
+	withNil := buildTestPatchSet(t, layers)
+	plain := buildTestPatchSet(t, layers)
+
+	withNil.RevertWith(nil)
+	plain.Revert()
+
+	if !maps.Equal(withNil.AsMap(), plain.AsMap()) {
+		t.Errorf("RevertWith(nil) = %v, Revert() = %v, want equal", withNil.AsMap(), plain.AsMap())
+	}
+}

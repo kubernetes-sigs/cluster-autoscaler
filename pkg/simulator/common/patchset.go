@@ -92,6 +92,21 @@ func (p *PatchSet[K, V]) Commit() {
 // Revert removes the topmost patch layer.
 // Any modifications or deletions recorded in that layer are discarded.
 func (p *PatchSet[K, V]) Revert() {
+	p.RevertWith(nil)
+}
+
+// RevertWith removes the topmost patch layer like Revert, and additionally calls
+// onRevertedKey (if non-nil) for every key modified or deleted in the dropped layer.
+// These are exactly the keys whose effective value may have changed, which lets callers
+// maintaining state derived from the PatchSet refresh only what the Revert affects.
+//
+// When onRevertedKey is called for a key, the effective value of that key has already
+// been repaired, so FindValue returns the post-Revert value. onRevertedKey must not
+// modify the PatchSet.
+//
+// Like Revert, it's a no-op for a PatchSet with a single patch (or none): the base layer
+// is never dropped, so onRevertedKey is not called at all.
+func (p *PatchSet[K, V]) RevertWith(onRevertedKey func(K)) {
 	if len(p.patches) <= 1 {
 		return
 	}
@@ -103,9 +118,15 @@ func (p *PatchSet[K, V]) Revert() {
 	// their effective value - re-resolve them from the remaining patches.
 	for key := range currentPatch.modified {
 		p.repairEffectiveKey(key)
+		if onRevertedKey != nil {
+			onRevertedKey(key)
+		}
 	}
 	for key := range currentPatch.deleted {
 		p.repairEffectiveKey(key)
+		if onRevertedKey != nil {
+			onRevertedKey(key)
+		}
 	}
 }
 
