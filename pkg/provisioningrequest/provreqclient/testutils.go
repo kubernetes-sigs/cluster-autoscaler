@@ -23,7 +23,9 @@ import (
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
 	"k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/client/clientset/versioned/fake"
 	"k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/client/informers/externalversions"
@@ -129,6 +131,21 @@ func ProvisioningRequestWrapperForTesting(namespace, name string) *provreqwrappe
 
 func podTemplateNameFromName(name string) string {
 	return fmt.Sprintf("%s-pod-template", name)
+}
+
+// CreateProvisioningRequestForTesting creates a ProvisioningRequest and waits until the fake
+// client's informer cache observes it. Referenced PodTemplates must already exist in the client.
+func (c *ProvisioningRequestClient) CreateProvisioningRequestForTesting(ctx context.Context, pr *provreqwrapper.ProvisioningRequest) error {
+	if _, err := c.client.AutoscalingV1().ProvisioningRequests(pr.Namespace).Create(ctx, pr.ProvisioningRequest, metav1.CreateOptions{}); err != nil {
+		return err
+	}
+	return wait.PollUntilContextTimeout(ctx, time.Millisecond, time.Second, true, func(ctx context.Context) (bool, error) {
+		_, err := c.provReqLister.ProvisioningRequests(pr.Namespace).Get(pr.Name)
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return err == nil, err
+	})
 }
 
 // ProvisioningRequestNoCache returns ProvisioningRequest directly from client. For test purposes only.
