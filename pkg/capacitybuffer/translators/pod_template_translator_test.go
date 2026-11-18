@@ -258,6 +258,7 @@ func TestPodTemplateBufferTranslator_ManagedPodTemplate(t *testing.T) {
 	)
 	buffer := testutil.NewBuffer(
 		testutil.WithName("test-buffer"),
+		testutil.WithUID[*v1.CapacityBuffer]("test-buffer-uid"),
 		testutil.WithPodTemplateRef("test-pod-template"),
 	)
 
@@ -314,7 +315,10 @@ func withResources(requests, limits corev1.ResourceList) func(*corev1.PodTemplat
 }
 
 func getTestBufferWithLimits(podTemplateRef *v1.LocalObjectRef, replicas *int32, limits *v1.ResourceList) *v1.CapacityBuffer {
-	opts := []testutil.BufferOption{testutil.WithActiveProvisioningStrategy()}
+	opts := []testutil.BufferOption{
+		testutil.WithActiveProvisioningStrategy(),
+		testutil.WithUID[*v1.CapacityBuffer]("default-buffer-uid"),
+	}
 	if podTemplateRef != nil {
 		opts = append(opts, testutil.WithPodTemplateRef(podTemplateRef.Name))
 	}

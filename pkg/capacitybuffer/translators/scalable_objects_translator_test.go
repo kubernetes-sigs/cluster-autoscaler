@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	buffersfake "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/clientset/versioned/fake"
 	fakeclient "k8s.io/client-go/kubernetes/fake"
@@ -285,6 +286,7 @@ func getTestBufferWithScalableAttributes(bufferName string, scalableRef *v1.Scal
 	buffer := &v1.CapacityBuffer{}
 	buffer.Name = bufferName
 	buffer.Namespace = defaultNamespace
+	buffer.UID = types.UID(bufferName)
 	buffer.Spec.ScalableRef = scalableRef
 	buffer.Spec.Percentage = percentage
 	buffer.Spec.Replicas = replicas

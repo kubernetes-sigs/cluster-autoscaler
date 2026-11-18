@@ -17,6 +17,7 @@ limitations under the License.
 package controllers
 
 import (
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -329,24 +330,6 @@ var _ = Describe("CapacityBuffer Controller", func() {
 				managedPTName = b.Status.PodTemplateRef.Name
 			}).Should(Succeed())
 
-			By("stripping ownerReferences alone on managed PodTemplate and verifying immediate restoration")
-			Eventually(func(g Gomega) {
-				pt, err := k8sClient.CoreV1().PodTemplates(namespace).Get(ctx, managedPTName, metav1.GetOptions{})
-				g.Expect(err).NotTo(HaveOccurred())
-				pt.OwnerReferences = nil
-				_, err = k8sClient.CoreV1().PodTemplates(namespace).Update(ctx, pt, metav1.UpdateOptions{})
-				g.Expect(err).NotTo(HaveOccurred())
-			}).Should(Succeed())
-
-			Eventually(func(g Gomega) {
-				pt, err := k8sClient.CoreV1().PodTemplates(namespace).Get(ctx, managedPTName, metav1.GetOptions{})
-				g.Expect(err).NotTo(HaveOccurred())
-				ownerRef := metav1.GetControllerOf(pt)
-				g.Expect(ownerRef).NotTo(BeNil())
-				g.Expect(ownerRef.UID).To(Equal(createdBuf.UID))
-				g.Expect(pt.Generation).To(Equal(int64(1)))
-			}).Should(Succeed())
-
 			By("modifying managed PodTemplate spec outside the controller")
 			var modifiedGen int64
 			Eventually(func(g Gomega) {
@@ -400,6 +383,33 @@ var _ = Describe("CapacityBuffer Controller", func() {
 				b, err := buffersClient.AutoscalingV1beta1().CapacityBuffers(namespace).Get(ctx, "b1", metav1.GetOptions{})
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(b.Status.PodTemplateGeneration).To(Equal(new(int64(1))))
+			}).Should(Succeed())
+
+			By("stripping ownerReferences on managed PodTemplate and verifying the controller refuses to adopt the orphaned template")
+			var strippedRV string
+			Eventually(func(g Gomega) {
+				pt, err := k8sClient.CoreV1().PodTemplates(namespace).Get(ctx, managedPTName, metav1.GetOptions{})
+				g.Expect(err).NotTo(HaveOccurred())
+				pt.OwnerReferences = nil
+				updated, err := k8sClient.CoreV1().PodTemplates(namespace).Update(ctx, pt, metav1.UpdateOptions{})
+				g.Expect(err).NotTo(HaveOccurred())
+				strippedRV = updated.ResourceVersion
+			}).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				b, err := buffersClient.AutoscalingV1beta1().CapacityBuffers(namespace).Get(ctx, "b1", metav1.GetOptions{})
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(b.Status.PodTemplateRef).To(BeNil())
+				g.Expect(b.Status.PodTemplateGeneration).To(BeNil())
+				g.Expect(b.Status.Replicas).To(BeNil())
+				cond := meta.FindStatusCondition(b.Status.Conditions, cbapi.ReadyForProvisioningCondition)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Message).To(ContainSubstring("not controlled by this CapacityBuffer"))
+
+				pt, err := k8sClient.CoreV1().PodTemplates(namespace).Get(ctx, managedPTName, metav1.GetOptions{})
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(pt.ResourceVersion).To(Equal(strippedRV))
 			}).Should(Succeed())
 		})
 
@@ -470,6 +480,86 @@ var _ = Describe("CapacityBuffer Controller", func() {
 				b, err := buffersClient.AutoscalingV1beta1().CapacityBuffers(namespace).Get(ctx, "b-scalable", metav1.GetOptions{})
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(b.Status.PodTemplateGeneration).To(Equal(&revertedGen))
+			}).Should(Succeed())
+		})
+
+		It("should create distinct valid managed PodTemplates for 253-char CapacityBuffers sharing a long prefix", func() {
+			By("creating two distinct source PodTemplates")
+			pt1 := testutil.NewPodTemplate(
+				testutil.WithPodTemplateName("source-pt-1"),
+				testutil.WithNamespace[*corev1.PodTemplate](namespace),
+				testutil.WithPodTemplateResources(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}, nil),
+			)
+			_, err := k8sClient.CoreV1().PodTemplates(namespace).Create(ctx, pt1, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			pt2 := testutil.NewPodTemplate(
+				testutil.WithPodTemplateName("source-pt-2"),
+				testutil.WithNamespace[*corev1.PodTemplate](namespace),
+				testutil.WithPodTemplateResources(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}, nil),
+			)
+			_, err = k8sClient.CoreV1().PodTemplates(namespace).Create(ctx, pt2, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating two 253-char CapacityBuffers sharing a 252-char prefix with '.' at index 159")
+			sharedPrefix := strings.Repeat("a", 159) + "." + strings.Repeat("b", 92)
+			name1 := sharedPrefix + "1"
+			name2 := sharedPrefix + "2"
+			Expect(name1).To(HaveLen(253))
+			Expect(name2).To(HaveLen(253))
+
+			b1 := testutil.NewBuffer(
+				testutil.WithName(name1),
+				testutil.WithNamespace[*v1beta1.CapacityBuffer](namespace),
+				testutil.WithPodTemplateRef("source-pt-1"),
+				testutil.WithReplicas(2),
+				testutil.WithActiveProvisioningStrategy(),
+			)
+			created1, err := buffersClient.AutoscalingV1beta1().CapacityBuffers(namespace).Create(ctx, b1, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			b2 := testutil.NewBuffer(
+				testutil.WithName(name2),
+				testutil.WithNamespace[*v1beta1.CapacityBuffer](namespace),
+				testutil.WithPodTemplateRef("source-pt-2"),
+				testutil.WithReplicas(3),
+				testutil.WithActiveProvisioningStrategy(),
+			)
+			created2, err := buffersClient.AutoscalingV1beta1().CapacityBuffers(namespace).Create(ctx, b2, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				got1, err := buffersClient.AutoscalingV1beta1().CapacityBuffers(namespace).Get(ctx, name1, metav1.GetOptions{})
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(meta.IsStatusConditionTrue(got1.Status.Conditions, cbapi.ReadyForProvisioningCondition)).To(BeTrue())
+				g.Expect(got1.Status.PodTemplateRef).NotTo(BeNil())
+				g.Expect(got1.Status.Replicas).To(Equal(new(int32(2))))
+
+				got2, err := buffersClient.AutoscalingV1beta1().CapacityBuffers(namespace).Get(ctx, name2, metav1.GetOptions{})
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(meta.IsStatusConditionTrue(got2.Status.Conditions, cbapi.ReadyForProvisioningCondition)).To(BeTrue())
+				g.Expect(got2.Status.PodTemplateRef).NotTo(BeNil())
+				g.Expect(got2.Status.Replicas).To(Equal(new(int32(3))))
+
+				managedPT1Name := got1.Status.PodTemplateRef.Name
+				managedPT2Name := got2.Status.PodTemplateRef.Name
+				g.Expect(managedPT1Name).NotTo(Equal(managedPT2Name))
+
+				managedPT1, err := k8sClient.CoreV1().PodTemplates(namespace).Get(ctx, managedPT1Name, metav1.GetOptions{})
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(managedPT1.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]).To(Equal(resource.MustParse("1")))
+				owner1 := metav1.GetControllerOf(managedPT1)
+				g.Expect(owner1).NotTo(BeNil())
+				g.Expect(owner1.UID).To(Equal(created1.UID))
+				g.Expect(owner1.Name).To(Equal(name1))
+
+				managedPT2, err := k8sClient.CoreV1().PodTemplates(namespace).Get(ctx, managedPT2Name, metav1.GetOptions{})
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(managedPT2.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]).To(Equal(resource.MustParse("2")))
+				owner2 := metav1.GetControllerOf(managedPT2)
+				g.Expect(owner2).NotTo(BeNil())
+				g.Expect(owner2.UID).To(Equal(created2.UID))
+				g.Expect(owner2.Name).To(Equal(name2))
 			}).Should(Succeed())
 		})
 	})
