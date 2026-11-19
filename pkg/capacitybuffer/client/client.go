@@ -388,6 +388,11 @@ func (c *CapacityBufferClient) EnsurePodTemplate(ctx context.Context, podTemplat
 	if c.kubernetesClient == nil {
 		return nil, fmt.Errorf("capacity buffer client is not configured for applying pod template")
 	}
+	desiredController := metav1.GetControllerOfNoCopy(podTemplate)
+	if desiredController == nil || desiredController.UID == "" {
+		return nil, fmt.Errorf("desired pod template %s/%s must have a controller owner reference with a non-empty UID",
+			podTemplate.Namespace, podTemplate.Name)
+	}
 
 	// Try to use the lister first to avoid unnecessary API calls.
 	existing, err := c.GetPodTemplate(podTemplate.Namespace, podTemplate.Name)
@@ -397,8 +402,17 @@ func (c *CapacityBufferClient) EnsurePodTemplate(ctx context.Context, podTemplat
 		}
 		return nil, err
 	}
-	if equality.Semantic.DeepEqual(existing.Template, podTemplate.Template) &&
-		equality.Semantic.DeepEqual(existing.OwnerReferences, podTemplate.OwnerReferences) {
+	existingController := metav1.GetControllerOfNoCopy(existing)
+	if existingController == nil {
+		return nil, fmt.Errorf("pod template %s/%s exists but is not controlled by this CapacityBuffer; rename or delete it",
+			existing.Namespace, existing.Name)
+	}
+	if existingController.UID != desiredController.UID {
+		return nil, fmt.Errorf("pod template %s/%s is already controlled by %s/%s (uid: %s)",
+			existing.Namespace, existing.Name, existingController.Kind, existingController.Name, existingController.UID)
+	}
+	if equality.Semantic.DeepEqual(existing.OwnerReferences, podTemplate.OwnerReferences) &&
+		equality.Semantic.DeepEqual(existing.Template, podTemplate.Template) {
 		return existing, nil
 	}
 	existing.OwnerReferences = podTemplate.OwnerReferences

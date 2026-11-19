@@ -17,6 +17,8 @@ limitations under the License.
 package translator
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -32,16 +34,28 @@ const (
 	podTemplateNameSuffix          = "-pod-template"
 	maxPodTemplateNameLength       = 253
 	maxBufferNameLen               = maxPodTemplateNameLength - len(podTemplateNamePrefix) - len(podTemplateNameSuffix)
+	unhashedMaxBufferNameLen       = maxBufferNameLen - 2
+	bufferNameHashLen              = sha256.Size * 2
+	// hashedBufferPrefixLen is the prefix length before trimming a trailing '.',
+	// so hashed segments are 225 chars (or 224 when a '.' is trimmed) and
+	// unhashedMaxBufferNameLen (223) sits below both to prevent cross-branch
+	// collisions.
+	hashedBufferPrefixLen = maxBufferNameLen - bufferNameHashLen - 1
 )
 
 func getPodTemplateNameForBuffer(buffer *apiv1.CapacityBuffer) string {
 	bufferName := buffer.Name
-	// trim buffer name if the pod template name would exceed 253 chars, which is the max length for a k8s resource name
-	if len(bufferName) > maxBufferNameLen {
-		bufferName = bufferName[:maxBufferNameLen]
+	if len(bufferName) > unhashedMaxBufferNameLen {
+		bufferName = hashBufferName(bufferName)
 	}
 
 	return podTemplateNamePrefix + bufferName + podTemplateNameSuffix
+}
+
+func hashBufferName(name string) string {
+	sum := sha256.Sum256([]byte(name))
+	prefix := strings.TrimSuffix(name[:hashedBufferPrefixLen], ".")
+	return prefix + "-" + hex.EncodeToString(sum[:])
 }
 
 func getPodTemplateFromSpec(pts *corev1.PodTemplateSpec, buffer *apiv1.CapacityBuffer) *corev1.PodTemplate {
