@@ -50,23 +50,15 @@ const (
 // introduce generic pflag.Value wrapper and helper to parse composite flags directly into AutoscalingOptions.
 type AutoscalingFlags struct {
 	// Flags that require post-processing to be converted to the AutoscalingOptions struct
-	schedulerConfigFile       string
-	coresTotal                string
-	memoryTotal               string
-	drainPriorityConfig       string
-	gpuTotal                  []string
-	nodeGroups                []string
-	nodeGroupAutodiscovery    []string
-	startupTaints             []string
-	statusTaints              []string
-	bypassedSchedulers        []string
-	allowedSchedulers         []string
-	maxGracefulTerminationSec int
-	kubeClientQPS             float64
-	startupTaintPrefixes      []string
-	balancingIgnoreLabels     []string
-	balancingLabels           []string
-	schedulerVerbosity        int
+	schedulerConfigFile string
+	coresTotal          string
+	memoryTotal         string
+	drainPriorityConfig string
+	gpuTotal            []string
+	bypassedSchedulers  []string
+	allowedSchedulers   []string
+	kubeClientQPS       float64
+	schedulerVerbosity  int
 	// The AutoscalingOptions struct that will be populated by the flags
 	// as a result of parsing the flags
 	o           config.AutoscalingOptions
@@ -89,19 +81,11 @@ func (p *AutoscalingFlags) initDefaults() {
 
 	p.coresTotal = minMaxFlagString(p.o.MinCoresTotal, p.o.MaxCoresTotal)
 	p.memoryTotal = minMaxFlagString(p.o.MinMemoryTotal/units.GiB, p.o.MaxMemoryTotal/units.GiB)
-	p.maxGracefulTerminationSec = p.o.MaxGracefulTerminationSec
 	p.kubeClientQPS = float64(p.o.KubeClientOpts.KubeClientQPS)
 	p.schedulerVerbosity = -1
 	p.gpuTotal = []string{}
-	p.nodeGroups = p.o.NodeGroups
-	p.nodeGroupAutodiscovery = p.o.NodeGroupAutoDiscovery
-	p.startupTaints = p.o.StartupTaints
-	p.statusTaints = p.o.StatusTaints
 	p.bypassedSchedulers = []string{}
 	p.allowedSchedulers = []string{}
-	p.startupTaintPrefixes = p.o.StartupTaintPrefixes
-	p.balancingIgnoreLabels = p.o.BalancingExtraIgnoredLabels
-	p.balancingLabels = p.o.BalancingLabels
 	p.initialized = true
 }
 
@@ -225,9 +209,9 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&p.o.GCEOptions.ConcurrentRefreshes, "gce-concurrent-refreshes", p.o.GCEOptions.ConcurrentRefreshes, "Maximum number of concurrent refreshes per cloud object type.")
 	fs.DurationVar(&p.o.GCEOptions.MigInstancesMinRefreshWaitTime, "gce-mig-instances-min-refresh-wait-time", p.o.GCEOptions.MigInstancesMinRefreshWaitTime, "The minimum time which needs to pass before GCE MIG instances from a given MIG can be refreshed.")
 	fs.BoolVar(&p.o.AWSUseStaticInstanceList, "aws-use-static-instance-list", p.o.AWSUseStaticInstanceList, "Should CA fetch instance types in runtime or use a static list. AWS only")
-	fs.StringArrayVar(&p.balancingIgnoreLabels, "balancing-ignore-label", p.balancingIgnoreLabels, "Specifies a label to ignore in addition to the basic and cloud-provider set of labels when comparing if two node groups are similar")
-	fs.StringArrayVar(&p.balancingLabels, "balancing-label", p.balancingLabels, "Specifies a label to use for comparing if two node groups are similar, rather than the built in heuristics. Setting this flag disables all other comparison logic, and cannot be combined with --balancing-ignore-label.")
-	fs.StringArrayVar(&p.startupTaintPrefixes, "startup-taint-prefix", p.startupTaintPrefixes, "Specifies a taint key prefix. Any taint whose key starts with this prefix will be treated as a startup taint (in addition to the built-in prefixes). Can be used multiple times.")
+	fs.StringArrayVar(&p.o.BalancingExtraIgnoredLabels, "balancing-ignore-label", p.o.BalancingExtraIgnoredLabels, "Specifies a label to ignore in addition to the basic and cloud-provider set of labels when comparing if two node groups are similar")
+	fs.StringArrayVar(&p.o.BalancingLabels, "balancing-label", p.o.BalancingLabels, "Specifies a label to use for comparing if two node groups are similar, rather than the built in heuristics. Setting this flag disables all other comparison logic, and cannot be combined with --balancing-ignore-label.")
+	fs.StringArrayVar(&p.o.StartupTaintPrefixes, "startup-taint-prefix", p.o.StartupTaintPrefixes, "Specifies a taint key prefix. Any taint whose key starts with this prefix will be treated as a startup taint (in addition to the built-in prefixes). Can be used multiple times.")
 	fs.IntVar(&p.o.PodInjectionLimit, "pod-injection-limit", p.o.PodInjectionLimit, "Limits total number of pods while injecting fake pods. If unschedulable pods already exceeds the limit, pod injection is disabled but pods are not truncated.")
 	fs.BoolVar(&p.o.CheckCapacityBatchProcessing, "check-capacity-batch-processing", p.o.CheckCapacityBatchProcessing, "Whether to enable batch processing for check capacity requests.")
 	fs.IntVar(&p.o.CheckCapacityProvisioningRequestMaxBatchSize, "check-capacity-provisioning-request-max-batch-size", p.o.CheckCapacityProvisioningRequestMaxBatchSize, "Maximum number of provisioning requests to process in a single batch.")
@@ -255,8 +239,8 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&p.o.DynamicResourceAllocationEnabled, "enable-dynamic-resource-allocation", p.o.DynamicResourceAllocationEnabled, "Handle DRA (Dynamic Resource Allocation) objects, locked to true.")
 
 	// Properties specific to the cloud provider, but kept for the sake of POC
-	fs.StringArrayVar(&p.nodeGroups, "nodes", p.nodeGroups, "sets min,max size and other configuration data for a node group in a format accepted by cloud provider. Can be used multiple times. Format: <min>:<max>:<other...>")
-	fs.StringArrayVar(&p.nodeGroupAutodiscovery, "node-group-auto-discovery", p.nodeGroupAutodiscovery, "One or more definition(s) of node group auto-discovery. "+
+	fs.StringArrayVar(&p.o.NodeGroups, "nodes", p.o.NodeGroups, "sets min,max size and other configuration data for a node group in a format accepted by cloud provider. Can be used multiple times. Format: <min>:<max>:<other...>")
+	fs.StringArrayVar(&p.o.NodeGroupAutoDiscovery, "node-group-auto-discovery", p.o.NodeGroupAutoDiscovery, "One or more definition(s) of node group auto-discovery. "+
 		"A definition is expressed `<name of discoverer>:[<key>[=<value>]]`. "+
 		"The `aws`, `gce`, and `azure` cloud providers are currently supported. AWS matches by ASG tags, e.g. `asg:tag=tagKey,anotherTagKey`. "+
 		"GCE matches by IG name prefix, and requires you to specify min and max nodes per IG, e.g. `mig:namePrefix=pfx,min=0,max=10` "+
@@ -267,10 +251,10 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&p.schedulerConfigFile, config.SchedulerConfigFileFlag, p.schedulerConfigFile, "scheduler-config allows changing configuration of in-tree scheduler plugins acting on PreFilter and Filter extension points")
 	fs.StringVar(&p.coresTotal, "cores-total", p.coresTotal, "Minimum and maximum number of cores in cluster, in the format <min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers.")
 	fs.StringVar(&p.memoryTotal, "memory-total", p.memoryTotal, "Minimum and maximum number of gigabytes of memory in cluster, in the format <min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers.")
-	fs.IntVar(&p.maxGracefulTerminationSec, "max-graceful-termination-sec", p.maxGracefulTerminationSec, "Maximum number of seconds CA waits for pod termination when trying to scale down a node. This flag is mutually exclusion with drain-priority-config flag which allows more configuration options.")
+	fs.IntVar(&p.o.MaxGracefulTerminationSec, "max-graceful-termination-sec", p.o.MaxGracefulTerminationSec, "Maximum number of seconds CA waits for pod termination when trying to scale down a node. This flag is mutually exclusion with drain-priority-config flag which allows more configuration options.")
 	fs.StringArrayVar(&p.gpuTotal, "gpu-total", p.gpuTotal, "Minimum and maximum number of different GPUs in cluster, in the format <gpu_type>:<min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers. Can be passed multiple times. CURRENTLY THIS FLAG ONLY WORKS ON GKE.")
-	fs.StringArrayVar(&p.startupTaints, "startup-taint", p.startupTaints, "Specifies a taint to ignore in node templates when considering to scale a node group")
-	fs.StringArrayVar(&p.statusTaints, "status-taint", p.statusTaints, "Specifies a taint to ignore in node templates when considering to scale a node group but nodes will not be treated as unready")
+	fs.StringArrayVar(&p.o.StartupTaints, "startup-taint", p.o.StartupTaints, "Specifies a taint to ignore in node templates when considering to scale a node group")
+	fs.StringArrayVar(&p.o.StatusTaints, "status-taint", p.o.StatusTaints, "Specifies a taint to ignore in node templates when considering to scale a node group but nodes will not be treated as unready")
 	fs.StringSliceVar(&p.bypassedSchedulers, "bypassed-scheduler-names", p.bypassedSchedulers, "Names of schedulers to bypass. If set to non-empty value, CA will not wait for pods to reach a certain age before triggering a scale-up.")
 	fs.StringSliceVar(&p.allowedSchedulers, "allowed-scheduler-names", p.allowedSchedulers, "If set to non-empty value, CA will proceed only with pods targeting schedulers in the list, from the list of unschedulable and scheduler unprocessed pods")
 	fs.StringVar(&p.drainPriorityConfig, "drain-priority-config", p.drainPriorityConfig,
@@ -312,7 +296,7 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 		}
 	}
 
-	if p.drainPriorityConfig != "" && p.maxGracefulTerminationSec != config.DefaultMaxGracefulTerminationSec {
+	if p.drainPriorityConfig != "" && p.o.MaxGracefulTerminationSec != config.DefaultMaxGracefulTerminationSec {
 		return config.AutoscalingOptions{}, fmt.Errorf("Invalid configuration, could not use --drain-priority-config together with --max-graceful-termination-sec")
 	}
 
@@ -363,12 +347,7 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 
 	p.o.AllowedSchedulers = allowedSchedulers
 	p.o.BypassedSchedulers = scheduler_util.SchedulersMap(p.bypassedSchedulers)
-	p.o.StartupTaints = p.startupTaints
-	p.o.MaxGracefulTerminationSec = p.maxGracefulTerminationSec
-	p.o.NodeGroupAutoDiscovery = p.nodeGroupAutodiscovery
 	p.o.DrainPriorityConfig = drainPriorityConfigMap
-	p.o.NodeGroups = p.nodeGroups
-	p.o.StatusTaints = p.statusTaints
 	p.o.MinCoresTotal = minCoresTotal
 	p.o.MaxCoresTotal = maxCoresTotal
 	p.o.MinMemoryTotal = minMemoryTotal
@@ -376,9 +355,6 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 	p.o.GpuTotal = parsedGpuTotal
 	p.o.SchedulerConfig = parsedSchedConfig
 	p.o.KubeClientOpts.KubeClientQPS = float32(p.kubeClientQPS)
-	p.o.StartupTaintPrefixes = p.startupTaintPrefixes
-	p.o.BalancingExtraIgnoredLabels = p.balancingIgnoreLabels
-	p.o.BalancingLabels = p.balancingLabels
 	p.o.SchedulerVerbosityOffset = verbosity - p.schedulerVerbosity
 
 	return p.o, nil
