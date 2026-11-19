@@ -23,12 +23,17 @@ import (
 
 	"k8s.io/klog/v2"
 	kubelet_config "k8s.io/kubernetes/pkg/kubelet/apis/config"
+	cloudBuilder "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/builder"
+	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/gce/localssdsize"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
+	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
+	"sigs.k8s.io/cluster-autoscaler/pkg/expander"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseSingleGpuLimit(t *testing.T) {
@@ -675,4 +680,63 @@ func TestAutoscalingFlagsValidationEdgeCases(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefaultAutoscalingOptionsParity(t *testing.T) {
+	want := config.DefaultAutoscalingOptions(func(o *config.AutoscalingOptions) {
+		o.CloudProviderName = cloudBuilder.DefaultCloudProvider()
+	})
+
+	for name, tc := range map[string]struct {
+		useConstructor bool
+		registerFlags  bool
+	}{
+		"NewAutoscalingFlags with AddFlags": {
+			useConstructor: true,
+			registerFlags:  true,
+		},
+		"zero-value AutoscalingFlags with AddFlags": {
+			useConstructor: false,
+			registerFlags:  true,
+		},
+		"NewAutoscalingFlags without AddFlags": {
+			useConstructor: true,
+			registerFlags:  false,
+		},
+		"zero-value AutoscalingFlags without AddFlags": {
+			useConstructor: false,
+			registerFlags:  false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &AutoscalingFlags{}
+			if tc.useConstructor {
+				f = NewAutoscalingFlags()
+			}
+			if tc.registerFlags {
+				fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+				f.AddFlags(fs)
+			}
+
+			got, err := f.Options()
+			require.NoError(t, err)
+
+			// SimpleLocalSSDProvider has unexported field ssdDiskSize that causes cmp.Diff to panic so we ignore it.
+			// EquateEmpty may be removed when --ignore-taint is removed.
+			diff := cmp.Diff(
+				want,
+				got,
+				cmpopts.EquateEmpty(),
+				cmpopts.IgnoreUnexported(localssdsize.SimpleLocalSSDProvider{}),
+			)
+			if diff != "" {
+				t.Errorf("Options() mismatch against DefaultAutoscalingOptions() (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestConfigConstantsMatchPluginNames(t *testing.T) {
+	assert.Equal(t, estimator.BinpackingEstimatorName, config.DefaultEstimatorName)
+	assert.Equal(t, expander.LeastWasteExpanderName, config.DefaultExpanderName)
 }
