@@ -213,7 +213,7 @@ func main() {
 	// Must be called before kube_flag.InitFlags() to ensure leader election flags are parsed and available.
 	componentopts.BindLeaderElectionFlags(&leaderElection, pflag.CommandLine)
 
-	autoscalingFlags := &flags.AutoscalingFlags{}
+	autoscalingFlags := flags.NewAutoscalingFlags()
 	autoscalingFlags.AddFlags(pflag.CommandLine)
 	logsapi.AddFlags(loggingConfig, pflag.CommandLine)
 	featureGate.AddFlag(pflag.CommandLine)
