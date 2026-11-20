@@ -28,10 +28,15 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/component-base/featuregate"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/types"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/gpu"
+	podutils "sigs.k8s.io/cluster-autoscaler/pkg/utils/pod"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 
 	"github.com/stretchr/testify/assert"
@@ -527,4 +532,77 @@ func getGpuConfigFromNode(node *apiv1.Node, dra bool) *cloudprovider.GpuConfig {
 		}
 	}
 	return nil
+}
+
+func TestPodRequestMilliValueMatchesPodRequests(t *testing.T) {
+	pods := []*apiv1.Pod{
+		BuildTestPod("plain", 1500, 3*1024*1024*1024),
+		BuildTestPod("tiny", 1, 1),
+		BuildTestPod("zero", 0, 0),
+	}
+	withInit := BuildTestPod("init", 200, 1024*1024)
+	withInit.Spec.InitContainers = []apiv1.Container{{Name: "init", Resources: apiv1.ResourceRequirements{Requests: apiv1.ResourceList{
+		apiv1.ResourceCPU:    resource.MustParse("2"),
+		apiv1.ResourceMemory: resource.MustParse("2Gi"),
+	}}}}
+	pods = append(pods, withInit)
+	withOverhead := BuildTestPod("overhead", 200, 1024*1024)
+	withOverhead.Spec.Overhead = apiv1.ResourceList{apiv1.ResourceCPU: resource.MustParse("250m"), apiv1.ResourceMemory: resource.MustParse("64Mi")}
+	pods = append(pods, withOverhead)
+
+	for _, pod := range pods {
+		podInfo := framework.NewPodInfo(pod, nil)
+		for _, r := range []apiv1.ResourceName{apiv1.ResourceCPU, apiv1.ResourceMemory, apiv1.ResourceEphemeralStorage} {
+			want := podutils.PodRequests(pod)[r]
+			assert.Equal(t, want.MilliValue(), podRequestMilliValue(podInfo, r), "%s/%s", pod.Name, r)
+		}
+		// PodInfos built without the scheduler part fall back to PodRequests.
+		wantCPU := podutils.PodRequests(pod)[apiv1.ResourceCPU]
+		assert.Equal(t, wantCPU.MilliValue(), podRequestMilliValue(&framework.PodInfo{Pod: pod}, apiv1.ResourceCPU))
+	}
+}
+
+func TestPodRequestMilliValueMatchesPodRequestsWithFeatures(t *testing.T) {
+	always := apiv1.ContainerRestartPolicyAlways
+	sidecar := BuildTestPod("sidecar", 200, 1024*1024)
+	sidecar.Spec.InitContainers = []apiv1.Container{
+		{Name: "sidecar", RestartPolicy: &always, Resources: apiv1.ResourceRequirements{Requests: apiv1.ResourceList{
+			apiv1.ResourceCPU: resource.MustParse("300m"), apiv1.ResourceMemory: resource.MustParse("128Mi")}}},
+		{Name: "init", Resources: apiv1.ResourceRequirements{Requests: apiv1.ResourceList{
+			apiv1.ResourceCPU: resource.MustParse("1"), apiv1.ResourceMemory: resource.MustParse("1Gi")}}},
+	}
+	podLevel := BuildTestPod("pod-level", 200, 1024*1024)
+	podLevel.Spec.Resources = &apiv1.ResourceRequirements{Requests: apiv1.ResourceList{
+		apiv1.ResourceCPU: resource.MustParse("3"), apiv1.ResourceMemory: resource.MustParse("3Gi")}}
+	resized := BuildTestPod("resized", 200, 1024*1024)
+	resized.Status.ContainerStatuses = []apiv1.ContainerStatus{{Name: resized.Spec.Containers[0].Name, Resources: &apiv1.ResourceRequirements{
+		Requests: apiv1.ResourceList{apiv1.ResourceCPU: resource.MustParse("700m"), apiv1.ResourceMemory: resource.MustParse("2Mi")}}}}
+
+	// InPlacePodVerticalScaling is GA and locked to true: status resources are always used.
+	// Pod-level resources being resized in place: the scheduler counts the actuated resources,
+	// utilization keeps using podutils.PodRequests.
+	podLevelResizing := podLevel.DeepCopy()
+	podLevelResizing.Name = "pod-level-resizing"
+	podLevelResizing.Status.Resources = &apiv1.ResourceRequirements{Requests: apiv1.ResourceList{
+		apiv1.ResourceCPU: resource.MustParse("5"), apiv1.ResourceMemory: resource.MustParse("5Gi")}}
+	withClaims := BuildTestPod("claims", 200, 1024*1024)
+	withClaims.Spec.ResourceClaims = []apiv1.PodResourceClaim{{Name: "gpu"}}
+	withAllocatableClaims := BuildTestPod("allocatable-claims", 200, 1024*1024)
+	withAllocatableClaims.Status.NodeAllocatableResourceClaimStatuses = []apiv1.NodeAllocatableResourceClaimStatus{{ResourceClaimName: "cpus"}}
+
+	for _, gates := range []map[featuregate.Feature]bool{
+		{features.PodLevelResources: false},
+		{features.PodLevelResources: true},
+	} {
+		for gate, enabled := range gates {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, gate, enabled)
+		}
+		for _, pod := range []*apiv1.Pod{sidecar, podLevel, resized, podLevelResizing, withClaims, withAllocatableClaims} {
+			podInfo := framework.NewPodInfo(pod, nil)
+			for _, r := range []apiv1.ResourceName{apiv1.ResourceCPU, apiv1.ResourceMemory} {
+				want := podutils.PodRequests(pod)[r]
+				assert.Equal(t, want.MilliValue(), podRequestMilliValue(podInfo, r), "%v %s/%s", gates, pod.Name, r)
+			}
+		}
+	}
 }
