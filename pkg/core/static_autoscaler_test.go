@@ -2122,7 +2122,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now)
 
 			// delete nodes with create errors
-			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 
 			// nodes should be deleted
 			expectedDeleteCalls := 1
@@ -2157,7 +2157,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now)
 
 			// delete nodes with create errors
-			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 
 			// nodes should be deleted again
 			expectedDeleteCalls += 1
@@ -2230,7 +2230,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now)
 
 			// delete nodes with create errors
-			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 
 			// we expect no more Delete Nodes, don't increase expectedDeleteCalls
 			if tc.forceDeleteEnabled {
@@ -2278,7 +2278,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, time.Now())
 
 			// No nodes are deleted when failed nodes don't have matching node groups
-			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 			nodeGroupC.AssertNumberOfCalls(t, deleteMethod, 0)
 
 			// Node group with getOptions error gets no deletes.
@@ -2327,11 +2327,96 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now)
 
 			// delete nodes with create errors
-			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 
 			nodeGroupError.AssertNumberOfCalls(t, deleteMethod, 0)
 		})
 	}
+}
+
+func TestDeleteCreatedNodesWithErrorsAsync(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		deleteStarted := make(chan struct{}, 10)
+		unblockDelete := make(chan struct{})
+		deletedNodes := make(chan []*apiv1.Node, 10)
+
+		nodeGroup := &mockprovider.NodeGroup{}
+		nodeGroup.On("Exist").Return(true)
+		nodeGroup.On("Autoprovisioned").Return(false)
+		nodeGroup.On("TargetSize").Return(2, nil)
+		nodeGroup.On("Id").Return("ng1")
+		nodeGroup.On("GetOptions", mock.Anything).Return(&config.NodeGroupAutoscalingOptions{}, nil)
+		nodeGroup.On("Nodes").Return([]cloudprovider.Instance{
+			{
+				Id:     "ng1-1",
+				Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning},
+			},
+			{
+				Id: "ng1-2",
+				Status: &cloudprovider.InstanceStatus{
+					State: cloudprovider.InstanceCreating,
+					ErrorInfo: &cloudprovider.InstanceErrorInfo{
+						ErrorClass: cloudprovider.OutOfResourcesErrorClass,
+						ErrorCode:  "RESOURCE_POOL_EXHAUSTED",
+					},
+				},
+			},
+		}, nil)
+		nodeGroup.On("DeleteNodes", mock.Anything).Return(func(nodes []*apiv1.Node) error {
+			deleteStarted <- struct{}{}
+			<-unblockDelete
+			deletedNodes <- nodes
+			return nil
+		})
+		provider := &mockprovider.CloudProvider{}
+		provider.On("NodeGroups").Return([]cloudprovider.NodeGroup{nodeGroup})
+		provider.On("NodeGroupForNode", mock.Anything).Return(nodeGroup, nil)
+
+		fakeClient := &fake.Clientset{}
+		fakeLogRecorder, _ := clusterstate_utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
+
+		autoscalingCtx := &ca_context.AutoscalingContext{
+			AutoscalingOptions: config.AutoscalingOptions{
+				NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+					MaxNodeProvisionTime: 45 * time.Minute,
+				},
+			},
+			CloudProvider: provider,
+		}
+
+		clusterState := clusterstate.NewClusterStateRegistry(provider, fakeLogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.AutoscalingOptions.NodeGroupDefaults), nil, clusterstate.WithConfig(clusterstate.ClusterStateRegistryConfig{
+			MaxTotalUnreadyPercentage: 10,
+			OkTotalUnreadyCount:       1,
+		}))
+		clusterState.RefreshCloudProviderNodeInstancesCache()
+		err := clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, time.Now())
+		assert.NoError(t, err)
+
+		autoscaler := &StaticAutoscaler{
+			AutoscalingContext:   autoscalingCtx,
+			clusterStateRegistry: clusterState,
+		}
+
+		// The deletion is started in the background, even though the cloud provider call blocks.
+		autoscaler.deleteCreatedNodesWithErrors(context.Background())
+		<-deleteStarted
+
+		// While the deletion is in progress, it isn't started again for the same node group.
+		autoscaler.deleteCreatedNodesWithErrors(context.Background())
+		synctest.Wait()
+		nodeGroup.AssertNumberOfCalls(t, "DeleteNodes", 1)
+
+		close(unblockDelete)
+		synctest.Wait()
+		nodes := <-deletedNodes
+		assert.Len(t, nodes, 1)
+		assert.Equal(t, "ng1-2", nodes[0].Spec.ProviderID)
+
+		// Once the deletion finishes, the next one can be started for the node group.
+		autoscaler.deleteCreatedNodesWithErrors(context.Background())
+		synctest.Wait()
+		nodeGroup.AssertNumberOfCalls(t, "DeleteNodes", 2)
+	})
 }
 
 func mockDeleteNodes(nodeGroup *mockprovider.NodeGroup, forceDeleteEnabled, forceDeleteImplemented bool) {
@@ -2447,7 +2532,7 @@ func TestStaticAutoscalerInstanceCreationErrorsForZeroOrMaxScaling(t *testing.T)
 		},
 	}, false)
 
-	autoscaler.deleteCreatedNodesWithErrors(context.Background())
+	runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 
 	nodeGroupAtomic.AssertCalled(t, "DeleteNodes", mock.MatchedBy(
 		func(nodes []*apiv1.Node) bool {
@@ -2487,7 +2572,7 @@ func TestStaticAutoscalerInstanceCreationErrorsForZeroOrMaxScaling(t *testing.T)
 		},
 	}, true)
 
-	autoscaler.deleteCreatedNodesWithErrors(context.Background())
+	runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 
 	nodeGroupAtomic.AssertNumberOfCalls(t, "DeleteNodes", 0)
 
@@ -2525,7 +2610,7 @@ func TestStaticAutoscalerInstanceCreationErrorsForZeroOrMaxScaling(t *testing.T)
 		},
 	}, true)
 
-	autoscaler.deleteCreatedNodesWithErrors(context.Background())
+	runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 
 	nodeGroupAtomic.AssertCalled(t, "DeleteNodes", mock.MatchedBy(
 		func(nodes []*apiv1.Node) bool {
