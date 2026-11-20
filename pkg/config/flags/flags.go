@@ -215,12 +215,12 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&p.o.PendingPodsBatchingTimeout, "pending-pods-batching-timeout", 4*time.Minute, "The maximum time spends when running scheduling simulations when preparing the batch of pods passed to scale up logic. This timeout is used in core filter-out pod list processor.")
 	fs.BoolVar(&p.o.GracefulDegradationEnabled, "enable-graceful-degradation", false, "Enables graceful degradation for unschedulable pods. When enabled, scheduling simulations during filter out pod list processor will be stopped after a timeout(specified by scheduling-simulation-timeout) and CA will proceed with a sub set of pods.")
 	fs.BoolVar(&p.o.InterPodAffinityHostnameFastPath, "enable-inter-pod-affinity-hostname-fast-path", false, "Enable the InterPodAffinityHostnameFastPath scheduler feature gate.")
+	fs.BoolVar(&p.o.ScaleDownEnabled, "scale-down-enabled", true, "Should CA scale down the cluster")
 
 	// Deprecated flags
 	fs.StringArrayVar(&p.ignoreTaints, "ignore-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group (Deprecated, use startup-taints instead)")
 	fs.BoolVar(&p.o.DynamicResourceAllocationEnabled, "enable-dynamic-resource-allocation", true, "Handle DRA (Dynamic Resource Allocation) objects, locked to true.")
 	fs.IntVar(&p.clusterSnapshotParallelism, "cluster-snapshot-parallelism", 16, "Maximum parallelism of cluster snapshot creation (Deprecated, use predicate-parallelism instead)")
-	fs.BoolVar(&p.o.ScaleDownEnabled, "scale-down-enabled", true, "[Deprecated] Should CA scale down the cluster")
 
 	// Properties specific to the cloud provider, but kept for the sake of POC
 	fs.StringArrayVar(&p.nodeGroups, "nodes", []string{}, "sets min,max size and other configuration data for a node group in a format accepted by cloud provider. Can be used multiple times. Format: <min>:<max>:<other...>")
@@ -305,10 +305,6 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 	allowedSchedulers, err := parseAllowedSchedulers(p.allowedSchedulers, p.bypassedSchedulers)
 	if err != nil {
 		return config.AutoscalingOptions{}, err
-	}
-
-	if p.o.ScaleDownEnabled == false {
-		klog.Warningf("--scale-down-enabled flag is deprecated and will be removed in a future release")
 	}
 
 	maxHealthCheckTimeout := max(p.o.MaxInactivityTime, p.o.MaxFailingTime, p.o.MaxStartupTime)
