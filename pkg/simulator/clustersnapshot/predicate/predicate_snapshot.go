@@ -45,6 +45,19 @@ type PredicateSnapshot struct {
 	parallelism                  int
 	draSnapshot                  *drasnapshot.Snapshot
 	csiSnapshot                  *csisnapshot.Snapshot
+
+	// podInfoCache keeps the PodInfos built by the previous SetClusterState call, keyed by
+	// the scheduled Pod object. Building a PodInfo parses the pod's affinity terms and its
+	// resource requests (cached in the PodInfo), and SetClusterState is called every loop with
+	// mostly the same Pod objects from the informer cache. Informers replace Pod objects rather
+	// than mutating them when pods change (see the SetClusterState contract), so the same
+	// pointer with the same ResourceVersion is the same pod.
+	podInfoCache map[*apiv1.Pod]cachedPodInfo
+}
+
+type cachedPodInfo struct {
+	podInfo         *framework.PodInfo
+	resourceVersion string
 }
 
 // NewPredicateSnapshot builds a PredicateSnapshot.
@@ -128,6 +141,8 @@ func (s *PredicateSnapshot) SetClusterState(ctx context.Context, nodes []*apiv1.
 func (s *PredicateSnapshot) setClusterStatePods(ctx context.Context, nodeInfos []*framework.NodeInfo, nodeNameToIdx map[string]int, scheduledPods []*apiv1.Pod) error {
 	loggingQuota := klogx.PodsLoggingQuota()
 	podInfosForNode := make([][]*framework.PodInfo, len(nodeInfos))
+	previousPodInfos := s.podInfoCache
+	s.podInfoCache = make(map[*apiv1.Pod]cachedPodInfo, len(scheduledPods))
 	for _, pod := range scheduledPods {
 		nodeName := pod.Spec.NodeName
 		if nodeName == "" {
@@ -148,8 +163,7 @@ func (s *PredicateSnapshot) setClusterStatePods(ctx context.Context, nodeInfos [
 			}
 		}
 
-		podInfo := framework.NewPodInfo(pod, claims)
-		podInfosForNode[nodeIdx] = append(podInfosForNode[nodeIdx], podInfo)
+		podInfosForNode[nodeIdx] = append(podInfosForNode[nodeIdx], s.podInfoFor(pod, claims, previousPodInfos))
 	}
 
 	klogx.V(1).Over(loggingQuota).Warningf("Other %d pods were bound to or nominated non-existing node", -loggingQuota.Left())
@@ -162,6 +176,23 @@ func (s *PredicateSnapshot) setClusterStatePods(ctx context.Context, nodeInfos [
 	})
 
 	return nil
+}
+
+// podInfoFor returns the PodInfo built for the same Pod object in the previous SetClusterState
+// call if there is one, or a new one. Pods with ResourceClaims are never cached: their claims
+// come from the DRA snapshot, which changes independently of the Pod. Pods without a
+// ResourceVersion aren't either, as changes to them couldn't be detected.
+func (s *PredicateSnapshot) podInfoFor(pod *apiv1.Pod, claims []*resourceapi.ResourceClaim, previous map[*apiv1.Pod]cachedPodInfo) *framework.PodInfo {
+	if len(claims) > 0 || len(pod.Spec.ResourceClaims) > 0 || pod.ResourceVersion == "" {
+		return framework.NewPodInfo(pod, claims)
+	}
+	if cached, found := previous[pod]; found && cached.resourceVersion == pod.ResourceVersion {
+		s.podInfoCache[pod] = cached
+		return cached.podInfo
+	}
+	pi := framework.NewPodInfo(pod, claims)
+	s.podInfoCache[pod] = cachedPodInfo{podInfo: pi, resourceVersion: pod.ResourceVersion}
+	return pi
 }
 
 // GetNodeInfo returns an internal NodeInfo wrapping the relevant schedulerimpl.NodeInfo.
