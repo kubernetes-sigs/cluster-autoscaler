@@ -301,7 +301,8 @@ type fastScaleUpNodeGroup struct {
 }
 
 func (f *fastScaleUpNodeGroup) IncreaseSize(ctx context.Context, delta int) error {
-	return f.DecreaseTargetSize(ctx, -delta)
+	f.SetTargetSize(f.GetTargetSize() + delta)
+	return nil
 }
 
 // fastScaleUpCloudProvider is a wrapper around the fake cloud provider that uses

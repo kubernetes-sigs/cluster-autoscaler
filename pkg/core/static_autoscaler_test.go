@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -416,6 +417,16 @@ func setupAutoscaler(config *autoscalerSetupConfig) (*StaticAutoscaler, error) {
 	}
 
 	return autoscaler, nil
+}
+
+// runAndWaitForAsyncOps runs f in a synctest bubble and returns once the background node group
+// operations started by f have finished, so that their results can be asserted deterministically.
+func runAndWaitForAsyncOps(t *testing.T, f func()) {
+	t.Helper()
+	synctest.Test(t, func(t *testing.T) {
+		f()
+		synctest.Wait()
+	})
 }
 
 func TestStaticAutoscalerRunOnceContinuesScalingAfterError(t *testing.T) {
@@ -2111,7 +2122,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now)
 
 			// delete nodes with create errors
-			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 
 			// nodes should be deleted
 			expectedDeleteCalls := 1
@@ -2146,7 +2157,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now)
 
 			// delete nodes with create errors
-			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 
 			// nodes should be deleted again
 			expectedDeleteCalls += 1
@@ -2219,7 +2230,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now)
 
 			// delete nodes with create errors
-			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 
 			// we expect no more Delete Nodes, don't increase expectedDeleteCalls
 			if tc.forceDeleteEnabled {
@@ -2267,7 +2278,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, time.Now())
 
 			// No nodes are deleted when failed nodes don't have matching node groups
-			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 			nodeGroupC.AssertNumberOfCalls(t, deleteMethod, 0)
 
 			// Node group with getOptions error gets no deletes.
@@ -2316,11 +2327,96 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now)
 
 			// delete nodes with create errors
-			autoscaler.deleteCreatedNodesWithErrors(context.Background())
+			runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 
 			nodeGroupError.AssertNumberOfCalls(t, deleteMethod, 0)
 		})
 	}
+}
+
+func TestDeleteCreatedNodesWithErrorsAsync(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		deleteStarted := make(chan struct{}, 10)
+		unblockDelete := make(chan struct{})
+		deletedNodes := make(chan []*apiv1.Node, 10)
+
+		nodeGroup := &mockprovider.NodeGroup{}
+		nodeGroup.On("Exist").Return(true)
+		nodeGroup.On("Autoprovisioned").Return(false)
+		nodeGroup.On("TargetSize").Return(2, nil)
+		nodeGroup.On("Id").Return("ng1")
+		nodeGroup.On("GetOptions", mock.Anything).Return(&config.NodeGroupAutoscalingOptions{}, nil)
+		nodeGroup.On("Nodes").Return([]cloudprovider.Instance{
+			{
+				Id:     "ng1-1",
+				Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning},
+			},
+			{
+				Id: "ng1-2",
+				Status: &cloudprovider.InstanceStatus{
+					State: cloudprovider.InstanceCreating,
+					ErrorInfo: &cloudprovider.InstanceErrorInfo{
+						ErrorClass: cloudprovider.OutOfResourcesErrorClass,
+						ErrorCode:  "RESOURCE_POOL_EXHAUSTED",
+					},
+				},
+			},
+		}, nil)
+		nodeGroup.On("DeleteNodes", mock.Anything).Return(func(nodes []*apiv1.Node) error {
+			deleteStarted <- struct{}{}
+			<-unblockDelete
+			deletedNodes <- nodes
+			return nil
+		})
+		provider := &mockprovider.CloudProvider{}
+		provider.On("NodeGroups").Return([]cloudprovider.NodeGroup{nodeGroup})
+		provider.On("NodeGroupForNode", mock.Anything).Return(nodeGroup, nil)
+
+		fakeClient := &fake.Clientset{}
+		fakeLogRecorder, _ := clusterstate_utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
+
+		autoscalingCtx := &ca_context.AutoscalingContext{
+			AutoscalingOptions: config.AutoscalingOptions{
+				NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+					MaxNodeProvisionTime: 45 * time.Minute,
+				},
+			},
+			CloudProvider: provider,
+		}
+
+		clusterState := clusterstate.NewClusterStateRegistry(provider, fakeLogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.AutoscalingOptions.NodeGroupDefaults), nil, clusterstate.WithConfig(clusterstate.ClusterStateRegistryConfig{
+			MaxTotalUnreadyPercentage: 10,
+			OkTotalUnreadyCount:       1,
+		}))
+		clusterState.RefreshCloudProviderNodeInstancesCache()
+		err := clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, time.Now())
+		assert.NoError(t, err)
+
+		autoscaler := &StaticAutoscaler{
+			AutoscalingContext:   autoscalingCtx,
+			clusterStateRegistry: clusterState,
+		}
+
+		// The deletion is started in the background, even though the cloud provider call blocks.
+		autoscaler.deleteCreatedNodesWithErrors(context.Background())
+		<-deleteStarted
+
+		// While the deletion is in progress, it isn't started again for the same node group.
+		autoscaler.deleteCreatedNodesWithErrors(context.Background())
+		synctest.Wait()
+		nodeGroup.AssertNumberOfCalls(t, "DeleteNodes", 1)
+
+		close(unblockDelete)
+		synctest.Wait()
+		nodes := <-deletedNodes
+		assert.Len(t, nodes, 1)
+		assert.Equal(t, "ng1-2", nodes[0].Spec.ProviderID)
+
+		// Once the deletion finishes, the next one can be started for the node group.
+		autoscaler.deleteCreatedNodesWithErrors(context.Background())
+		synctest.Wait()
+		nodeGroup.AssertNumberOfCalls(t, "DeleteNodes", 2)
+	})
 }
 
 func mockDeleteNodes(nodeGroup *mockprovider.NodeGroup, forceDeleteEnabled, forceDeleteImplemented bool) {
@@ -2436,7 +2532,7 @@ func TestStaticAutoscalerInstanceCreationErrorsForZeroOrMaxScaling(t *testing.T)
 		},
 	}, false)
 
-	autoscaler.deleteCreatedNodesWithErrors(context.Background())
+	runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 
 	nodeGroupAtomic.AssertCalled(t, "DeleteNodes", mock.MatchedBy(
 		func(nodes []*apiv1.Node) bool {
@@ -2476,7 +2572,7 @@ func TestStaticAutoscalerInstanceCreationErrorsForZeroOrMaxScaling(t *testing.T)
 		},
 	}, true)
 
-	autoscaler.deleteCreatedNodesWithErrors(context.Background())
+	runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 
 	nodeGroupAtomic.AssertNumberOfCalls(t, "DeleteNodes", 0)
 
@@ -2514,7 +2610,7 @@ func TestStaticAutoscalerInstanceCreationErrorsForZeroOrMaxScaling(t *testing.T)
 		},
 	}, true)
 
-	autoscaler.deleteCreatedNodesWithErrors(context.Background())
+	runAndWaitForAsyncOps(t, func() { autoscaler.deleteCreatedNodesWithErrors(context.Background()) })
 
 	nodeGroupAtomic.AssertCalled(t, "DeleteNodes", mock.MatchedBy(
 		func(nodes []*apiv1.Node) bool {
@@ -2775,17 +2871,84 @@ func TestRemoveFixNodeTargetSize(t *testing.T) {
 	err := clusterState.UpdateNodes(context.Background(), []*apiv1.Node{ng1_1}, now.Add(-time.Hour))
 	assert.NoError(t, err)
 
+	autoscaler := &StaticAutoscaler{
+		AutoscalingContext:   autoscalingCtx,
+		clusterStateRegistry: clusterState,
+	}
+
 	// Nothing should be fixed. The incorrect size state is not old enough.
-	removed, err := fixNodeGroupSize(context.Background(), autoscalingCtx, clusterState, now.Add(-50*time.Minute))
+	fixing, err := autoscaler.fixNodeGroupSize(context.Background(), now.Add(-50*time.Minute))
 	assert.NoError(t, err)
-	assert.False(t, removed)
+	assert.False(t, fixing)
 
 	// Node group should be decreased.
-	removed, err = fixNodeGroupSize(context.Background(), autoscalingCtx, clusterState, now)
+	runAndWaitForAsyncOps(t, func() {
+		fixing, err = autoscaler.fixNodeGroupSize(context.Background(), now)
+	})
 	assert.NoError(t, err)
-	assert.True(t, removed)
+	assert.True(t, fixing)
 	change := core_utils.GetStringFromChan(sizeChanges)
 	assert.Equal(t, "ng1/-2", change)
+}
+
+func TestFixNodeGroupSizeAsync(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sizeChanges := make(chan string, 10)
+		decreaseStarted := make(chan struct{}, 10)
+		unblockDecrease := make(chan struct{})
+		now := time.Now()
+
+		ng1_1 := BuildTestNode("ng1-1", 1000, 1000)
+		ng1_1.Spec.ProviderID = "ng1-1"
+		provider := testprovider.NewTestCloudProviderBuilder().WithOnScaleUp(func(nodegroup string, delta int) error {
+			decreaseStarted <- struct{}{}
+			<-unblockDecrease
+			sizeChanges <- fmt.Sprintf("%s/%d", nodegroup, delta)
+			return nil
+		}).Build()
+		provider.AddNodeGroup("ng1", 1, 10, 3)
+		provider.AddNode("ng1", ng1_1)
+
+		fakeClient := &fake.Clientset{}
+		fakeLogRecorder, _ := clusterstate_utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
+
+		autoscalingCtx := &ca_context.AutoscalingContext{
+			AutoscalingOptions: config.AutoscalingOptions{
+				NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+					MaxNodeProvisionTime: 45 * time.Minute,
+				},
+			},
+			CloudProvider: provider,
+		}
+
+		clusterState := clusterstate.NewClusterStateRegistry(provider, fakeLogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.AutoscalingOptions.NodeGroupDefaults), nil, clusterstate.WithConfig(clusterstate.ClusterStateRegistryConfig{
+			MaxTotalUnreadyPercentage: 10,
+			OkTotalUnreadyCount:       1,
+		}))
+		err := clusterState.UpdateNodes(context.Background(), []*apiv1.Node{ng1_1}, now.Add(-time.Hour))
+		assert.NoError(t, err)
+
+		autoscaler := &StaticAutoscaler{
+			AutoscalingContext:   autoscalingCtx,
+			clusterStateRegistry: clusterState,
+		}
+
+		// The decrease is started in the background, even though the cloud provider call blocks.
+		fixing, err := autoscaler.fixNodeGroupSize(context.Background(), now)
+		assert.NoError(t, err)
+		assert.True(t, fixing)
+		<-decreaseStarted
+
+		// While the decrease is in progress, it isn't started again for the same node group.
+		fixing, err = autoscaler.fixNodeGroupSize(context.Background(), now)
+		assert.NoError(t, err)
+		assert.False(t, fixing)
+
+		close(unblockDecrease)
+		synctest.Wait()
+		assert.Equal(t, "ng1/-2", core_utils.GetStringFromChan(sizeChanges))
+		assert.Equal(t, core_utils.NothingReturned, core_utils.GetStringFromChan(sizeChanges))
+	})
 }
 
 func TestRemoveOldUnregisteredNodes(t *testing.T) {
@@ -2837,11 +3000,87 @@ func TestRemoveOldUnregisteredNodes(t *testing.T) {
 	assert.False(t, removed)
 
 	// ng1_2 should be removed.
-	removed, err = autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
+	runAndWaitForAsyncOps(t, func() {
+		removed, err = autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
+	})
 	assert.NoError(t, err)
 	assert.True(t, removed)
 	deletedNode := core_utils.GetStringFromChan(deletedNodes)
 	assert.Equal(t, "ng1/ng1-2", deletedNode)
+}
+
+func TestRemoveOldUnregisteredNodesAsync(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		deletedNodes := make(chan string, 10)
+		deleteStarted := make(chan struct{}, 10)
+		unblockDelete := make(chan struct{})
+
+		now := time.Now()
+
+		ng1_1 := BuildTestNode("ng1-1", 1000, 1000)
+		ng1_1.Spec.ProviderID = "ng1-1"
+		ng1_2 := BuildTestNode("ng1-2", 1000, 1000)
+		ng1_2.Spec.ProviderID = "ng1-2"
+		provider := testprovider.NewTestCloudProviderBuilder().WithOnScaleDown(func(nodegroup string, node string) error {
+			deleteStarted <- struct{}{}
+			<-unblockDelete
+			deletedNodes <- fmt.Sprintf("%s/%s", nodegroup, node)
+			return nil
+		}).Build()
+		// Min size 0, so that the min size constraint doesn't prevent removing the node again below.
+		provider.AddNodeGroup("ng1", 0, 10, 2)
+		provider.AddNode("ng1", ng1_1)
+		provider.AddNode("ng1", ng1_2)
+
+		fakeClient := &fake.Clientset{}
+		fakeLogRecorder, _ := clusterstate_utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
+
+		autoscalingCtx := &ca_context.AutoscalingContext{
+			AutoscalingOptions: config.AutoscalingOptions{
+				NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+					MaxNodeProvisionTime: 45 * time.Minute,
+				},
+			},
+			CloudProvider: provider,
+		}
+		clusterState := clusterstate.NewClusterStateRegistry(provider, fakeLogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.AutoscalingOptions.NodeGroupDefaults), nil, clusterstate.WithConfig(clusterstate.ClusterStateRegistryConfig{
+			MaxTotalUnreadyPercentage: 10,
+			OkTotalUnreadyCount:       1,
+		}))
+		err := clusterState.UpdateNodes(context.Background(), []*apiv1.Node{ng1_1}, now.Add(-time.Hour))
+		assert.NoError(t, err)
+
+		unregisteredNodes := clusterState.GetUnregisteredNodes()
+		assert.Equal(t, 1, len(unregisteredNodes))
+
+		autoscaler := &StaticAutoscaler{
+			AutoscalingContext:   autoscalingCtx,
+			clusterStateRegistry: clusterState,
+		}
+
+		// The removal is started in the background, even though the cloud provider call blocks.
+		removed, err := autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
+		assert.NoError(t, err)
+		assert.True(t, removed)
+		<-deleteStarted
+
+		// While the removal is in progress, it isn't started again for the same node group.
+		removed, err = autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
+		assert.NoError(t, err)
+		assert.False(t, removed)
+
+		close(unblockDelete)
+		synctest.Wait()
+		assert.Equal(t, "ng1/ng1-2", core_utils.GetStringFromChan(deletedNodes))
+		assert.Equal(t, core_utils.NothingReturned, core_utils.GetStringFromChan(deletedNodes))
+
+		// Once the removal has finished, it can be started again.
+		removed, err = autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
+		assert.NoError(t, err)
+		assert.True(t, removed)
+		synctest.Wait()
+		assert.Equal(t, "ng1/ng1-2", core_utils.GetStringFromChan(deletedNodes))
+	})
 }
 
 // TestRemoveOldUnregisteredNodesRegistersFailedScaleUp verifies that removing nodes that failed to register within
@@ -2891,7 +3130,10 @@ func TestRemoveOldUnregisteredNodesRegistersFailedScaleUp(t *testing.T) {
 		AutoscalingContext:   autoscalingCtx,
 		clusterStateRegistry: clusterState,
 	}
-	removed, err := autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
+	var removed bool
+	runAndWaitForAsyncOps(t, func() {
+		removed, err = autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
+	})
 	assert.NoError(t, err)
 	assert.True(t, removed)
 	assert.Equal(t, "ng1/ng1-2", core_utils.GetStringFromChan(deletedNodes))
@@ -2966,7 +3208,9 @@ func TestRemoveOldUnregisteredNodesAtomic(t *testing.T) {
 	assert.False(t, removed)
 
 	// unregNode is long unregistered, so all of the nodes should be removed due to ZeroOrMaxNodeScaling option
-	removed, err = autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
+	runAndWaitForAsyncOps(t, func() {
+		removed, err = autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
+	})
 
 	assert.NoError(t, err)
 	assert.True(t, removed)
@@ -3003,7 +3247,9 @@ func TestRemoveOldUnregisteredNodesAtomic(t *testing.T) {
 	assert.Equal(t, 10, len(unregisteredNodes))
 
 	// all nodes are long unregistered, so all should be removed for ZeroOrMaxNodeScaling
-	removed, err = autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, autoscaler.clusterStateRegistry, now, fakeLogRecorder)
+	runAndWaitForAsyncOps(t, func() {
+		removed, err = autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, autoscaler.clusterStateRegistry, now, fakeLogRecorder)
+	})
 	assert.NoError(t, err)
 	assert.True(t, removed)
 
