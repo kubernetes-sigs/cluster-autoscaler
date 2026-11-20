@@ -27,6 +27,7 @@ import (
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/daemonset"
 	caerror "sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
@@ -47,6 +48,8 @@ type MixedTemplateNodeInfoProvider struct {
 	nodeInfoCache   map[string]cacheItem
 	ttl             time.Duration
 	forceDaemonSets bool
+	// templateOptions carries a DaemonSet pods cache reused across loops.
+	templateOptions simulator.TemplateNodeInfoOptions
 }
 
 // NewMixedTemplateNodeInfoProvider returns a NodeInfoProvider processor building
@@ -60,6 +63,7 @@ func NewMixedTemplateNodeInfoProvider(t *time.Duration, forceDaemonSets bool) *M
 		nodeInfoCache:   make(map[string]cacheItem),
 		ttl:             ttl,
 		forceDaemonSets: forceDaemonSets,
+		templateOptions: simulator.TemplateNodeInfoOptions{DaemonSetPodsCache: daemonset.NewPodsForNodeCache()},
 	}
 }
 
@@ -107,7 +111,7 @@ func (p *MixedTemplateNodeInfoProvider) Process(ctx context.Context, autoscaling
 			if err != nil {
 				return false, "", caerror.NewAutoscalerErrorf(caerror.InternalError, "error while retrieving node %s from cluster snapshot - this shouldn't happen: %v", node.Name, err)
 			}
-			templateNodeInfo, caErr := simulator.SanitizedTemplateNodeInfoFromNodeInfo(ctx, nodeInfo, id, daemonsets, p.forceDaemonSets, taintConfig)
+			templateNodeInfo, caErr := simulator.SanitizedTemplateNodeInfoFromNodeInfoWithOptions(ctx, nodeInfo, id, daemonsets, p.forceDaemonSets, taintConfig, p.templateOptions)
 			if caErr != nil {
 				return false, "", caErr
 			}
@@ -148,7 +152,7 @@ func (p *MixedTemplateNodeInfoProvider) Process(ctx context.Context, autoscaling
 
 		// No good template, trying to generate one. This is called only if there are no
 		// working nodes in the node groups. By default CA tries to use a real-world example.
-		nodeInfo, err := simulator.SanitizedTemplateNodeInfoFromNodeGroup(ctx, nodeGroup, daemonsets, taintConfig)
+		nodeInfo, err := simulator.SanitizedTemplateNodeInfoFromNodeGroupWithOptions(ctx, nodeGroup, daemonsets, taintConfig, p.templateOptions)
 		if err != nil {
 			if !errors.Is(err, cloudprovider.ErrNotImplemented) {
 				logger.Error(err, "Unable to build proper template node for node group", "nodeGroupId", id)
