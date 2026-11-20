@@ -954,7 +954,16 @@ func (a *StaticAutoscaler) scaleDown(ctx context.Context, state *loopState) caer
 		}
 	}
 
-	typedErr := a.scaleDownPlanner.UpdateClusterState(ctx, podDestinations, scaleDownCandidates, state.scaleDownActuationStatus, state.currentTime)
+	// The background node group operations started by reconcileCluster are about to decrease the
+	// target sizes of their node groups, which still count the instances being removed. Count the
+	// pending decreases as deletions in progress, so that the min size checks don't mistake them
+	// for room to remove other nodes from the node groups. (The pending decreases are read here,
+	// after reconcileCluster, so that the operations started in this iteration are included.)
+	actuationStatus := actuationStatusWithPendingTargetSizeDecreases{
+		ActuationStatus:            state.scaleDownActuationStatus,
+		pendingTargetSizeDecreases: a.asyncNodeGroupDecreaseOps.pendingTargetSizeDecreases(),
+	}
+	typedErr := a.scaleDownPlanner.UpdateClusterState(ctx, podDestinations, scaleDownCandidates, actuationStatus, state.currentTime)
 	// Update clusterStateRegistry and metrics regardless of whether ScaleDown was successful or not.
 	unneededNodes := a.scaleDownPlanner.UnneededNodes()
 	a.processors.ScaleDownCandidatesNotifier.Update(ctx, unneededNodes, state.currentTime)
@@ -1141,7 +1150,7 @@ func (a *StaticAutoscaler) fixNodeGroupSize(ctx context.Context, currentTime tim
 			}
 			delta := incorrectSize.CurrentSize - incorrectSize.ExpectedSize
 			if delta < 0 {
-				started := a.asyncNodeGroupDecreaseOps.tryStart(nodeGroup.Id(), func() {
+				started := a.asyncNodeGroupDecreaseOps.tryStart(nodeGroup.Id(), -delta, func() {
 					if err := nodeGroup.DecreaseTargetSize(ctx, delta); err != nil {
 						logger.Error(err, "Failed to decrease node group target size", "nodeGroupId", nodeGroup.Id(), "delta", delta)
 						return
@@ -1203,7 +1212,7 @@ func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUn
 			continue
 		}
 
-		started := a.asyncNodeGroupDecreaseOps.tryStart(nodeGroupId, func() {
+		started := a.asyncNodeGroupDecreaseOps.tryStart(nodeGroupId, len(nodesToDelete), func() {
 			a.deleteUnregisteredNodes(ctx, nodeGroup, nodesToDelete, csr, logRecorder)
 		})
 		if !started {
@@ -1320,7 +1329,7 @@ func (a *StaticAutoscaler) deleteCreatedNodesWithErrors(ctx context.Context) {
 			continue
 		}
 
-		started := a.asyncNodeGroupDecreaseOps.tryStart(nodeGroupId, func() {
+		started := a.asyncNodeGroupDecreaseOps.tryStart(nodeGroupId, len(nodesToDelete), func() {
 			a.deleteNodesWithErrors(ctx, nodeGroup, nodesToDelete)
 		})
 		if !started {
