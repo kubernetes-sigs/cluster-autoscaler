@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -416,6 +417,16 @@ func setupAutoscaler(config *autoscalerSetupConfig) (*StaticAutoscaler, error) {
 	}
 
 	return autoscaler, nil
+}
+
+// runAndWaitForAsyncOps runs f in a synctest bubble and returns once the background node group
+// operations started by f have finished, so that their results can be asserted deterministically.
+func runAndWaitForAsyncOps(t *testing.T, f func()) {
+	t.Helper()
+	synctest.Test(t, func(t *testing.T) {
+		f()
+		synctest.Wait()
+	})
 }
 
 func TestStaticAutoscalerRunOnceContinuesScalingAfterError(t *testing.T) {
@@ -2781,16 +2792,77 @@ func TestRemoveFixNodeTargetSize(t *testing.T) {
 	}
 
 	// Nothing should be fixed. The incorrect size state is not old enough.
-	removed, err := autoscaler.fixNodeGroupSize(context.Background(), now.Add(-50*time.Minute))
+	runAndWaitForAsyncOps(t, func() {
+		err = autoscaler.fixNodeGroupSize(context.Background(), now.Add(-50*time.Minute))
+	})
 	assert.NoError(t, err)
-	assert.False(t, removed)
+	assert.Equal(t, core_utils.NothingReturned, core_utils.GetStringFromChanImmediately(sizeChanges))
 
 	// Node group should be decreased.
-	removed, err = autoscaler.fixNodeGroupSize(context.Background(), now)
+	runAndWaitForAsyncOps(t, func() {
+		err = autoscaler.fixNodeGroupSize(context.Background(), now)
+	})
 	assert.NoError(t, err)
-	assert.True(t, removed)
 	change := core_utils.GetStringFromChan(sizeChanges)
 	assert.Equal(t, "ng1/-2", change)
+}
+
+func TestFixNodeGroupSizeAsync(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sizeChanges := make(chan string, 10)
+		decreaseStarted := make(chan struct{}, 10)
+		unblockDecrease := make(chan struct{})
+		now := time.Now()
+
+		ng1_1 := BuildTestNode("ng1-1", 1000, 1000)
+		ng1_1.Spec.ProviderID = "ng1-1"
+		provider := testprovider.NewTestCloudProviderBuilder().WithOnScaleUp(func(nodegroup string, delta int) error {
+			decreaseStarted <- struct{}{}
+			<-unblockDecrease
+			sizeChanges <- fmt.Sprintf("%s/%d", nodegroup, delta)
+			return nil
+		}).Build()
+		provider.AddNodeGroup("ng1", 1, 10, 3)
+		provider.AddNode("ng1", ng1_1)
+
+		fakeClient := &fake.Clientset{}
+		fakeLogRecorder, _ := clusterstate_utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
+
+		autoscalingCtx := &ca_context.AutoscalingContext{
+			AutoscalingOptions: config.AutoscalingOptions{
+				NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+					MaxNodeProvisionTime: 45 * time.Minute,
+				},
+			},
+			CloudProvider: provider,
+		}
+
+		clusterState := clusterstate.NewClusterStateRegistry(provider, fakeLogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.AutoscalingOptions.NodeGroupDefaults), nil, clusterstate.WithConfig(clusterstate.ClusterStateRegistryConfig{
+			MaxTotalUnreadyPercentage: 10,
+			OkTotalUnreadyCount:       1,
+		}))
+		err := clusterState.UpdateNodes(context.Background(), []*apiv1.Node{ng1_1}, now.Add(-time.Hour))
+		assert.NoError(t, err)
+
+		autoscaler := &StaticAutoscaler{
+			AutoscalingContext:   autoscalingCtx,
+			clusterStateRegistry: clusterState,
+		}
+
+		// The decrease is started in the background, even though the cloud provider call blocks.
+		assert.NoError(t, autoscaler.fixNodeGroupSize(context.Background(), now))
+		<-decreaseStarted
+
+		// While the decrease is in progress, it isn't started again for the same node group.
+		assert.NoError(t, autoscaler.fixNodeGroupSize(context.Background(), now))
+		synctest.Wait()
+		assert.Empty(t, decreaseStarted)
+
+		close(unblockDecrease)
+		synctest.Wait()
+		assert.Equal(t, "ng1/-2", core_utils.GetStringFromChan(sizeChanges))
+		assert.Equal(t, core_utils.NothingReturned, core_utils.GetStringFromChan(sizeChanges))
+	})
 }
 
 func TestRemoveOldUnregisteredNodes(t *testing.T) {

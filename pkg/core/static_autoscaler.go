@@ -111,6 +111,10 @@ type StaticAutoscaler struct {
 	initialized                bool
 	taintConfig                taints.TaintConfig
 	capacityBufferPodsRegistry *fakepods.Registry
+	// asyncNodeGroupDecreaseOps runs the cloud provider operations of cluster reconciliation
+	// (removing long unregistered nodes, deleting nodes with create errors, fixing node group
+	// sizes) in the background, so that they don't block the main loop.
+	asyncNodeGroupDecreaseOps asyncNodeGroupDecreaseOps
 }
 
 type staticAutoscalerProcessorCallbacks struct {
@@ -534,14 +538,12 @@ func (a *StaticAutoscaler) reconcileCluster(ctx context.Context, currentTime tim
 	// Check if there has been a constant difference between the number of nodes in k8s and
 	// the number of nodes on the cloud provider side.
 	// TODO: andrewskim - add protection for ready AWS nodes.
-	fixedSomething, err := a.fixNodeGroupSize(ctx, currentTime)
-	if err != nil {
+	// The target sizes are fixed in the background, so nothing has changed yet when this
+	// returns and the iteration can continue; the new sizes are picked up by UpdateNodes in
+	// a subsequent iteration, like any other target size change made outside of this loop.
+	if err := a.fixNodeGroupSize(ctx, currentTime); err != nil {
 		logger.Error(err, "Failed to fix node group sizes")
 		return false, caerrors.ToAutoscalerError(caerrors.CloudProviderError, err)
-	}
-	if fixedSomething {
-		logger.V(0).Info("Some node group target size was fixed, skipping the iteration")
-		return true, nil
 	}
 
 	metrics.UpdateLastTime(metrics.Autoscaling, time.Now())
@@ -1118,10 +1120,10 @@ func (a *StaticAutoscaler) isScaleDownInCooldown(currentTime time.Time) bool {
 }
 
 // fixNodeGroupSize sets the target size of node groups to the current number of nodes in them
-// if the difference was constant for a prolonged time. Returns true if managed to fix something.
-func (a *StaticAutoscaler) fixNodeGroupSize(ctx context.Context, currentTime time.Time) (bool, error) {
+// if the difference was constant for a prolonged time. The target sizes are changed in the
+// background, one operation per node group at a time (see asyncNodeGroupDecreaseOps).
+func (a *StaticAutoscaler) fixNodeGroupSize(ctx context.Context, currentTime time.Time) error {
 	logger := klog.FromContext(ctx)
-	fixed := false
 	for _, nodeGroup := range a.CloudProvider.NodeGroups(ctx) {
 		incorrectSize := a.clusterStateRegistry.GetIncorrectNodeGroupSize(nodeGroup.Id())
 		if incorrectSize == nil {
@@ -1129,12 +1131,12 @@ func (a *StaticAutoscaler) fixNodeGroupSize(ctx context.Context, currentTime tim
 		}
 		maxNodeProvisionTime, err := a.clusterStateRegistry.MaxNodeProvisionTime(ctx, nodeGroup)
 		if err != nil {
-			return false, fmt.Errorf("failed to retrieve maxNodeProvisionTime for nodeGroup %s", nodeGroup.Id())
+			return fmt.Errorf("failed to retrieve maxNodeProvisionTime for nodeGroup %s", nodeGroup.Id())
 		}
 		if incorrectSize.FirstObserved.Add(maxNodeProvisionTime).Before(currentTime) {
 			opts, err := nodeGroup.GetOptions(ctx, a.NodeGroupDefaults)
 			if err != nil && err != cloudprovider.ErrNotImplemented {
-				return false, fmt.Errorf("failed to get options for nodeGroup %s: %v", nodeGroup.Id(), err)
+				return fmt.Errorf("failed to get options for nodeGroup %s: %v", nodeGroup.Id(), err)
 			}
 			if opts != nil && opts.ZeroOrMaxNodeScaling {
 				logger.V(0).Info("Skipping fixing node group size for ZeroOrMaxNodeScaling node group", "nodeGroupId", nodeGroup.Id())
@@ -1142,15 +1144,22 @@ func (a *StaticAutoscaler) fixNodeGroupSize(ctx context.Context, currentTime tim
 			}
 			delta := incorrectSize.CurrentSize - incorrectSize.ExpectedSize
 			if delta < 0 {
-				logger.V(0).Info("Decreasing size", "nodeGroupId", nodeGroup.Id(), "targetSize", incorrectSize.ExpectedSize, "size", incorrectSize.CurrentSize, "delta", delta)
-				if err := nodeGroup.DecreaseTargetSize(ctx, delta); err != nil {
-					return fixed, fmt.Errorf("failed to decrease %s: %v", nodeGroup.Id(), err)
+				started := a.asyncNodeGroupDecreaseOps.tryStart(nodeGroup.Id(), func() {
+					if err := nodeGroup.DecreaseTargetSize(ctx, delta); err != nil {
+						logger.Error(err, "Failed to decrease node group target size", "nodeGroupId", nodeGroup.Id(), "delta", delta)
+						return
+					}
+					logger.V(0).Info("Decreased node group target size", "nodeGroupId", nodeGroup.Id(), "delta", delta)
+				})
+				if !started {
+					logger.V(5).Info("Not starting target size decrease of node group, another background operation on the node group is still in progress", "nodeGroupId", nodeGroup.Id())
+					continue
 				}
-				fixed = true
+				logger.V(0).Info("Decreasing node group target size in the background", "nodeGroupId", nodeGroup.Id(), "targetSize", incorrectSize.ExpectedSize, "size", incorrectSize.CurrentSize, "delta", delta)
 			}
 		}
 	}
-	return fixed, nil
+	return nil
 }
 
 // removeOldUnregisteredNodes removes unregistered nodes if needed. Returns true
