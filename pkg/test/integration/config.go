@@ -148,3 +148,13 @@ func WithMaxNodeProvisionTime(d time.Duration) AutoscalingOptionOverride {
 		o.NodeGroupDefaults.MaxNodeProvisionTime = d
 	}
 }
+
+// WithNodeGroupBackoffDuration sets how long a NodeGroup is backed off after a failed scale-up. Further failures
+// don't extend the duration.
+func WithNodeGroupBackoffDuration(d time.Duration) AutoscalingOptionOverride {
+	return func(o *config.AutoscalingOptions) {
+		o.InitialNodeGroupBackoffDuration = d
+		o.MaxNodeGroupBackoffDuration = d
+		o.NodeGroupBackoffResetTimeout = d
+	}
+}

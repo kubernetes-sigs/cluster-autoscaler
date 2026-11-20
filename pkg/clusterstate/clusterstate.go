@@ -492,6 +492,8 @@ func (csr *ClusterStateRegistry) updateClusterStateRegistry(ctx context.Context,
 	csr.nodes = nodes
 	csr.previousCloudProviderNodeInstances = csr.cloudProviderNodeInstances
 	csr.cloudProviderNodeInstances = cloudProviderNodeInstances
+	// updateReadinessStats builds new readiness stats, it doesn't modify the ones from the previous update.
+	previousReadiness := csr.perNodeGroupReadiness
 
 	csr.updateUnregisteredNodes(notRegistered)
 	csr.updateCloudProviderDeletedNodes(cloudProviderNodesRemoved)
@@ -502,6 +504,7 @@ func (csr *ClusterStateRegistry) updateClusterStateRegistry(ctx context.Context,
 	csr.updateAcceptableRanges(ctx, targetSizes)
 	failedScaleUps := csr.updateScaleRequests(ctx, currentTime)
 	failedScaleUps = append(failedScaleUps, csr.handleInstanceCreationErrors(ctx, currentTime)...)
+	failedScaleUps = append(failedScaleUps, csr.handleStartupTimeouts(ctx, previousReadiness, currentTime)...)
 	//  recalculate acceptable ranges after removing timed out requests
 	csr.updateAcceptableRanges(ctx, targetSizes)
 	csr.updateIncorrectNodeGroupSizes(ctx, currentTime)
@@ -1335,6 +1338,49 @@ func (csr *ClusterStateRegistry) GetAutoscaledNodesCount() (currentSize, targetS
 		currentSize += len(readiness.Registered) - len(readiness.NotStarted)
 	}
 	return currentSize, targetSize
+}
+
+// handleStartupTimeouts checks for nodes that moved from NotStarted to Unready after exceeding their max node startup
+// time. For each affected node group, it reduces any active scale-up request and reports a failed scale-up to back off
+// the group. It reports the failure even without an active request because scale-up requests are lost on restart.
+// To be executed under a lock.
+func (csr *ClusterStateRegistry) handleStartupTimeouts(ctx context.Context, previousReadiness map[string]Readiness, currentTime time.Time) []failedScaleUp {
+	logger := klog.FromContext(ctx)
+	var failedScaleUps []failedScaleUp
+	for _, nodeGroup := range csr.getRunningNodeGroups(ctx) {
+		id := nodeGroup.Id()
+		timedOutNodes := sets.New(previousReadiness[id].NotStarted...).Intersection(sets.New(csr.perNodeGroupReadiness[id].Unready...))
+		timedOut := timedOutNodes.Len()
+		if timedOut == 0 {
+			continue
+		}
+		// Without the max node startup time updateReadinessStats classifies the nodes using an unrelated value, so
+		// they may only look like they ran out of time.
+		if _, err := csr.nodeGroupConfigProcessor.GetMaxNodeStartupTime(ctx, nodeGroup); err != nil {
+			logger.Info("Not registering node startup timeout: failed to get maxNodeStartupTime for node group", "nodeGroupId", id, "err", err)
+			continue
+		}
+		// The request may not be the one that added these nodes, so it keeps the nodes it still waits for.
+		if scaleUpRequest, found := csr.scaleUpRequests[id]; found && !csr.unknownTargetSizes[id] {
+			upcoming := calculateUpcomingNodesInNodeGroup(csr.perNodeGroupReadiness[id], csr.acceptableRanges[id])
+			if reduction := min(timedOut, scaleUpRequest.Increase-upcoming); reduction > 0 {
+				csr.registerOrUpdateScaleUpNoLock(ctx, nodeGroup, -reduction, currentTime)
+			}
+		}
+		logger.Info("Nodes registered but were not ready within max node startup time", "nodeGroupId", id, "nodes", sets.List(timedOutNodes))
+		csr.logRecorder.Eventf(apiv1.EventTypeWarning, "ScaleUpTimedOut",
+			"%d nodes added to group %s registered but were not ready within max node startup time", timedOut, id)
+		failedScaleUps = append(failedScaleUps, failedScaleUp{
+			nodeGroup: nodeGroup,
+			delta:     timedOut,
+			errorInfo: cloudprovider.InstanceErrorInfo{
+				ErrorClass:   cloudprovider.OtherErrorClass,
+				ErrorCode:    string(metrics.Timeout),
+				ErrorMessage: fmt.Sprintf("%d nodes of node group %v registered but were not ready within max node startup time", timedOut, id),
+			},
+		})
+	}
+	return failedScaleUps
 }
 
 // To be executed under a lock.

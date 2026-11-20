@@ -75,12 +75,14 @@ func TestStaticAutoscaler_NodeWithoutCSINodeIsUpcoming(t *testing.T) {
 	nodeGroup := "csi-ng"
 	storageClass := "sc-pd"
 	startupTimeout := 5 * time.Minute
+	backoff := time.Minute
 
 	options := integration.NewTestConfig().
 		WithOverrides(
 			integration.WithCSINodeAwareScheduling(),
 			integration.WithMaxNodeStartupTime(startupTimeout),
 			integration.WithMaxNodeProvisionTime(startupTimeout),
+			integration.WithNodeGroupBackoffDuration(backoff),
 		).
 		ResolveOptions()
 
@@ -124,9 +126,14 @@ func TestStaticAutoscaler_NodeWithoutCSINodeIsUpcoming(t *testing.T) {
 		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, time.Second)
 		assert.Equal(t, 1, fetchTargetSize(), "CA shouldn't scale up while the node without CSINode is upcoming")
 
-		// Past MaxNodeStartupTime the node is unready and no longer substituted, autoscaler goes for another scale up.
+		// Past MaxNodeStartupTime the node is unready and no longer substituted. It failed to start, so the NodeGroup
+		// is backed off instead of being scaled up again right away.
 		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, startupTimeout)
-		assert.Equal(t, 2, fetchTargetSize(), "CA should scale up one more node once the Node without CSINode stops being upcoming")
+		assert.Equal(t, 1, fetchTargetSize(), "CA shouldn't scale up the NodeGroup right after its Node failed to start")
+
+		// Once the backoff ends, autoscaler goes for another scale up.
+		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, backoff+time.Second)
+		assert.Equal(t, 2, fetchTargetSize(), "CA should scale up one more node once the NodeGroup is no longer backed off")
 
 		// The first node finally reports the CSI driver, autoscaler no longer overrides it to unready, no scale up triggered.
 		nodes := fakes.K8s.Nodes().Items
