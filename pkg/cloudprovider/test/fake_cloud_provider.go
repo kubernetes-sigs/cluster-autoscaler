@@ -257,6 +257,15 @@ func WithCloudOperationDelay(delay time.Duration) NodeGroupOption {
 	}
 }
 
+// WithFailedInstances adds count instances that the cloud provider failed to create (e.g. because of a stockout) to the node group. Like in
+// real cloud providers, the failed instances count towards the target size of the node group, are reported with a create error and never
+// register as Nodes; they stay in the node group until deleted via DeleteNodes.
+func WithFailedInstances(count int) NodeGroupOption {
+	return func(n *NodeGroup) {
+		n.addFailedInstances(count)
+	}
+}
+
 // AddNodeGroup is a helper for tests to add a group with its template.
 func (c *CloudProvider) AddNodeGroup(id string, opts ...NodeGroupOption) *NodeGroup {
 	c.Lock()
@@ -267,7 +276,7 @@ func (c *CloudProvider) AddNodeGroup(id string, opts ...NodeGroupOption) *NodeGr
 		minSize:    defaultMinSize,
 		maxSize:    defaultMaxSize,
 		targetSize: 0,
-		instances:  make(map[string]cloudprovider.InstanceState),
+		instances:  make(map[string]cloudprovider.InstanceStatus),
 		provider:   c,
 	}
 
@@ -325,8 +334,8 @@ type NodeGroup struct {
 	maxSize    int
 	targetSize int
 	template   *framework.NodeInfo
-	// instances maps instanceID -> state.
-	instances map[string]cloudprovider.InstanceState
+	// instances maps instanceID -> status.
+	instances map[string]cloudprovider.InstanceStatus
 	provider  *CloudProvider
 
 	// nodeGarbageCollectionDelay can be used to simulate Node objects hanging around in the K8s API for some time after their VMs are deleted.
@@ -439,12 +448,10 @@ func (n *NodeGroup) Nodes(ctx context.Context) ([]cloudprovider.Instance, error)
 	defer n.provider.Unlock()
 
 	var instances []cloudprovider.Instance
-	for id, state := range n.instances {
+	for id, status := range n.instances {
 		instances = append(instances, cloudprovider.Instance{
-			Id: id,
-			Status: &cloudprovider.InstanceStatus{
-				State: state,
-			},
+			Id:     id,
+			Status: &status,
 		})
 	}
 	return instances, nil
@@ -577,10 +584,28 @@ func (n *NodeGroup) setTemplateFromNodeAndPods(node *apiv1.Node, pods ...*apiv1.
 // Should be called with the NodeGroup mutex already locked, or during NodeGroup object initialization without the lock.
 func (n *NodeGroup) addNodeFromTemplate(nodeName string) *apiv1.Node {
 	node := cloneNodeForNodeGroup(n.template.Node(), n.id, nodeName)
-	n.instances[node.Spec.ProviderID] = cloudprovider.InstanceRunning
+	n.instances[node.Spec.ProviderID] = cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}
 	n.provider.nodeToGroup[node.Name] = n.id
 	n.targetSize += 1
 	return node
+}
+
+// addFailedInstances adds count instances that the cloud provider failed to create to the node group, see WithFailedInstances.
+// Should be called during NodeGroup object initialization without the locks, or with the NodeGroup and CloudProvider mutexes already locked.
+func (n *NodeGroup) addFailedInstances(count int) {
+	for i := range count {
+		nodeName := fmt.Sprintf("%s-failed-%d", n.id, i)
+		n.instances[providerIdForNode(n.id, nodeName)] = cloudprovider.InstanceStatus{
+			State: cloudprovider.InstanceCreating,
+			ErrorInfo: &cloudprovider.InstanceErrorInfo{
+				ErrorClass:   cloudprovider.OutOfResourcesErrorClass,
+				ErrorCode:    "STOCKOUT",
+				ErrorMessage: "the cloud provider failed to create the instance",
+			},
+		}
+		n.provider.nodeToGroup[nodeName] = n.id
+		n.targetSize += 1
+	}
 }
 
 // cloneNodeForNodeGroup returns a deep-copy of the provided templateNode, to be tracked by the fake CloudProvider/NodeGroup.
@@ -588,8 +613,13 @@ func (n *NodeGroup) addNodeFromTemplate(nodeName string) *apiv1.Node {
 func cloneNodeForNodeGroup(templateNode *apiv1.Node, ngName, nodeName string) *apiv1.Node {
 	node := templateNode.DeepCopy()
 	node.Name = nodeName
-	node.Spec.ProviderID = fmt.Sprintf("fake-provider/%s/%s", ngName, node.Name)
+	node.Spec.ProviderID = providerIdForNode(ngName, nodeName)
 	return node
+}
+
+// providerIdForNode returns the Spec.ProviderID (and the instance ID) of the given Node of the given NodeGroup.
+func providerIdForNode(ngName, nodeName string) string {
+	return fmt.Sprintf("fake-provider/%s/%s", ngName, nodeName)
 }
 
 // groupIdFromNodeProviderId parses the Spec.ProviderID set by cloneNodeForNodeGroup() and extracts the NodeGroup id from it.
