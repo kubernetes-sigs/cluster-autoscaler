@@ -50,6 +50,11 @@ type ClusterSnapshot interface {
 	// with the provided data. scheduledPods are correlated to their Nodes based on spec.NodeName.
 	// The provided draSnapshot and csiSnapshot are treated as the source of truth and are
 	// eagerly loaded into the internal NodeInfo and PodInfo objects.
+	//
+	// Implementations may reuse data derived from a Pod object (e.g. parsed affinity terms and
+	// resource requests) across calls while the same object is passed with the same
+	// ResourceVersion, so callers must not modify scheduledPods in place between calls: like
+	// informer caches, they should pass a new object when a pod changes.
 	SetClusterState(ctx context.Context, nodes []*apiv1.Node, scheduledPods []*apiv1.Pod, draSnapshot *drasnapshot.Snapshot, csiSnapshot *csisnapshot.Snapshot) error
 
 	// AddNodeInfo adds the given NodeInfo to the snapshot without checking scheduler predicates.
