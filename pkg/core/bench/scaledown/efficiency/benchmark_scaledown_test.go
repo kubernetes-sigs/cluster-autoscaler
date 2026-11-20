@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/bench/scaledown/efficiency/metrics"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/budgets"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/planner"
+	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/strategy"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/core/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors"
 	processorstest "sigs.k8s.io/cluster-autoscaler/pkg/processors/test"
@@ -72,7 +73,7 @@ func defaultAutoscalingOptions() config.AutoscalingOptions {
 	}
 }
 
-func buildScaleDownDependencies(b *testing.B, cs *initialClusterState, autoscalingOpts config.AutoscalingOptions) scaleDownDependencies {
+func buildScaleDownDependencies(b *testing.B, cs *initialClusterState, autoscalingOpts config.AutoscalingOptions) (scaleDownDependencies, error) {
 	b.Helper()
 	var allNodes []*apiv1.Node
 	var allPods []*apiv1.Pod
@@ -99,14 +100,20 @@ func buildScaleDownDependencies(b *testing.B, cs *initialClusterState, autoscali
 
 	a := NewFakeActuator(autoscalingCtx, &fakeActuationStatus{})
 	factory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{CustomResourcesProcessor: procs.CustomResourcesProcessor, QuotaProvider: resourcequotas.NewCloudMinProvider(provider)})
-	p := planner.New(&autoscalingCtx, procs, options.NodeDeleteOptions{}, nil, factory)
+
+	parsedStrategy, err := strategy.NewStrategy("Utilization=0.3")
+	if err != nil {
+		return scaleDownDependencies{}, err
+	}
+
+	p := planner.New(&autoscalingCtx, procs, options.NodeDeleteOptions{}, nil, factory, parsedStrategy)
 
 	return scaleDownDependencies{
 		AutoscalingCtx: &autoscalingCtx,
 		Processors:     procs,
 		Planner:        p,
 		Actuator:       a,
-	}
+	}, nil
 }
 
 // Crucial to pass -benchtime=1x to let the Loop know to run scaledown strategy exactly once.
@@ -116,7 +123,11 @@ func (scenario scaleDownScenario) run(b *testing.B) {
 		scenario.AutoscalingOptsSetup(&opts)
 	}
 	mt := scenario.MetricsTracker
-	sdDeps := buildScaleDownDependencies(b, scenario.InitialClusterState, opts)
+	sdDeps, err := buildScaleDownDependencies(b, scenario.InitialClusterState, opts)
+
+	if err != nil {
+		b.Fatalf("failed to create scaleDownDependencies, err: %s", err.Error())
+	}
 
 	nodeInfos, err := sdDeps.AutoscalingCtx.ClusterSnapshot.ListNodeInfos()
 	if err != nil {

@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/core"
 	coreoptions "sigs.k8s.io/cluster-autoscaler/pkg/core/options"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/pdb"
+	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/strategy"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/utils"
 	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/expander/factory"
@@ -70,6 +71,7 @@ func NewAutoscaler(ctx context.Context, opts coreoptions.AutoscalerOptions, info
 		opts.MinQuotasTrackerOptions,
 		opts.CSIProvider,
 		opts.CapacityBufferPodsRegistry,
+		opts.ScaleDownStrategy,
 	), nil
 }
 
@@ -164,6 +166,13 @@ func initializeDefaultOptions(ctx context.Context, opts *coreoptions.AutoscalerO
 	if opts.CSINodeAwareSchedulingEnabled {
 		csiProvider := csinodeprovider.NewCSINodeProviderFromInformers(informerFactory)
 		opts.CSIProvider = csiProvider
+	}
+	if opts.ScaleDownStrategy == nil {
+		scaleDownStrategy, err := strategy.NewStrategy(opts.AutoscalingOptions.ScaleDownStrategy)
+		if err != nil {
+			return err
+		}
+		opts.ScaleDownStrategy = scaleDownStrategy
 	}
 	return nil
 }
