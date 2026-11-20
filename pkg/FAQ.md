@@ -300,10 +300,7 @@ Status taints are defined as:
 
 Ignore taints are now deprecated and treated as startup taints.
 
-Ignore taints are defined as:
-
-* all taints with the prefix `ignore-taint.cluster-autoscaler.kubernetes.io/`,
-* all taints defined using `--ignore-taint` flag.
+Ignore taints are defined as all taints with the prefix `ignore-taint.cluster-autoscaler.kubernetes.io/`.
 
 ### How does Cluster Autoscaler handle Dynamic Resource Allocation (DRA)?
 
@@ -1018,7 +1015,6 @@ The following startup parameters are supported for cluster autoscaler:
 | `cloud-provider-gce-l7lb-src-cidrs` | CIDRs opened in GCE firewall for L7 LB traffic proxy & health checks | 130.211.0.0/22,35.191.0.0/16 |
 | `cloud-provider-gce-lb-src-cidrs` | CIDRs opened in GCE firewall for L4 LB traffic proxy & health checks | 130.211.0.0/22,209.85.152.0/22,209.85.204.0/22,35.191.0.0/16 |
 | `cluster-name` | Autoscaled cluster name, if available |  |
-| `cluster-snapshot-parallelism` | Maximum parallelism of cluster snapshot creation. | 16 |
 | `clusterapi-cloud-config-authoritative` | Treat the cloud-config flag authoritatively (do not fallback to using kubeconfig flag). ClusterAPI only |  |
 | `cordon-node-before-terminating` | Should CA cordon nodes before terminating during downscale process | true |
 | `cores-total` | Minimum and maximum number of cores in cluster, in the format <min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers. | "0:320000" |
@@ -1049,7 +1045,6 @@ The following startup parameters are supported for cluster autoscaler:
 | `grpc-expander-url` | URL to reach gRPC expander server. |  |
 | `ignore-daemonsets-utilization` | Should CA ignore DaemonSet pods when calculating resource utilization for scaling down |  |
 | `ignore-mirror-pods-utilization` | Should CA ignore Mirror pods when calculating resource utilization for scaling down |  |
-| `ignore-taint` | Specifies a taint to ignore in node templates when considering to scale a node group (Deprecated, use startup-taints instead) | [] |
 | `initial-node-group-backoff-duration` | initialNodeGroupBackoffDuration is the duration of first backoff after a new node failed to start. | 5m0s |
 | `kube-api-content-type` | Content type of requests sent to apiserver. | "application/vnd.kubernetes.protobuf" |
 | `kube-client-burst` | Burst value for kubernetes client. | 10 |
@@ -1141,7 +1136,7 @@ The following startup parameters are supported for cluster autoscaler:
 | `skip-nodes-with-custom-controller-pods` | If true cluster autoscaler will never delete nodes with pods owned by custom controllers | true |
 | `skip-nodes-with-local-storage` | If true cluster autoscaler will never delete nodes with pods with local storage, e.g. EmptyDir or HostPath | true |
 | `skip-nodes-with-system-pods` | If true cluster autoscaler will wait for --blocking-system-pod-distruption-timeout before deleting nodes with pods from kube-system (except for DaemonSet or mirror pods) | true |
-| `startup-taint` | Specifies a taint to ignore in node templates when considering to scale a node group (Equivalent to ignore-taint) | [] |
+| `startup-taint` | Specifies a taint to ignore in node templates when considering to scale a node group | [] |
 | `startup-taint-prefix` | Specifies a taint key prefix. Any taint whose key starts with this prefix will be treated as a startup taint (in addition to the built-in prefixes). Can be used multiple times. | [] |
 | `status-config-map-name` | Status configmap name | "cluster-autoscaler-status" |
 | `status-taint` | Specifies a taint to ignore in node templates when considering to scale a node group but nodes will not be treated as unready | [] |
