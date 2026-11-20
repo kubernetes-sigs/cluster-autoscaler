@@ -79,6 +79,9 @@ e2e-kwok-cluster:
 	@kubectl apply -f pkg/apis/config/crd/
 
 .PHONY: e2e-install-ca
+# --enforce-node-group-min-size=true is only for the DRA tests. It makes Cluster Autoscaler create the one
+# kind-worker-dra node that min-count "1" asks for (kwok/charts/templates/configmap.yaml). The DRA tests need
+# that real node, so Cluster Autoscaler builds the node group template from it, including its ResourceSlices.
 e2e-install-ca: image-kwok
 	@$(KIND) load docker-image cluster-autoscaler-kwok:dev --name $(E2E_CLUSTER_NAME)
 	@$(HELM) upgrade --install cluster-autoscaler --namespace kube-system ./kwok/charts/ --wait \
@@ -91,7 +94,8 @@ e2e-install-ca: image-kwok
 		--set extraArgs.enable-csi-node-aware-scheduling=false \
 		--set extraArgs.capacity-buffer-controller-enabled=true \
 		--set extraArgs.capacity-buffer-pod-injection-enabled=true \
-		--set extraArgs.bypassed-scheduler-names=non-existing-bypassed-scheduler
+		--set extraArgs.bypassed-scheduler-names=non-existing-bypassed-scheduler \
+		--set extraArgs.enforce-node-group-min-size=true
 
 .PHONY: e2e-teardown
 e2e-teardown:
