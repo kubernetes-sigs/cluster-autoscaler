@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/api"
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/scaleupfailures"
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/utils"
+	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown"
 	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
 	"sigs.k8s.io/cluster-autoscaler/pkg/observers/nodegroupchange"
@@ -388,20 +389,7 @@ func (csr *ClusterStateRegistry) updateScaleRequests(ctx context.Context, curren
 				},
 			})
 
-			// Attempt to revert the failed scale-up by decreasing target size.
-			// This prevents cloud providers from indefinitely retrying failed provisioning attempts. The cloud provider
-			// rejects decreasing the target size by the whole increase once any of the requested nodes got an instance.
-			if scaleUpRequest.Increase > 0 && unbacked >= scaleUpRequest.Increase {
-				logger.Info("Reverting timed-out scale-up for node group by decreasing target size", "nodeGroupName", nodeGroupName, "increase", scaleUpRequest.Increase)
-				err := scaleUpRequest.NodeGroup.DecreaseTargetSize(ctx, -scaleUpRequest.Increase)
-				if err != nil {
-					logger.Info("Failed to revert timed-out scale-up for node group", "nodeGroupName", nodeGroupName, "err", err)
-					csr.logRecorder.Eventf(apiv1.EventTypeWarning, "FailedToRevertScaleUp",
-						"Failed to decrease target size for group %s after scale-up timeout: %v",
-						scaleUpRequest.NodeGroup.Id(), err)
-				}
-			}
-
+			csr.revertTimedOutScaleUp(ctx, scaleUpRequest, min(scaleUpRequest.Increase, unbacked))
 			delete(csr.scaleUpRequests, nodeGroupName)
 		}
 	}
@@ -414,6 +402,34 @@ func (csr *ClusterStateRegistry) updateScaleRequests(ctx context.Context, curren
 	}
 	csr.scaleDownRequests = newScaleDownRequests
 	return failedScaleUps
+}
+
+// revertTimedOutScaleUp decreases the target size by revert to stop the cloud provider from retrying failed
+// provisioning attempts. Partial decreases are skipped for ZeroOrMaxNodeScaling node groups, whose nodes are removed as
+// a whole instead.
+func (csr *ClusterStateRegistry) revertTimedOutScaleUp(ctx context.Context, req *ScaleUpRequest, revert int) {
+	if revert <= 0 {
+		return
+	}
+	logger := klog.FromContext(ctx)
+	id := req.NodeGroup.Id()
+	if revert < csr.acceptableRanges[id].CurrentTarget {
+		opts, err := req.NodeGroup.GetOptions(ctx, config.NodeGroupAutoscalingOptions{})
+		if err != nil && !errors.Is(err, cloudprovider.ErrNotImplemented) {
+			logger.Info("Not reverting timed-out scale-up for node group: failed to get its options", "nodeGroupName", id, "err", err)
+			return
+		}
+		if opts != nil && opts.ZeroOrMaxNodeScaling {
+			logger.Info("Skipping partial revert of timed-out scale-up for ZeroOrMaxNodeScaling node group", "nodeGroupName", id, "increase", revert)
+			return
+		}
+	}
+	logger.Info("Reverting timed-out scale-up for node group by decreasing target size", "nodeGroupName", id, "increase", revert)
+	if err := req.NodeGroup.DecreaseTargetSize(ctx, -revert); err != nil {
+		logger.Info("Failed to revert timed-out scale-up for node group", "nodeGroupName", id, "err", err)
+		csr.logRecorder.Eventf(apiv1.EventTypeWarning, "FailedToRevertScaleUp",
+			"Failed to decrease target size for group %s after scale-up timeout: %v", id, err)
+	}
 }
 
 // nodesAwaitingRegistration returns how many of the nodes that the scale-up request still waits for haven't
