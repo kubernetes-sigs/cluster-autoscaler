@@ -366,13 +366,21 @@ func (csr *ClusterStateRegistry) updateScaleRequests(ctx context.Context, curren
 		}
 
 		if scaleUpRequest.ExpectedAddTime.Before(currentTime) {
+			// Only the nodes that didn't register fail the scale-up here. The ones that did have until their max node
+			// startup time to start, see handleStartupTimeouts.
+			notRegistered, unbacked := csr.nodesAwaitingRegistration(scaleUpRequest)
+			if notRegistered <= 0 {
+				logger.V(4).Info("Scale up in group registered all its nodes", "nodeGroupName", nodeGroupName, "duration", currentTime.Sub(scaleUpRequest.Time))
+				delete(csr.scaleUpRequests, nodeGroupName)
+				continue
+			}
 			logger.Info("Scale-up timed out for node group after", "nodeGroupName", nodeGroupName, "duration", currentTime.Sub(scaleUpRequest.Time))
 			csr.logRecorder.Eventf(apiv1.EventTypeWarning, "ScaleUpTimedOut",
 				"Nodes added to group %s failed to register within %v",
 				scaleUpRequest.NodeGroup.Id(), currentTime.Sub(scaleUpRequest.Time))
 			failedScaleUps = append(failedScaleUps, failedScaleUp{
 				nodeGroup: scaleUpRequest.NodeGroup,
-				delta:     scaleUpRequest.Increase,
+				delta:     min(scaleUpRequest.Increase, notRegistered),
 				errorInfo: cloudprovider.InstanceErrorInfo{
 					ErrorClass:   cloudprovider.OtherErrorClass,
 					ErrorCode:    string(metrics.Timeout),
@@ -381,8 +389,9 @@ func (csr *ClusterStateRegistry) updateScaleRequests(ctx context.Context, curren
 			})
 
 			// Attempt to revert the failed scale-up by decreasing target size.
-			// This prevents cloud providers from indefinitely retrying failed provisioning attempts.
-			if scaleUpRequest.Increase > 0 {
+			// This prevents cloud providers from indefinitely retrying failed provisioning attempts. The cloud provider
+			// rejects decreasing the target size by the whole increase once any of the requested nodes got an instance.
+			if scaleUpRequest.Increase > 0 && unbacked >= scaleUpRequest.Increase {
 				logger.Info("Reverting timed-out scale-up for node group by decreasing target size", "nodeGroupName", nodeGroupName, "increase", scaleUpRequest.Increase)
 				err := scaleUpRequest.NodeGroup.DecreaseTargetSize(ctx, -scaleUpRequest.Increase)
 				if err != nil {
@@ -405,6 +414,22 @@ func (csr *ClusterStateRegistry) updateScaleRequests(ctx context.Context, curren
 	}
 	csr.scaleDownRequests = newScaleDownRequests
 	return failedScaleUps
+}
+
+// nodesAwaitingRegistration returns how many of the nodes that the scale-up request still waits for haven't
+// registered, and how many of those aren't backed by any instance.
+func (csr *ClusterStateRegistry) nodesAwaitingRegistration(scaleUpRequest *ScaleUpRequest) (notRegistered, unbacked int) {
+	nodeGroupName := scaleUpRequest.NodeGroup.Id()
+	if csr.unknownTargetSizes[nodeGroupName] {
+		// Without the target size there is no telling which nodes are missing, so it's all of them.
+		return scaleUpRequest.Increase, scaleUpRequest.Increase
+	}
+	readiness := csr.perNodeGroupReadiness[nodeGroupName]
+	upcoming := calculateUpcomingNodesInNodeGroup(readiness, csr.acceptableRanges[nodeGroupName])
+	// Long-unregistered nodes aren't upcoming, but the ones added by this request didn't register either.
+	notRegistered = upcoming - len(readiness.NotStarted) + csr.longUnregisteredNodesSince(nodeGroupName, scaleUpRequest.IgnoreUnregisteredBefore)
+	unbacked = upcoming - len(readiness.NotStarted) - len(readiness.Unregistered)
+	return notRegistered, unbacked
 }
 
 // Doesn't need csr lock, because both templateNodeInfoRegistry and backoff are thread-safe.
@@ -669,12 +694,19 @@ func (csr *ClusterStateRegistry) areThereUpcomingNodesInNodeGroup(ctx context.Co
 		return csr.unknownTargetSizes[nodeGroupName]
 	}
 	// Long-unregistered nodes aren't upcoming, but the ones added by this request haven't fulfilled it.
+	return upcoming+csr.longUnregisteredNodesSince(nodeGroupName, ignoreUnregisteredBefore) > 0
+}
+
+// longUnregisteredNodesSince returns the number of long-unregistered nodes of the node group that were first seen at
+// the given time or later.
+func (csr *ClusterStateRegistry) longUnregisteredNodesSince(nodeGroupName string, since time.Time) int {
+	count := 0
 	for _, name := range csr.perNodeGroupReadiness[nodeGroupName].LongUnregistered {
-		if !csr.unregisteredNodes[name].UnregisteredSince.Before(ignoreUnregisteredBefore) {
-			upcoming++
+		if !csr.unregisteredNodes[name].UnregisteredSince.Before(since) {
+			count++
 		}
 	}
-	return upcoming > 0
+	return count
 }
 
 // IsNodeGroupRegistered returns true if the node group is registered in cluster state.

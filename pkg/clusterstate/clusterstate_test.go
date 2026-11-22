@@ -2860,79 +2860,6 @@ func TestExpiredScaleUpRevertsTargetSizeHandlesError(t *testing.T) {
 	}, failures)
 }
 
-func TestExpiredScaleUpRevertsPartialIncrease(t *testing.T) {
-	now := time.Now()
-
-	// Scenario: requested 4 new nodes, but only 2 came up before timeout.
-	// The revert should only decrease by the original increase (4), not by the
-	// current target size, because the code uses the recorded Increase value.
-	provider := testprovider.NewTestCloudProviderBuilder().Build()
-	mockedNodeGroup := &mockprovider.NodeGroup{}
-	mockedNodeGroup.On("Id").Return("ng1")
-	// 2 of 4 requested nodes are now running
-	mockedNodeGroup.On("Nodes").Return([]cloudprovider.Instance{
-		{Id: "ng1_1", Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}},
-		{Id: "ng1_2", Status: &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}},
-	}, nil)
-	mockedNodeGroup.On("Autoprovisioned").Return(false)
-	mockedNodeGroup.On("TargetSize").Return(5, nil) // original 1 + 4 requested = target 5
-	node := BuildTestNode("ng1_1", 1000, 1000)
-	SetNodeReadyState(node, true, now.Add(-2*time.Minute))
-	node2 := BuildTestNode("ng1_2", 1000, 1000)
-	SetNodeReadyState(node2, true, now.Add(-2*time.Minute))
-	mockedNodeGroup.On("TemplateNodeInfo").Return(framework.NewTestNodeInfo(node), nil)
-	mockedNodeGroup.On("GetOptions", mock.Anything).Return(&config.NodeGroupAutoscalingOptions{}, nil)
-	mockedNodeGroup.On("DecreaseTargetSize", -4).Return(nil)
-	provider.InsertNodeGroup(mockedNodeGroup)
-
-	fakeClient := &fake.Clientset{}
-	fakeLogRecorder, _ := utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
-	mockMetrics := &mockMetrics{}
-	mockMetrics.On("RegisterFailedScaleUp", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
-	mockMetrics.On("RegisterFailedNodeCreations", mock.Anything, mock.Anything).Return()
-	scaleUpFailuresRegistry := scaleupfailures.NewRegistry()
-	clusterstate := newTestClusterStateRegistry(
-		provider,
-		fakeLogRecorder,
-		withMetrics(mockMetrics, provider),
-		WithConfig(ClusterStateRegistryConfig{
-			MaxTotalUnreadyPercentage: 10,
-			OkTotalUnreadyCount:       1,
-		}),
-		withNotifiedScaleUpFailuresRegistry(scaleUpFailuresRegistry),
-	)
-
-	// Register scale up requesting 4 nodes that started 3 minutes ago
-	clusterstate.RegisterScaleUp(context.Background(), mockedNodeGroup, 4, now.Add(-3*time.Minute))
-
-	// UpdateNodes should detect the timeout and revert the _entire_ recorded increase
-	err := clusterstate.UpdateNodes(context.Background(), []*apiv1.Node{node, node2}, now)
-	assert.NoError(t, err)
-
-	// Verify DecreaseTargetSize was called with the full original increase,
-	// even though 2 nodes came up out of the 4
-	mockedNodeGroup.AssertCalled(t, "DecreaseTargetSize", -4)
-	mockMetrics.AssertCalled(t, "RegisterFailedScaleUp", metrics.Timeout, "", "", "")
-
-	// Verify the scale-up request was removed
-	assert.Nil(t, clusterstate.scaleUpRequests["ng1"])
-
-	failures := clusterstate.GetScaleUpFailures()
-	assert.Equal(t, map[string][]scaleupfailures.Record{
-		"ng1": {
-			{
-				ErrorInfo: cloudprovider.InstanceErrorInfo{
-					ErrorClass:   cloudprovider.OtherErrorClass,
-					ErrorCode:    string(metrics.Timeout),
-					ErrorMessage: "Scale-up timed out for node group ng1 after 3m0s",
-				},
-				Delta: 4,
-				Time:  now,
-			},
-		},
-	}, failures)
-}
-
 // newFailedScaleUpObservingRegistry creates a ClusterStateRegistry on which failed scale-ups of the node group can be
 // observed: it records events and scale-up failures, and knows the template of the node group, without which the node
 // group is never backed off. Max node provision time and max node startup time are both 15 minutes.
@@ -3115,6 +3042,133 @@ func TestNodeUnreadyOnFailedMaxNodeStartupTimeLookupIsNotStartupTimeout(t *testi
 	assert.Empty(t, recordedEvents(recorder))
 	assert.Empty(t, clusterstate.GetScaleUpFailures())
 	assert.False(t, clusterstate.BackoffStatusForNodeGroup(ctx, ng1, lookupFailed).IsBackedOff)
+}
+
+func registrationTimeoutFailure(nodes int, nodeGroupId, timedOutAfter string, failed time.Time) scaleupfailures.Record {
+	return scaleupfailures.Record{
+		ErrorInfo: cloudprovider.InstanceErrorInfo{
+			ErrorClass:   cloudprovider.OtherErrorClass,
+			ErrorCode:    string(metrics.Timeout),
+			ErrorMessage: fmt.Sprintf("Scale-up timed out for node group %s after %s", nodeGroupId, timedOutAfter),
+		},
+		Delta: nodes,
+		Time:  failed,
+	}
+}
+
+func TestExpiredScaleUpFailsOnlyNodesThatDidNotRegister(t *testing.T) {
+	testCases := []struct {
+		name string
+		// increase is the size of the scale-up of a node group that had 1 ready node.
+		increase int
+		// startingNodes is the number of requested nodes that registered and aren't ready yet.
+		startingNodes int
+		// unregisteredInstances is the number of requested nodes that got an instance which didn't register.
+		unregisteredInstances int
+		wantFailedNodes       int
+		wantTargetSize        int
+	}{
+		{
+			name:           "the requested node is starting",
+			increase:       1,
+			startingNodes:  1,
+			wantTargetSize: 2,
+		},
+		{
+			name:            "one requested node is starting, the other one didn't get an instance",
+			increase:        2,
+			startingNodes:   1,
+			wantFailedNodes: 1,
+			wantTargetSize:  3,
+		},
+		{
+			name:                  "the instance of the requested node didn't register",
+			increase:              1,
+			unregisteredInstances: 1,
+			wantFailedNodes:       1,
+			wantTargetSize:        2,
+		},
+		{
+			name:            "the requested node didn't get an instance",
+			increase:        1,
+			wantFailedNodes: 1,
+			wantTargetSize:  1,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			now := time.Now()
+			provider := testprovider.NewTestCloudProviderBuilder().WithOnScaleUp(func(string, int) error { return nil }).Build()
+			provider.AddNodeGroup("ng1", 1, 10, 1+tc.increase)
+			ng1 := provider.GetNodeGroup("ng1")
+			ready := BuildTestNode("ng1-ready", 1000, 1000)
+			SetNodeReadyState(ready, true, now.Add(-time.Hour))
+			provider.AddNode("ng1", ready)
+			nodes := []*apiv1.Node{ready}
+			for i := range tc.startingNodes {
+				starting := buildNotReadyNode(fmt.Sprintf("ng1-starting-%d", i), now.Add(time.Minute))
+				provider.AddNode("ng1", starting)
+				nodes = append(nodes, starting)
+			}
+			for i := range tc.unregisteredInstances {
+				provider.AddNode("ng1", BuildTestNode(fmt.Sprintf("ng1-unregistered-%d", i), 1000, 1000))
+			}
+			clusterstate, recorder := newFailedScaleUpObservingRegistry(t, provider, "ng1")
+
+			clusterstate.RegisterScaleUp(ctx, ng1, tc.increase, now)
+			assert.NoError(t, clusterstate.UpdateNodes(ctx, nodes, now.Add(time.Minute)))
+			expectedAddTimePassed := now.Add(15*time.Minute + time.Second)
+			assert.NoError(t, clusterstate.UpdateNodes(ctx, nodes, expectedAddTimePassed))
+
+			var wantEvents []string
+			var wantFailures []scaleupfailures.Record
+			if tc.wantFailedNodes > 0 {
+				wantEvents = []string{"Warning ScaleUpTimedOut Nodes added to group ng1 failed to register within 15m1s"}
+				wantFailures = []scaleupfailures.Record{registrationTimeoutFailure(tc.wantFailedNodes, "ng1", "15m1s", expectedAddTimePassed)}
+			}
+			assert.Equal(t, wantEvents, recordedEvents(recorder))
+			assert.Equal(t, wantFailures, clusterstate.GetScaleUpFailures()["ng1"])
+			assert.Equal(t, tc.wantFailedNodes > 0, clusterstate.BackoffStatusForNodeGroup(ctx, ng1, expectedAddTimePassed).IsBackedOff)
+			// The target size is only decreased if none of the requested nodes has an instance.
+			gotTargetSize, err := ng1.TargetSize(ctx)
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantTargetSize, gotTargetSize)
+			assert.False(t, clusterstate.HasNodeGroupStartedScaleUp("ng1"))
+		})
+	}
+}
+
+func TestScaleUpTimesOutWhileTargetSizeIsUnknown(t *testing.T) {
+	ctx := t.Context()
+	now := time.Now()
+
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	provider.AddNodeGroup("healthy", 1, 10, 1)
+	healthyNode := BuildTestNode("healthy-1", 1000, 1000)
+	SetNodeReadyState(healthyNode, true, now.Add(-time.Hour))
+	provider.AddNode("healthy", healthyNode)
+	broken := &mockprovider.NodeGroup{}
+	broken.On("Id").Return("broken")
+	broken.On("TargetSize", mock.Anything).Return(0, fmt.Errorf("rate limit exceeded"))
+	broken.On("Nodes", mock.Anything).Return([]cloudprovider.Instance{}, nil)
+	broken.On("Autoprovisioned").Return(false)
+	broken.On("GetOptions", mock.Anything).Return(&config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute, MaxNodeStartupTime: 15 * time.Minute}, nil)
+	broken.On("DecreaseTargetSize", mock.Anything).Return(nil)
+	provider.InsertNodeGroup(broken)
+	clusterstate, recorder := newFailedScaleUpObservingRegistry(t, provider, "broken")
+
+	clusterstate.RegisterScaleUp(ctx, broken, 2, now)
+	assert.NoError(t, clusterstate.UpdateNodes(ctx, []*apiv1.Node{healthyNode}, now.Add(time.Minute)))
+	expectedAddTimePassed := now.Add(15*time.Minute + time.Second)
+	assert.NoError(t, clusterstate.UpdateNodes(ctx, []*apiv1.Node{healthyNode}, expectedAddTimePassed))
+
+	// Without the target size there is no telling which nodes are missing, so the whole scale-up fails and is reverted.
+	assert.Equal(t, []string{"Warning ScaleUpTimedOut Nodes added to group broken failed to register within 15m1s"}, recordedEvents(recorder))
+	assert.Equal(t, map[string][]scaleupfailures.Record{"broken": {registrationTimeoutFailure(2, "broken", "15m1s", expectedAddTimePassed)}}, clusterstate.GetScaleUpFailures())
+	assert.True(t, clusterstate.BackoffStatusForNodeGroup(ctx, broken, expectedAddTimePassed).IsBackedOff)
+	assert.False(t, clusterstate.HasNodeGroupStartedScaleUp("broken"))
+	broken.AssertCalled(t, "DecreaseTargetSize", -2)
 }
 
 // withNotifiedScaleUpFailuresRegistry sets ScaleUpFailures registry for the ClusterStateRegistry and registers it in the list of observers.
