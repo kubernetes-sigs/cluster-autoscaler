@@ -34,7 +34,11 @@ func createReplicaSetControllers(ctx context.Context, autoscalingCtx *ca_context
 		return controllers
 	}
 	for _, replicaSet := range replicaSets {
-		controllers = append(controllers, controller{uid: replicaSet.UID, desiredReplicas: desiredReplicasFromReplicaSet(replicaSet)})
+		controllers = append(controllers, controller{
+			uid:             replicaSet.UID,
+			namespace:       replicaSet.Namespace,
+			desiredReplicas: desiredReplicasFromReplicaSet(replicaSet),
+		})
 	}
 	return controllers
 }
