@@ -68,6 +68,11 @@ func TestMain(m *testing.M) {
 		if err := CleanUpNodeGroup(ctx, client, testCfg.NodeGroup); err != nil {
 			return ctx, err
 		}
+		if testCfg.DRANodeGroup != "" {
+			if err := CleanUpNodeGroup(ctx, client, testCfg.DRANodeGroup); err != nil {
+				return ctx, err
+			}
+		}
 		return ctx, nil
 	})
 
