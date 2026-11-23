@@ -1393,37 +1393,16 @@ and CA no longer compile using go 1.16).
 
 ### How can I run e2e tests?
 
-1. Set up environment and build e2e.go as described in the [Kubernetes docs](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-testing/e2e-tests.md#building-and-running-the-tests).
-2. Set up the following env variables:
+Cluster Autoscaler e2e tests are located in [`test/e2e`](../test/e2e) and run against a
+local Kind cluster backed by the [KWOK](https://kwok.sigs.k8s.io/) cloud provider. From the
+repository root, run:
 
-    ```sh
-    export KUBE_AUTOSCALER_MIN_NODES=3
-    export KUBE_AUTOSCALER_MAX_NODES=6
-    export KUBE_ENABLE_CLUSTER_AUTOSCALER=true
-    export KUBE_AUTOSCALER_ENABLE_SCALE_DOWN=true
-    ```
+```sh
+make run-e2e
+```
 
-    This is the minimum number of nodes required for all e2e tests to pass. The tests should also pass if you set higher maximum nodes limit.
-3. Run `go run hack/e2e.go -- --verbose-commands --up` to bring up your cluster.
-4. SSH to the control plane (previously referred to as master) node and edit `/etc/kubernetes/manifests/cluster-autoscaler.manifest` (you will need sudo for this).
-    * If you want to test your custom changes set `image` to point at your own CA image.
-    * Make sure `--scale-down-enabled` parameter in `command` is set to `true`.
-5. Run CA tests with:
-
-    ```sh
-    go run hack/e2e.go -- --verbose-commands --test --test_args="--ginkgo.focus=\[Feature:ClusterSizeAutoscaling"
-    ```
-
-    It will take >1 hour to run the full suite. You may want to redirect output to file, as there will be plenty of it.
-
-    Test runner may be missing default credentials. On GCE they can be provided with:
-
-    ```sh
-    gcloud beta auth application-default login
-    ```
-
-A few tests are specific to GKE and will be skipped if you're running on a
-different provider.
+See [`test/e2e/README.md`](../test/e2e/README.md) for details, including a step-by-step workflow
+for local development.
 
 Please open an issue if you find a failing or flaky test (a PR will be even more welcome).
 
