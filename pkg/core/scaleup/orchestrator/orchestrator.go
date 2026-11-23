@@ -117,7 +117,7 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 			markedEquivalenceGroups := markAllGroupsAsUnschedulable(podEquivalenceGroups, ScaleUpExecutionErrorReason)
 			return status.UpdateScaleUpError(
 				&status.ScaleUpStatus{
-					PodsRemainUnschedulable: o.GetRemainingPods(ctx, markedEquivalenceGroups, nodeGroups, map[string]status.Reasons{}, nodeInfos),
+					PodsRemainUnschedulable: o.GetRemainingPods(markedEquivalenceGroups, map[string]status.Reasons{}),
 				},
 				errors.ToAutoscalerError(errors.InternalError, err),
 			)
@@ -132,7 +132,7 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 		markedEquivalenceGroups := markAllGroupsAsUnschedulable(podEquivalenceGroups, ScaleUpExecutionErrorReason)
 		return status.UpdateScaleUpError(
 			&status.ScaleUpStatus{
-				PodsRemainUnschedulable: o.GetRemainingPods(ctx, markedEquivalenceGroups, nodeGroups, map[string]status.Reasons{}, nodeInfos),
+				PodsRemainUnschedulable: o.GetRemainingPods(markedEquivalenceGroups, map[string]status.Reasons{}),
 			},
 			errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("could not create quotas tracker: "),
 		)
@@ -175,7 +175,7 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 				CreateNodeGroupResults:  plan.createNodeGroupResults,
 				FailedResizeNodeGroups:  failedNodeGroups,
 				PodsTriggeredScaleUp:    plan.bestOption.Pods,
-				PodsRemainUnschedulable: o.GetRemainingPods(ctx, markedEquivalenceGroups, plan.nodeGroups, skippedNodeGroups, nodeInfos),
+				PodsRemainUnschedulable: o.GetRemainingPods(markedEquivalenceGroups, skippedNodeGroups),
 			},
 			aErr,
 		)
@@ -185,7 +185,7 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 	return &status.ScaleUpStatus{
 		Result:                  status.ScaleUpSuccessful,
 		ScaleUpInfos:            plan.scaleUpInfos,
-		PodsRemainUnschedulable: o.GetRemainingPods(ctx, podEquivalenceGroups, plan.nodeGroups, skippedNodeGroups, nodeInfos),
+		PodsRemainUnschedulable: o.GetRemainingPods(podEquivalenceGroups, skippedNodeGroups),
 		ConsideredNodeGroups:    plan.nodeGroups,
 		CreateNodeGroupResults:  plan.createNodeGroupResults,
 		PodsTriggeredScaleUp:    plan.bestOption.Pods,
@@ -795,66 +795,20 @@ func (o *ScaleUpOrchestrator) ComputeSimilarNodeGroups(
 }
 
 // GetRemainingPods returns information about pods which CA is unable to help
-// at this moment.
-func (o *ScaleUpOrchestrator) GetRemainingPods(ctx context.Context, egs []*equivalence.PodGroup, nodeGroups []cloudprovider.NodeGroup, skipped map[string]status.Reasons, nodeInfos map[string]*framework.NodeInfo) []status.NoScaleUpInfo {
-	if !o.autoscalingCtx.ScaleUpSimulationForSkippedNodeGroupsEnabled {
-		remaining := []status.NoScaleUpInfo{}
-		for _, eg := range egs {
-			if eg.Schedulable {
-				continue
-			}
-			for _, pod := range eg.Pods {
-				noScaleUpInfo := status.NoScaleUpInfo{
-					Pod:                pod,
-					RejectedNodeGroups: eg.SchedulingErrors,
-					SkippedNodeGroups:  skipped,
-				}
-				remaining = append(remaining, noScaleUpInfo)
-			}
-		}
-		return remaining
-	}
-	// If ScaleUpSimulationForSkippedNodeGroupsEnabled is true we perform the SchedulablePodGroups simulation for the skipped node groups.
-	// We will also report how much time does this simulation take.
-	skippedNodeGroupsSimulationStart := time.Now()
-	nonSchedulableEgs := []*equivalence.PodGroup{}
-	for _, eg := range egs {
-		// there is no need to run the simulation for the schedulable pod groups, because for them we still do not return anything.
-		if !eg.Schedulable {
-			nonSchedulableEgs = append(nonSchedulableEgs, eg.Clone())
-		}
-	}
-	noScaleUpInfosAfterSimulation := o.getRemainingPodsConsideringSkippedNodeGroups(ctx, nonSchedulableEgs, nodeGroups, skipped, nodeInfos)
-	metrics.UpdateDurationFromStart(ctx, metrics.SkipNodeGroupSimulation, skippedNodeGroupsSimulationStart)
-	return noScaleUpInfosAfterSimulation
-}
-
-func (o *ScaleUpOrchestrator) getRemainingPodsConsideringSkippedNodeGroups(ctx context.Context, egs []*equivalence.PodGroup, nodeGroups []cloudprovider.NodeGroup, skipped map[string]status.Reasons, nodeInfos map[string]*framework.NodeInfo) []status.NoScaleUpInfo {
-	logger := klog.FromContext(ctx)
+// at this moment. Every remaining pod is reported with the full set of skipped
+// node groups; attributing skipped node groups to the pods that could actually
+// use them is done off the main loop by the skippednodegroups status processor.
+func (o *ScaleUpOrchestrator) GetRemainingPods(egs []*equivalence.PodGroup, skipped map[string]status.Reasons) []status.NoScaleUpInfo {
 	remaining := []status.NoScaleUpInfo{}
-	// Perform the SchedulablePodGroups simulation for the skipped node groups.
-	for _, nodeGroup := range nodeGroups {
-		nodeGroupId := nodeGroup.Id()
-		if _, found := skipped[nodeGroupId]; !found {
-			continue
-		}
-		nodeInfo, found := nodeInfos[nodeGroupId]
-		if !found {
-			logger.Error(nil, "No node info for node group", "nodeGroupId", nodeGroupId)
-			continue
-		}
-		// We ignore the return value here, because we are not interested in which egs are now (theoretically) schedulable or not. We are only interested in the rejected node groups per eg.
-		_ = o.SchedulablePodGroups(ctx, egs, nodeGroup, nodeInfo)
-	}
-	// For all egs here we need to generate the NoScaleUpInfo object because we only considered egs that are unschedulable in the first place.
-	// eg.SchedulingErrors will contain scheduling errors of this eg for not skipped nodegroups from the previous simulation + errors for skipped nodegroups from current simulation.
 	for _, eg := range egs {
-		skippedNGsPerEg := findSkippedNodeGroupsSatisfyingPodPredicates(eg, skipped)
+		if eg.Schedulable {
+			continue
+		}
 		for _, pod := range eg.Pods {
 			noScaleUpInfo := status.NoScaleUpInfo{
 				Pod:                pod,
 				RejectedNodeGroups: eg.SchedulingErrors,
-				SkippedNodeGroups:  skippedNGsPerEg,
+				SkippedNodeGroups:  skipped,
 			}
 			remaining = append(remaining, noScaleUpInfo)
 		}
@@ -889,7 +843,7 @@ func deletePodEquivalenceGroupsId(podEquivalenceGroups []*equivalence.PodGroup, 
 func (o *ScaleUpOrchestrator) noOptionsAvailableStatus(ctx context.Context, args scaleUpCtx) *status.ScaleUpStatus {
 	return &status.ScaleUpStatus{
 		Result:                  status.ScaleUpNoOptionsAvailable,
-		PodsRemainUnschedulable: o.GetRemainingPods(ctx, args.podEquivalenceGroups, args.nodeGroups, args.skippedNodeGroups, args.nodeInfos),
+		PodsRemainUnschedulable: o.GetRemainingPods(args.podEquivalenceGroups, args.skippedNodeGroups),
 		ConsideredNodeGroups:    args.nodeGroups,
 	}
 }
@@ -900,18 +854,6 @@ func (o *ScaleUpOrchestrator) abortAllOrNothing(ctx context.Context, args scaleU
 	logger.V(1).Info("Not attempting scale-up due to all-or-nothing strategy: not all pods would be accommodated")
 	args.podEquivalenceGroups = markAllGroupsAsUnschedulable(args.podEquivalenceGroups, AllOrNothingReason)
 	return o.noOptionsAvailableStatus(ctx, args)
-}
-
-func findSkippedNodeGroupsSatisfyingPodPredicates(eg *equivalence.PodGroup, skipped map[string]status.Reasons) map[string]status.Reasons {
-	matchingNodeGroups := make(map[string]status.Reasons)
-	for skippedNodeGroupId, skipReason := range skipped {
-		// if a node group is in skipped and for this eg it is not in scheduling errors, it means that it will stay in skipped, because it satisfies the pod predicates.
-		if _, hasPredicateError := eg.SchedulingErrors[skippedNodeGroupId]; !hasPredicateError {
-			matchingNodeGroups[skippedNodeGroupId] = skipReason
-			klog.V(4).Infof("Skipped node group %s satisfies pod predicates of %s pod's equivalence group", skippedNodeGroupId, eg.Pods[0].Name)
-		}
-	}
-	return matchingNodeGroups
 }
 
 func matchingSchedulablePodGroups(podGroups []estimator.PodEquivalenceGroup, similarPodGroups []estimator.PodEquivalenceGroup) bool {
@@ -1101,7 +1043,7 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 		st, err := status.UpdateScaleUpError(
 			&status.ScaleUpStatus{
 				PodsTriggeredScaleUp:    bestOption.Pods,
-				PodsRemainUnschedulable: o.GetRemainingPods(ctx, markedEquivalenceGroups, args.nodeGroups, args.skippedNodeGroups, args.nodeInfos),
+				PodsRemainUnschedulable: o.GetRemainingPods(markedEquivalenceGroups, args.skippedNodeGroups),
 			},
 			aErr,
 		)
@@ -1114,7 +1056,7 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 		st, err := status.UpdateScaleUpError(
 			&status.ScaleUpStatus{
 				PodsTriggeredScaleUp:    bestOption.Pods,
-				PodsRemainUnschedulable: o.GetRemainingPods(ctx, markedEquivalenceGroups, args.nodeGroups, args.skippedNodeGroups, args.nodeInfos),
+				PodsRemainUnschedulable: o.GetRemainingPods(markedEquivalenceGroups, args.skippedNodeGroups),
 			},
 			aErr,
 		)
@@ -1156,7 +1098,7 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 			&status.ScaleUpStatus{
 				CreateNodeGroupResults:  createNodeGroupResults,
 				PodsTriggeredScaleUp:    bestOption.Pods,
-				PodsRemainUnschedulable: o.GetRemainingPods(ctx, markedEquivalenceGroups, args.nodeGroups, args.skippedNodeGroups, args.nodeInfos),
+				PodsRemainUnschedulable: o.GetRemainingPods(markedEquivalenceGroups, args.skippedNodeGroups),
 			},
 			aErr,
 		)
