@@ -27,6 +27,8 @@ import (
 	"k8s.io/client-go/informers"
 	clientsetfake "k8s.io/client-go/kubernetes/fake"
 	schedulerconfiglatest "k8s.io/kubernetes/pkg/scheduler/apis/config/latest"
+	"k8s.io/utils/clock"
+	clocktesting "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	testprovider "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
@@ -61,6 +63,7 @@ var (
 // NodeInfos and an AutoscalingContext with the feature enabled.
 type testFixture struct {
 	t         *testing.T
+	clock     *clocktesting.FakePassiveClock
 	evaluator *Evaluator
 	processor *ScaleUpStatusProcessor
 	provider  *testprovider.TestCloudProvider
@@ -70,7 +73,9 @@ type testFixture struct {
 
 func newTestFixture(t *testing.T, modify func(*EvaluatorOptions)) *testFixture {
 	t.Helper()
+	fakeClock := clocktesting.NewFakePassiveClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	opts := DefaultEvaluatorOptions()
+	opts.Clock = fakeClock
 	opts.PairsPerSecond = 0 // Unlimited: tests should not depend on the limiter.
 	if modify != nil {
 		modify(&opts)
@@ -84,6 +89,7 @@ func newTestFixture(t *testing.T, modify func(*EvaluatorOptions)) *testFixture {
 	provider.AddNodeGroup(noTemplateGroup, 0, 10, 0)
 	f := &testFixture{
 		t:         t,
+		clock:     fakeClock,
 		evaluator: evaluator,
 		processor: NewScaleUpStatusProcessor(evaluator),
 		provider:  provider,
@@ -190,7 +196,7 @@ func TestProcessIsNoOpWhenDisabled(t *testing.T) {
 	assert.False(t, f.evaluator.HasPendingJob())
 }
 
-func TestProcessFirstLoopThenNextLoop(t *testing.T) {
+func TestProcessColdThenWarm(t *testing.T) {
 	f := newTestFixture(t, nil)
 	pods := []*apiv1.Pod{smallPod("small-1"), smallPod("small-2"), bigPod("big-1"), selectorPod("selector-1")}
 
@@ -201,22 +207,22 @@ func TestProcessFirstLoopThenNextLoop(t *testing.T) {
 		assert.Empty(t, ns.RejectedNodeGroups, "pod %d", i)
 	}
 	assert.True(t, f.evaluator.HasPendingJob())
-	evaluatedPairs, completedJobs, published := f.evaluator.Stats()
+	evaluatedPairs, completedJobs, cacheSize := f.evaluator.Stats()
 	assert.Equal(t, 0, evaluatedPairs)
 	assert.Equal(t, 0, completedJobs)
-	assert.Equal(t, 0, published)
+	assert.Equal(t, 0, cacheSize)
 
-	// The worker evaluates 3 pod groups x 2 skipped node groups and publishes one verdict per pod and node group.
+	// The worker evaluates 3 pod groups x 2 skipped node groups.
 	assert.Equal(t, 6, f.evaluator.ProcessPendingNow(context.Background()))
 	assert.False(t, f.evaluator.HasPendingJob())
-	evaluatedPairs, completedJobs, published = f.evaluator.Stats()
+	evaluatedPairs, completedJobs, cacheSize = f.evaluator.Stats()
 	assert.Equal(t, 6, evaluatedPairs)
 	assert.Equal(t, 1, completedJobs)
-	assert.Equal(t, 8, published)
+	assert.Equal(t, 8, cacheSize, "one verdict per pod and node group")
 
-	// Second loop: the published verdicts are applied, and the current pairs are handed over again.
+	// Second loop: verdicts are applied from the cache, nothing new is queued.
 	st = f.process(pods...)
-	assert.True(t, f.evaluator.HasPendingJob(), "every loop hands its pairs to the worker")
+	assert.False(t, f.evaluator.HasPendingJob())
 	small1, small2, big, selector := st.PodsRemainUnschedulable[0], st.PodsRemainUnschedulable[1], st.PodsRemainUnschedulable[2], st.PodsRemainUnschedulable[3]
 
 	// Small pods fit both templates: both node groups stay skipped, with the original reasons.
@@ -267,24 +273,24 @@ func TestProcessKeepsExistingRejectionsAndUnknownNodeGroups(t *testing.T) {
 	assert.Len(t, skipped, 3)
 }
 
-func TestNewReplicaOfKnownGroupIsServedImmediately(t *testing.T) {
+func TestVerdictSurvivesTemplateRegeneration(t *testing.T) {
 	f := newTestFixture(t, nil)
-	f.process(bigPod("big-1"))
+	pod := bigPod("big-1")
+	f.process(pod)
 	f.evaluator.ProcessPendingNow(context.Background())
 
-	// big-2 has never been evaluated, but it is in the same equivalence group as big-1.
-	st := f.process(bigPod("big-1"), bigPod("big-2"))
-	for i, ns := range st.PodsRemainUnschedulable {
-		assert.ElementsMatch(t, []string{smallNodeGroup}, keys(ns.RejectedNodeGroups), "pod %d", i)
-	}
+	// Template NodeInfos are rebuilt every loop under a new random name that is also written into the
+	// hostname label; that must not invalidate the verdicts.
+	renamed := templateNode("small-template-other-name", 1000, 1000, nil, nil)
+	renamed.Labels[apiv1.LabelHostname] = renamed.Name
+	f.setTemplate(smallNodeGroup, renamed)
 
-	// A group none of whose pods has been evaluated stays unknown.
-	st = f.process(bigPod("big-3"))
-	assert.Equal(t, allSkipReasons, st.PodsRemainUnschedulable[0].SkippedNodeGroups)
-	assert.Empty(t, st.PodsRemainUnschedulable[0].RejectedNodeGroups)
+	st := f.process(pod)
+	assert.False(t, f.evaluator.HasPendingJob(), "renamed template must hit the cache")
+	assert.ElementsMatch(t, []string{smallNodeGroup}, keys(st.PodsRemainUnschedulable[0].RejectedNodeGroups))
 }
 
-func TestTemplateChangeIsPickedUpByNextEvaluation(t *testing.T) {
+func TestTemplateChangeInvalidatesVerdict(t *testing.T) {
 	f := newTestFixture(t, nil)
 	pod := bigPod("big-1")
 	f.process(pod)
@@ -292,34 +298,71 @@ func TestTemplateChangeIsPickedUpByNextEvaluation(t *testing.T) {
 	st := f.process(pod)
 	assert.ElementsMatch(t, []string{smallNodeGroup}, keys(st.PodsRemainUnschedulable[0].RejectedNodeGroups))
 
-	// The small node group gets a bigger machine type. Verdicts are keyed by node group id, so the
-	// previous verdict is applied until the next evaluation, which sees the new template.
+	// The small node group gets a bigger machine type: the pair is unknown again (left skipped) until the
+	// worker has looked at the new template, after which the pod fits and the node group stays skipped.
 	f.setTemplate(smallNodeGroup, templateNode("small-template", 8000, 8000, nil, nil))
-	f.evaluator.ProcessPendingNow(context.Background()) // Drop the job queued with the old template.
 	st = f.process(pod)
-	assert.ElementsMatch(t, []string{smallNodeGroup}, keys(st.PodsRemainUnschedulable[0].RejectedNodeGroups))
-	f.evaluator.ProcessPendingNow(context.Background())
+	assert.Equal(t, allSkipReasons, st.PodsRemainUnschedulable[0].SkippedNodeGroups)
+	assert.True(t, f.evaluator.HasPendingJob())
+	assert.Equal(t, 1, f.evaluator.ProcessPendingNow(context.Background()), "only the changed template should be re-evaluated")
 
 	st = f.process(pod)
 	assert.Equal(t, allSkipReasons, st.PodsRemainUnschedulable[0].SkippedNodeGroups)
 	assert.Empty(t, st.PodsRemainUnschedulable[0].RejectedNodeGroups)
 }
 
-func TestVerdictsOfVanishedPodsAreDropped(t *testing.T) {
+func TestStaleVerdictsAreAppliedAndRefreshed(t *testing.T) {
 	f := newTestFixture(t, nil)
-	f.process(bigPod("big-1"))
+	pod := bigPod("big-1")
+	f.process(pod)
 	f.evaluator.ProcessPendingNow(context.Background())
-	_, _, published := f.evaluator.Stats()
-	assert.Equal(t, 2, published)
 
-	// The next evaluation only covers the selector pod: its verdicts replace the previous ones.
-	f.process(selectorPod("selector-1"))
+	f.clock.SetTime(f.clock.Now().Add(DefaultRefreshAfter + time.Second))
+	st := f.process(pod)
+	// The old verdict is still applied (never regress to unknown)...
+	assert.ElementsMatch(t, []string{smallNodeGroup}, keys(st.PodsRemainUnschedulable[0].RejectedNodeGroups))
+	// ...and a refresh is queued for both pairs.
+	assert.True(t, f.evaluator.HasPendingJob())
+	assert.Equal(t, 2, f.evaluator.ProcessPendingNow(context.Background()))
+
+	// Fresh again: nothing queued.
+	f.process(pod)
+	assert.False(t, f.evaluator.HasPendingJob())
+}
+
+func TestIdleVerdictsAreEvicted(t *testing.T) {
+	// No background refresh here, so that a pending job unambiguously means "unknown pair".
+	f := newTestFixture(t, func(o *EvaluatorOptions) { o.RefreshAfter = 10 * DefaultEvictAfter })
+	first := bigPod("big-1")
+	f.process(first)
 	f.evaluator.ProcessPendingNow(context.Background())
-	_, _, published = f.evaluator.Stats()
-	assert.Equal(t, 2, published)
+	_, _, cacheSize := f.evaluator.Stats()
+	assert.Equal(t, 2, cacheSize)
 
-	st := f.process(bigPod("big-1"))
-	assert.Empty(t, st.PodsRemainUnschedulable[0].RejectedNodeGroups, "verdicts of the vanished pod must be gone")
+	// Still used within EvictAfter: the sweep after the next job keeps the verdicts.
+	f.clock.SetTime(f.clock.Now().Add(DefaultEvictAfter / 2))
+	f.process(first)
+	f.clock.SetTime(f.clock.Now().Add(DefaultEvictAfter/2 + time.Second))
+	others := []*apiv1.Pod{smallPod("small-1"), selectorPod("selector-1")}
+	f.process(others...)
+	f.evaluator.ProcessPendingNow(context.Background())
+	_, _, cacheSize = f.evaluator.Stats()
+	assert.Equal(t, 6, cacheSize, "verdicts looked up within EvictAfter must survive the sweep")
+
+	// Nobody asks for the first pod for EvictAfter: the sweep after the next job drops its verdicts
+	// and keeps the ones that were looked up.
+	f.clock.SetTime(f.clock.Now().Add(DefaultEvictAfter + time.Second))
+	f.process(others...)
+	otherController := BuildTestPod("other-1", 4000, 100*1024*1024, MarkUnschedulable(), WithControllerOwnerRef("other-rs", "ReplicaSet", "other-rs-uid"))
+	f.process(otherController)
+	f.evaluator.ProcessPendingNow(context.Background())
+	_, _, cacheSize = f.evaluator.Stats()
+	assert.Equal(t, 6, cacheSize, "idle verdicts must be gone (2), used (4) and new (2) ones must stay")
+
+	f.process(others...)
+	assert.False(t, f.evaluator.HasPendingJob(), "fresh verdicts must still be cached")
+	f.process(first)
+	assert.True(t, f.evaluator.HasPendingJob(), "idle verdicts must have been evicted")
 }
 
 func TestPairBudgetServesBiggestPodGroupsDeterministically(t *testing.T) {
@@ -331,7 +374,7 @@ func TestPairBudgetServesBiggestPodGroupsDeterministically(t *testing.T) {
 	assert.Equal(t, 4, f.evaluator.ProcessPendingNow(context.Background()), "only 2 groups x 2 templates should be evaluated")
 	for loop := 0; loop < 3; loop++ {
 		st := f.process(pods...)
-		assert.Equal(t, 4, f.evaluator.ProcessPendingNow(context.Background()), "the same groups must be served every loop")
+		assert.False(t, f.evaluator.HasPendingJob(), "the same groups must be served every loop")
 		selector, big, small := st.PodsRemainUnschedulable[0], st.PodsRemainUnschedulable[1], st.PodsRemainUnschedulable[4]
 		assert.Equal(t, allSkipReasons, selector.SkippedNodeGroups, "the smallest group is beyond the budget and stays untouched")
 		assert.Empty(t, selector.RejectedNodeGroups)
@@ -342,22 +385,57 @@ func TestPairBudgetServesBiggestPodGroupsDeterministically(t *testing.T) {
 	// Without a budget the selector group is attributed too.
 	f.evaluator.opts.MaxPairsPerLoop = 0
 	f.process(pods...)
-	assert.Equal(t, 6, f.evaluator.ProcessPendingNow(context.Background()))
+	assert.Equal(t, 2, f.evaluator.ProcessPendingNow(context.Background()))
 	st := f.process(pods...)
 	assert.ElementsMatch(t, []string{smallNodeGroup}, keys(st.PodsRemainUnschedulable[0].RejectedNodeGroups))
 }
 
-func TestNewestJobWins(t *testing.T) {
+func TestPendingJobsAreMerged(t *testing.T) {
 	f := newTestFixture(t, nil)
 	older, newer := bigPod("big-1"), selectorPod("selector-1")
+	// Two statuses in one loop with different pods (e.g. two scale-up salvo iterations): the second
+	// one is merged into the pending job instead of replacing it.
 	f.process(older)
-	f.process(newer) // Replaces the pending job before the worker picked it up.
-	assert.Equal(t, 2, f.evaluator.ProcessPendingNow(context.Background()), "only the newest job should be evaluated")
+	f.process(newer)
+	assert.Equal(t, 4, f.evaluator.ProcessPendingNow(context.Background()), "the pairs of both statuses should be evaluated")
+	f.process(newer)
+	assert.False(t, f.evaluator.HasPendingJob())
+	f.process(older)
+	assert.False(t, f.evaluator.HasPendingJob(), "the pairs of the older status must not have been dropped")
+}
 
-	st := f.process(older)
-	assert.Empty(t, st.PodsRemainUnschedulable[0].RejectedNodeGroups, "the dropped job's pairs are unknown")
-	st = f.process(newer)
-	assert.ElementsMatch(t, []string{smallNodeGroup}, keys(st.PodsRemainUnschedulable[0].RejectedNodeGroups))
+func TestOverlappingStatusesEvaluateEachPairOnce(t *testing.T) {
+	f := newTestFixture(t, nil)
+	// Salvo iterations see shrinking, overlapping sets of pods.
+	f.process(bigPod("big-1"), selectorPod("selector-1"))
+	f.process(selectorPod("selector-1"))
+	assert.Equal(t, 4, f.evaluator.ProcessPendingNow(context.Background()), "shared pairs must be evaluated once")
+}
+
+func TestPendingJobsRespectPairBudget(t *testing.T) {
+	f := newTestFixture(t, func(o *EvaluatorOptions) { o.MaxPairsPerLoop = 2 })
+	f.process(bigPod("big-1"))
+	f.process(selectorPod("selector-1"))
+	assert.Equal(t, 2, f.evaluator.ProcessPendingNow(context.Background()), "the merged job is bounded by MaxPairsPerLoop")
+	f.process(selectorPod("selector-1"))
+	assert.False(t, f.evaluator.HasPendingJob(), "the newest pairs go first")
+	f.process(bigPod("big-1"))
+	assert.True(t, f.evaluator.HasPendingJob(), "pairs beyond the budget are requested again")
+}
+
+func TestRunningJobYieldsAndRequeuesItsRest(t *testing.T) {
+	f := newTestFixture(t, nil)
+	// The worker picks up a job for two templates...
+	f.process(bigPod("big-1"))
+	running := f.evaluator.takePending()
+	// ...and a newer status arrives before it reaches the second template.
+	f.process(selectorPod("selector-1"))
+	assert.Equal(t, 1, f.evaluator.processJob(context.Background(), running), "the running job should yield after its first template")
+	assert.Equal(t, 3, f.evaluator.ProcessPendingNow(context.Background()), "the newer pairs and the rest of the yielded job should be evaluated")
+	f.process(bigPod("big-1"))
+	assert.False(t, f.evaluator.HasPendingJob(), "the yielded job's rest must not have been dropped")
+	f.process(selectorPod("selector-1"))
+	assert.False(t, f.evaluator.HasPendingJob())
 }
 
 func TestPodsWithResourceClaimsAreNotEvaluated(t *testing.T) {
@@ -412,7 +490,7 @@ func TestStatusWithoutRemainingPodsIsIgnored(t *testing.T) {
 // detector: the evaluator goroutine runs predicate checks on its own handle while the "main loop" keeps
 // running predicate checks on the main handle and feeding statuses to the processor.
 func TestWorkerRunsConcurrentlyWithMainLoopPredicateChecks(t *testing.T) {
-	f := newTestFixture(t, nil)
+	f := newTestFixture(t, func(o *EvaluatorOptions) { o.Clock = clock.RealClock{} })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go f.evaluator.Run(ctx)
@@ -434,6 +512,9 @@ func TestWorkerRunsConcurrentlyWithMainLoopPredicateChecks(t *testing.T) {
 	// Eventually every verdict for the stable pods is known and consistent.
 	assert.Eventually(t, func() bool {
 		st := f.process(pods...)
+		if f.evaluator.HasPendingJob() {
+			return false
+		}
 		small, big, selector := st.PodsRemainUnschedulable[0], st.PodsRemainUnschedulable[1], st.PodsRemainUnschedulable[2]
 		return len(small.RejectedNodeGroups) == 0 && len(small.SkippedNodeGroups) == 2 &&
 			len(big.RejectedNodeGroups) == 1 && len(big.SkippedNodeGroups) == 1 &&
@@ -456,6 +537,26 @@ func TestNewEvaluatorFrameworkHandleCoexistsWithMainHandle(t *testing.T) {
 	// nil config falls back to the defaults.
 	_, err = NewEvaluatorFrameworkHandle(context.Background(), informers.NewSharedInformerFactory(clientsetfake.NewSimpleClientset(), 0), nil, false, false)
 	assert.NoError(t, err)
+}
+
+func TestTemplateSignature(t *testing.T) {
+	base := templateNode("template-a", 1000, 1000, map[string]string{"tier": "small"}, nil)
+	renamed := templateNode("template-b", 1000, 1000, map[string]string{"tier": "small"}, nil)
+	renamed.Labels[apiv1.LabelHostname] = renamed.Name
+	assert.Equal(t, templateSignature(framework.NewTestNodeInfo(base)), templateSignature(framework.NewTestNodeInfo(renamed)))
+
+	otherLabel := templateNode("template-a", 1000, 1000, map[string]string{"tier": "big"}, nil)
+	assert.NotEqual(t, templateSignature(framework.NewTestNodeInfo(base)), templateSignature(framework.NewTestNodeInfo(otherLabel)))
+
+	tainted := templateNode("template-a", 1000, 1000, map[string]string{"tier": "small"}, []apiv1.Taint{{Key: "k", Effect: apiv1.TaintEffectNoSchedule}})
+	assert.NotEqual(t, templateSignature(framework.NewTestNodeInfo(base)), templateSignature(framework.NewTestNodeInfo(tainted)))
+
+	bigger := templateNode("template-a", 2000, 1000, map[string]string{"tier": "small"}, nil)
+	assert.NotEqual(t, templateSignature(framework.NewTestNodeInfo(base)), templateSignature(framework.NewTestNodeInfo(bigger)))
+
+	// DaemonSet pods on the template consume resources and are part of the signature.
+	withDaemonSet := framework.NewTestNodeInfo(base, BuildTestPod("ds-pod", 100, 100*1024*1024, WithDSController()))
+	assert.NotEqual(t, templateSignature(framework.NewTestNodeInfo(base)), templateSignature(withDaemonSet))
 }
 
 func ptr[T any](v T) *T { return &v }
