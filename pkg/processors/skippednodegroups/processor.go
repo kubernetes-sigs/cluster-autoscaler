@@ -24,7 +24,6 @@ import (
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
@@ -40,14 +39,13 @@ import (
 // lists the skipped node groups it could actually schedule on; skipped node groups that fail the
 // group's predicates are moved to RejectedNodeGroups together with the failing predicate.
 //
-// Verdicts come from the Evaluator's latest finished evaluation. Pairs without a verdict yet (until
-// the evaluation that includes them is done, or node groups without a template NodeInfo) are
-// conservatively left in SkippedNodeGroups.
+// Verdicts come from the Evaluator's cache. Pairs without a verdict yet (first loop they are seen,
+// or node groups without a template NodeInfo) are conservatively left in SkippedNodeGroups.
 //
 // It must run after processors that remove pods from the status (e.g. fake pod filters) and before
 // processors that report it (events, visibility).
 //
-// Concurrency: Process is cheap (grouping and map lookups) and everything it shares with
+// Concurrency: Process is cheap (grouping, signatures and cache lookups) and everything it shares with
 // the worker is guarded by the Evaluator's mutex, so it may be invoked from any goroutine (e.g. by
 // asynchronous node group initializers). Predicate checks only ever run on the Evaluator's goroutine.
 type ScaleUpStatusProcessor struct {
@@ -65,7 +63,7 @@ type skippedTemplate struct {
 	nodeInfo  *framework.NodeInfo
 }
 
-// Process applies the latest verdicts to the status and hands the current pairs to the Evaluator.
+// Process applies cached verdicts to the status and hands unknown pairs to the Evaluator.
 func (p *ScaleUpStatusProcessor) Process(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, scaleUpStatus *status.ScaleUpStatus) {
 	if autoscalingCtx == nil || !autoscalingCtx.ScaleUpSimulationForSkippedNodeGroupsEnabled || len(scaleUpStatus.PodsRemainUnschedulable) == 0 {
 		return
@@ -108,14 +106,9 @@ func (p *ScaleUpStatusProcessor) Process(ctx context.Context, autoscalingCtx *ca
 	}
 
 	samplePods := make([]*apiv1.Pod, len(podGroups))
-	groupUIDs := make([][]types.UID, len(podGroups))
 	evaluable := make([]bool, len(podGroups))
 	for gi, eg := range podGroups {
 		samplePods[gi] = clearPodAffinityRequirements(eg.Pods[0])
-		groupUIDs[gi] = make([]types.UID, len(eg.Pods))
-		for i, pod := range eg.Pods {
-			groupUIDs[gi][i] = pod.UID
-		}
 		// The private snapshot has no ResourceClaims/DeviceClasses, so DRA pods would be rejected
 		// everywhere for the wrong reason. Leave their skipped node groups as they are.
 		if remainingGroupBudget > 0 && (!autoscalingCtx.DynamicResourceAllocationEnabled || len(eg.Pods[0].Spec.ResourceClaims) == 0) {
@@ -129,7 +122,7 @@ func (p *ScaleUpStatusProcessor) Process(ctx context.Context, autoscalingCtx *ca
 		parallelism:     autoscalingCtx.PredicateParallelism,
 		csiEnabled:      autoscalingCtx.CSINodeAwareSchedulingEnabled,
 		verbosityOffset: autoscalingCtx.SchedulerVerbosityOffset,
-	}, templates, samplePods, groupUIDs, evaluable)
+	}, templates, samplePods, evaluable)
 
 	templateIndex := make(map[string]int, len(templates))
 	for ti, tmpl := range templates {

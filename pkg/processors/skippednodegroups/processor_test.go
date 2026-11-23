@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/informers"
 	clientsetfake "k8s.io/client-go/kubernetes/fake"
 	schedulerconfiglatest "k8s.io/kubernetes/pkg/scheduler/apis/config/latest"
@@ -218,7 +219,7 @@ func TestProcessColdThenWarm(t *testing.T) {
 	evaluatedPairs, completedJobs, cacheSize = f.evaluator.Stats()
 	assert.Equal(t, 6, evaluatedPairs)
 	assert.Equal(t, 1, completedJobs)
-	assert.Equal(t, 8, cacheSize, "one verdict per pod and node group")
+	assert.Equal(t, 6, cacheSize)
 
 	// Second loop: verdicts are applied from the cache, nothing new is queued.
 	st = f.process(pods...)
@@ -537,6 +538,34 @@ func TestNewEvaluatorFrameworkHandleCoexistsWithMainHandle(t *testing.T) {
 	// nil config falls back to the defaults.
 	_, err = NewEvaluatorFrameworkHandle(context.Background(), informers.NewSharedInformerFactory(clientsetfake.NewSimpleClientset(), 0), nil, false, false)
 	assert.NoError(t, err)
+}
+
+func TestPodGroupSignature(t *testing.T) {
+	base := smallPod("small-1")
+	sameGroup := smallPod("small-2")
+	sameGroup.Spec.Containers[0].Env = []apiv1.EnvVar{{Name: "POD_NAME", Value: "small-2"}}
+	sameGroup.Spec.Hostname = "small-2"
+	sameGroup.Spec.NodeName = "some-node"
+	sameGroup.Spec.Volumes = append(sameGroup.Spec.Volumes, apiv1.Volume{Name: "token", VolumeSource: apiv1.VolumeSource{Projected: &apiv1.ProjectedVolumeSource{}}})
+	sameGroup.Spec.Containers[0].VolumeMounts = append(sameGroup.Spec.Containers[0].VolumeMounts, apiv1.VolumeMount{Name: "token", MountPath: "/var/run/secrets"})
+	assert.Equal(t, podGroupSignature(base), podGroupSignature(sameGroup), "per-replica differences must not change the signature")
+
+	otherController := smallPod("small-3")
+	otherController.OwnerReferences[0].UID = "other-rs-uid"
+	assert.NotEqual(t, podGroupSignature(base), podGroupSignature(otherController))
+
+	otherRequests := smallPod("small-4")
+	otherRequests.Spec.Containers[0].Resources.Requests[apiv1.ResourceCPU] = *resource.NewMilliQuantity(600, resource.DecimalSI)
+	assert.NotEqual(t, podGroupSignature(base), podGroupSignature(otherRequests))
+
+	otherLabels := smallPod("small-5")
+	otherLabels.Labels = map[string]string{"app": "other"}
+	assert.NotEqual(t, podGroupSignature(base), podGroupSignature(otherLabels))
+
+	withAffinity := smallPod("small-6")
+	WithPodAffinity(map[string]string{"app": "db"}, apiv1.LabelHostname)(withAffinity)
+	assert.Equal(t, podGroupSignature(base), podGroupSignature(withAffinity), "inter-pod affinity is ignored by the evaluator and so by the signature")
+	assert.NotNil(t, withAffinity.Spec.Affinity.PodAffinity, "the pod must not be modified")
 }
 
 func TestTemplateSignature(t *testing.T) {

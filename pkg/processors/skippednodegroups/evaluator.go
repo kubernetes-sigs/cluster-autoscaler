@@ -30,7 +30,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -38,7 +37,6 @@ import (
 
 	"golang.org/x/time/rate"
 	apiv1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/klog/v2"
 	schedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
@@ -48,6 +46,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot/predicate"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot/store"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/drain"
 )
 
 const (
@@ -124,11 +123,11 @@ func NewEvaluatorFrameworkHandle(ctx context.Context, informerFactory informers.
 	return framework.NewHandle(ctx, informerFactory, cfg, draEnabled, csiEnabled)
 }
 
-// verdictKey identifies one (pod, node group) verdict. Pod UIDs and node group ids are stable across
-// loops; the template signature is part of the key so that a node group update (labels, taints,
-// machine type) invalidates the verdict without any explicit bookkeeping.
+// verdictKey identifies one (pod equivalence group, node group) verdict. The template signature is
+// part of the key so that a node group update (labels, taints, machine type) invalidates the
+// verdict without any explicit bookkeeping.
 type verdictKey struct {
-	pod       types.UID
+	group     string
 	nodeGroup string
 	template  string
 }
@@ -147,18 +146,16 @@ type snapshotOptions struct {
 	verbosityOffset int
 }
 
-// jobGroup is one pod equivalence group to evaluate: a private copy of the exemplar pod with
-// inter-pod affinity already stripped, and the UIDs of the group's pods (they all get the
-// exemplar's verdict).
+// jobGroup is one pod equivalence group to evaluate: its signature and a private copy of the
+// exemplar pod with inter-pod affinity already stripped.
 type jobGroup struct {
-	pod  *apiv1.Pod
-	uids []types.UID
+	signature string
+	pod       *apiv1.Pod
 }
 
-// key identifies the group when jobs are merged. Two jobs that refer to the same group through
-// different pods only cost a duplicate evaluation.
+// key identifies the group when jobs are merged.
 func (g jobGroup) key() string {
-	return string(g.uids[0])
+	return g.signature
 }
 
 // jobTemplate is one skipped node group to evaluate: its id, template signature, a private copy of
@@ -340,13 +337,10 @@ func (e *Evaluator) lookupLocked(key verdictKey, now time.Time) (schedErr cluste
 	return v.schedErr, true, now.Sub(v.evaluatedAt) > e.opts.RefreshAfter
 }
 
-// store records the verdict of one (pod group, node group) pair for every pod of the group.
-func (e *Evaluator) store(uids []types.UID, nodeGroup, template string, schedErr clustersnapshot.SchedulingError, now time.Time) {
+func (e *Evaluator) store(key verdictKey, schedErr clustersnapshot.SchedulingError, now time.Time) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	for _, uid := range uids {
-		e.cache[verdictKey{pod: uid, nodeGroup: nodeGroup, template: template}] = verdict{schedErr: schedErr, evaluatedAt: now, lastUsed: now}
-	}
+	e.cache[key] = verdict{schedErr: schedErr, evaluatedAt: now, lastUsed: now}
 	e.evaluatedPairs++
 }
 
@@ -432,7 +426,7 @@ func (e *Evaluator) processJob(ctx context.Context, j *job) int {
 			}
 			group := j.groups[gi]
 			schedErr := snapshot.CheckPredicates(group.pod, nodeName)
-			e.store(group.uids, tmpl.nodeGroup, tmpl.signature, schedErr, e.clock.Now())
+			e.store(verdictKey{group: group.signature, nodeGroup: tmpl.nodeGroup, template: tmpl.signature}, schedErr, e.clock.Now())
 			evaluated++
 		}
 		if err := snapshot.RemoveNodeInfo(ctx, nodeName); err != nil {
@@ -474,12 +468,16 @@ func (v verdicts) get(gi, ti int) (clustersnapshot.SchedulingError, bool) {
 // lookupAndSchedule resolves as many pairs as possible from the cache and hands the unknown ones
 // (plus the ones due for a refresh) to the worker as one job. It runs on the main loop and does no
 // predicate evaluation itself. Groups flagged as not evaluable are neither looked up nor enqueued.
-// A group's verdict is the cached verdict of any of its pods: all pods of an equivalence group get
-// the same verdict, so new replicas of a known group are served right away.
-func (e *Evaluator) lookupAndSchedule(opts snapshotOptions, templates []skippedTemplate, samplePods []*apiv1.Pod, groupUIDs [][]types.UID, evaluable []bool) verdicts {
+func (e *Evaluator) lookupAndSchedule(opts snapshotOptions, templates []skippedTemplate, samplePods []*apiv1.Pod, evaluable []bool) verdicts {
 	now := e.clock.Now()
 	results := newVerdicts(len(samplePods), len(templates))
 
+	groupSigs := make([]string, len(samplePods))
+	for gi, pod := range samplePods {
+		if evaluable[gi] {
+			groupSigs[gi] = podGroupSignature(pod)
+		}
+	}
 	templateSigs := make([]string, len(templates))
 	for ti, tmpl := range templates {
 		templateSigs[ti] = templateSignature(tmpl.nodeInfo)
@@ -494,15 +492,8 @@ func (e *Evaluator) lookupAndSchedule(opts snapshotOptions, templates []skippedT
 			if !evaluable[gi] {
 				continue
 			}
-			var schedErr clustersnapshot.SchedulingError
-			found, stale := false, false
-			for _, uid := range groupUIDs[gi] {
-				// Look every pod up, so that all live entries are marked as used.
-				err, ok, old := e.lookupLocked(verdictKey{pod: uid, nodeGroup: tmpl.nodeGroup, template: templateSigs[ti]}, now)
-				if ok && !found {
-					schedErr, found, stale = err, true, old
-				}
-			}
+			key := verdictKey{group: groupSigs[gi], nodeGroup: tmpl.nodeGroup, template: templateSigs[ti]}
+			schedErr, found, stale := e.lookupLocked(key, now)
 			if found {
 				// Known verdicts are always applied; old ones are additionally re-checked in the
 				// background so that a slow worker or a long loop never makes a verdict regress to unknown.
@@ -536,7 +527,7 @@ func (e *Evaluator) lookupAndSchedule(opts snapshotOptions, templates []skippedT
 				if !seen {
 					jgi = len(j.groups)
 					groupIndex[gi] = jgi
-					j.groups = append(j.groups, jobGroup{pod: samplePods[gi].DeepCopy(), uids: slices.Clone(groupUIDs[gi])})
+					j.groups = append(j.groups, jobGroup{signature: groupSigs[gi], pod: samplePods[gi].DeepCopy()})
 				}
 				jt.groups = append(jt.groups, jgi)
 			}
@@ -555,6 +546,51 @@ func (e *Evaluator) lookupAndSchedule(opts snapshotOptions, templates []skippedT
 	}
 	e.enqueue(j)
 	return results
+}
+
+// podGroupSignature identifies a pod equivalence group across loops. It hashes what
+// equivalence.BuildPodGroups compares: the controller, the labels and the scheduling-relevant part
+// of the spec. Two pods of one group always get the same signature; a spec change (and therefore a
+// different group) gets a new one.
+func podGroupSignature(pod *apiv1.Pod) string {
+	h := fnv.New64a()
+	h.Write([]byte(pod.Namespace))
+	h.Write([]byte{0})
+	if ref := drain.ControllerRef(pod); ref != nil {
+		h.Write([]byte(ref.UID))
+	}
+	h.Write([]byte{0})
+	writeSortedMap(h, pod.Labels)
+	spec := pod.Spec.DeepCopy()
+	spec.NodeName = ""
+	spec.Hostname = ""
+	spec.Affinity = stripPodAffinity(spec.Affinity)
+	projected := map[string]bool{}
+	volumes := spec.Volumes[:0]
+	for _, v := range spec.Volumes {
+		if v.Projected != nil {
+			projected[v.Name] = true
+			continue
+		}
+		volumes = append(volumes, v)
+	}
+	spec.Volumes = volumes
+	for _, containers := range [][]apiv1.Container{spec.InitContainers, spec.Containers} {
+		for i := range containers {
+			containers[i].Env = nil
+			mounts := containers[i].VolumeMounts[:0]
+			for _, m := range containers[i].VolumeMounts {
+				if !projected[m.Name] {
+					mounts = append(mounts, m)
+				}
+			}
+			containers[i].VolumeMounts = mounts
+		}
+	}
+	if b, err := json.Marshal(spec); err == nil {
+		h.Write(b)
+	}
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 // templateSignature identifies what matters for predicates on a template node: labels, taints,
