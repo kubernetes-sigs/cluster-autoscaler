@@ -18,13 +18,21 @@ package nodegroupset
 
 import (
 	"context"
+	"slices"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+	apiv1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	testprovider "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
+	"sigs.k8s.io/cluster-autoscaler/pkg/processors/customresources"
+	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
+	csisnapshot "sigs.k8s.io/cluster-autoscaler/pkg/simulator/csi/snapshot"
+	drasnapshot "sigs.k8s.io/cluster-autoscaler/pkg/simulator/dynamicresources/snapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 
 	"github.com/stretchr/testify/assert"
@@ -258,3 +266,152 @@ func TestBalanceHittingMaxSize(t *testing.T) {
 	scaleUpMap = toMap(scaleUpInfo)
 	assert.Equal(t, 2, scaleUpMap["ng2"].NewSize)
 }
+
+func TestBalanceScaleUpBetweenGroupsWithQuota(t *testing.T) {
+	testCases := []struct {
+		name      string
+		groups    []string // every group starts at size 1 with max size 10
+		quotas    []resourcequotas.Quota
+		newNodes  int
+		wantSizes map[string]int
+	}{
+		{
+			name:      "no quota",
+			groups:    []string{"ng1", "ng2", "ng3"},
+			newNodes:  6,
+			wantSizes: map[string]int{"ng1": 3, "ng2": 3, "ng3": 3},
+		},
+		{
+			name:   "group without quota left is full",
+			groups: []string{"ng1", "ng2", "ng3"},
+			quotas: []resourcequotas.Quota{
+				&resourcequotas.FakeQuota{Name: "ng2", AppliesToFn: onGroups("ng2"), LimitsVal: map[string]int64{"nodes": 1}},
+			},
+			newNodes:  5,
+			wantSizes: map[string]int{"ng1": 3, "ng2": 2, "ng3": 3},
+		},
+		{
+			name:   "shared quota is counted once",
+			groups: []string{"ng1", "ng2", "ng3"},
+			quotas: []resourcequotas.Quota{
+				&resourcequotas.FakeQuota{Name: "ng1-ng2", AppliesToFn: onGroups("ng1", "ng2"), LimitsVal: map[string]int64{"nodes": 2}},
+			},
+			newNodes:  4,
+			wantSizes: map[string]int{"ng1": 2, "ng2": 2, "ng3": 3},
+		},
+		{
+			name:   "quota runs out before the new nodes",
+			groups: []string{"ng1", "ng2"},
+			quotas: []resourcequotas.Quota{
+				&resourcequotas.FakeQuota{Name: "all", AppliesToFn: resourcequotas.MatchEveryNode, LimitsVal: map[string]int64{"nodes": 2}},
+			},
+			newNodes:  6,
+			wantSizes: map[string]int{"ng1": 2, "ng2": 2},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			autoscalingCtx, nodeInfos := buildQuotaTestNodeGroups(tc.groups)
+			tracker := buildQuotaTestTracker(t, autoscalingCtx, tc.quotas, nil)
+			processor := NewDefaultNodeGroupSetProcessor([]string{}, config.NodeGroupDifferenceRatios{}).(QuotaAwareNodeGroupSetProcessor)
+			groups := autoscalingCtx.CloudProvider.NodeGroups(t.Context())
+			headroom := quotaHeadroom(t, autoscalingCtx, tracker, groups, nodeInfos)
+
+			scaleUpInfos, err := processor.BalanceScaleUpBetweenGroupsWithQuota(t.Context(), autoscalingCtx, groups, tc.newNodes, nodeInfos, tracker)
+
+			assert.NoError(t, err)
+			gotSizes := map[string]int{}
+			for _, sui := range scaleUpInfos {
+				gotSizes[sui.Group.Id()] = sui.NewSize
+			}
+			if diff := cmp.Diff(tc.wantSizes, gotSizes); diff != "" {
+				t.Errorf("unexpected new sizes (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(headroom, quotaHeadroom(t, autoscalingCtx, tracker, groups, nodeInfos)); diff != "" {
+				t.Errorf("tracker changed (-before +after):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestBalanceScaleUpBetweenGroupsWithQuotaFailsClosed(t *testing.T) {
+	testCases := []struct {
+		name           string
+		crpErr         errors.AutoscalerError
+		dropNodeInfoOf string
+	}{
+		{name: "quota cannot be evaluated", crpErr: errors.NewAutoscalerError(errors.CloudProviderError, "custom resources unavailable")},
+		{name: "node group has no node info", dropNodeInfoOf: "ng2"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			autoscalingCtx, nodeInfos := buildQuotaTestNodeGroups([]string{"ng1", "ng2"})
+			delete(nodeInfos, tc.dropNodeInfoOf)
+			tracker := buildQuotaTestTracker(t, autoscalingCtx, nil, tc.crpErr)
+			processor := NewDefaultNodeGroupSetProcessor([]string{}, config.NodeGroupDifferenceRatios{}).(QuotaAwareNodeGroupSetProcessor)
+
+			scaleUpInfos, err := processor.BalanceScaleUpBetweenGroupsWithQuota(t.Context(), autoscalingCtx, autoscalingCtx.CloudProvider.NodeGroups(t.Context()), 2, nodeInfos, tracker)
+
+			assert.Error(t, err)
+			assert.Empty(t, scaleUpInfos)
+		})
+	}
+}
+
+func onGroups(ids ...string) func(*apiv1.Node) bool {
+	return func(n *apiv1.Node) bool {
+		return slices.Contains(ids, n.Labels["nodegroup"])
+	}
+}
+
+func buildQuotaTestNodeGroups(ids []string) (*ca_context.AutoscalingContext, map[string]*framework.NodeInfo) {
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	nodeInfos := map[string]*framework.NodeInfo{}
+	for _, id := range ids {
+		provider.AddNodeGroup(id, 1, 10, 1)
+		node := BuildTestNode(id+"-template", 1000, 1000)
+		node.Labels["nodegroup"] = id
+		nodeInfos[id] = framework.NewTestNodeInfo(node)
+	}
+	return &ca_context.AutoscalingContext{CloudProvider: provider}, nodeInfos
+}
+
+// buildQuotaTestTracker builds a tracker over no existing nodes, so a "nodes" limit is the number
+// of nodes that can still be added.
+func buildQuotaTestTracker(t *testing.T, autoscalingCtx *ca_context.AutoscalingContext, quotas []resourcequotas.Quota, crpErr errors.AutoscalerError) *resourcequotas.Tracker {
+	t.Helper()
+	tracker, err := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{
+		QuotaProvider:            resourcequotas.NewFakeProvider(quotas),
+		CustomResourcesProcessor: &fakeCustomResourcesProcessor{err: crpErr},
+	}).NewMaxQuotasTracker(t.Context(), autoscalingCtx, nil)
+	assert.NoError(t, err)
+	return tracker
+}
+
+// quotaHeadroom returns how many nodes the tracker still allows for each group, up to 100.
+func quotaHeadroom(t *testing.T, autoscalingCtx *ca_context.AutoscalingContext, tracker *resourcequotas.Tracker, groups []cloudprovider.NodeGroup, nodeInfos map[string]*framework.NodeInfo) map[string]int {
+	t.Helper()
+	headroom := map[string]int{}
+	for _, ng := range groups {
+		result, err := tracker.CheckQuota(t.Context(), autoscalingCtx, ng, nodeInfos[ng.Id()].Node(), 100)
+		assert.NoError(t, err)
+		headroom[ng.Id()] = result.AllowedDelta
+	}
+	return headroom
+}
+
+type fakeCustomResourcesProcessor struct {
+	err errors.AutoscalerError
+}
+
+func (p *fakeCustomResourcesProcessor) FilterOutNodesWithUnreadyResources(_ context.Context, _ *ca_context.AutoscalingContext, allNodes, readyNodes []*apiv1.Node, _ *drasnapshot.Snapshot, _ *csisnapshot.Snapshot) ([]*apiv1.Node, []*apiv1.Node) {
+	return allNodes, readyNodes
+}
+
+func (p *fakeCustomResourcesProcessor) GetNodeResourceTargets(_ context.Context, _ *ca_context.AutoscalingContext, _ *apiv1.Node, _ cloudprovider.NodeGroup) ([]customresources.CustomResourceTarget, errors.AutoscalerError) {
+	return nil, p.err
+}
+
+func (p *fakeCustomResourcesProcessor) CleanUp() {}
