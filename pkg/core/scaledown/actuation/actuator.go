@@ -450,7 +450,7 @@ func (a *Actuator) scaleDownNodeToReport(ctx context.Context, node *apiv1.Node, 
 		return sdNode
 	}
 	gpuConfig := a.autoscalingCtx.CloudProvider.GetNodeGpuConfig(ctx, node)
-	utilInfo, err := utilization.Calculate(ctx, nodeInfo, ignoreDaemonSetsUtilization, a.autoscalingCtx.IgnoreMirrorPodsUtilization, a.autoscalingCtx.DynamicResourceAllocationEnabled, gpuConfig, time.Now())
+	utilInfo, err := utilization.Calculate(ctx, nodeInfo, ignoreDaemonSetsUtilization, a.autoscalingCtx.IgnoreMirrorPodsUtilization, true, gpuConfig, time.Now())
 	if err != nil {
 		logger.Error(err, "Scale-down: couldn't calculate utilization of scaled down node", "node", klog.KObj(node))
 		return sdNode
@@ -470,7 +470,7 @@ func (a *Actuator) taintNode(ctx context.Context, node *apiv1.Node) error {
 }
 
 func (a *Actuator) createSnapshot(ctx context.Context, nodes []*apiv1.Node) (clustersnapshot.ClusterSnapshot, error) {
-	snapshot := predicate.NewPredicateSnapshot(store.NewBasicSnapshotStore(), a.autoscalingCtx.FrameworkHandle, a.autoscalingCtx.DynamicResourceAllocationEnabled, a.autoscalingCtx.PredicateParallelism, a.autoscalingCtx.CSINodeAwareSchedulingEnabled, a.autoscalingCtx.SchedulerVerbosityOffset)
+	snapshot := predicate.NewPredicateSnapshot(store.NewBasicSnapshotStore(), a.autoscalingCtx.FrameworkHandle, a.autoscalingCtx.PredicateParallelism, a.autoscalingCtx.CSINodeAwareSchedulingEnabled, a.autoscalingCtx.SchedulerVerbosityOffset)
 	pods, err := a.autoscalingCtx.AllPodLister().List()
 	if err != nil {
 		return nil, err
@@ -480,7 +480,7 @@ func (a *Actuator) createSnapshot(ctx context.Context, nodes []*apiv1.Node) (clu
 	nonExpendableScheduledPods := utils.FilterOutExpendablePods(scheduledPods, a.autoscalingCtx.ExpendablePodsPriorityCutoff)
 
 	var draSnapshot *drasnapshot.Snapshot
-	if a.autoscalingCtx.DynamicResourceAllocationEnabled && a.autoscalingCtx.DraProvider != nil {
+	if a.autoscalingCtx.DraProvider != nil {
 		draSnapshot, err = a.autoscalingCtx.DraProvider.Snapshot()
 		if err != nil {
 			return nil, err

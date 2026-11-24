@@ -146,10 +146,10 @@ func newTestPluginRunnerAndDeltaSnapshot(b *testing.B) (*SchedulerPluginRunner, 
 	if err != nil {
 		b.Fatalf("scheduler_config_latest.Default(): unexpected error: %v", err)
 	}
-	fwHandle, err := framework.NewHandle(context.Background(), informers.NewSharedInformerFactory(clientsetfake.NewSimpleClientset(), 0), schedConfig, true, false)
+	fwHandle, err := framework.NewHandle(context.Background(), informers.NewSharedInformerFactory(clientsetfake.NewSimpleClientset(), 0), schedConfig, false)
 	if err != nil {
 		b.Fatalf("framework.NewHandle(): unexpected error: %v", err)
 	}
-	snapshot := NewPredicateSnapshot(store.NewDeltaSnapshotStore(), fwHandle, true, 1, false, 0)
+	snapshot := NewPredicateSnapshot(store.NewDeltaSnapshotStore(), fwHandle, 1, false, 0)
 	return NewSchedulerPluginRunner(fwHandle, snapshot, 1, 0), snapshot
 }

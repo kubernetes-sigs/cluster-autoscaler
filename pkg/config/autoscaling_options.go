@@ -335,8 +335,6 @@ type AutoscalingOptions struct {
 	ForceDeleteLongUnregisteredNodes bool
 	// ForceDeleteFailedNodes is used to enable/disable ignoring min size constraints during removal of failed nodes
 	ForceDeleteFailedNodes bool
-	// DynamicResourceAllocationEnabled configures whether logic for handling DRA objects is enabled.
-	DynamicResourceAllocationEnabled bool
 	// CSINodeAwareSchedulingEnabled configures whether logic for handling CSINode objects is enabled.
 	CSINodeAwareSchedulingEnabled bool
 	// PodGroupSupportEnabled configures whether logic for handling scheduling.k8s.io PodGroups is

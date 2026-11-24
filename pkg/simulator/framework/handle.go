@@ -29,7 +29,6 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodevolumelimits"
 	schedulerframeworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 	schedulermetrics "k8s.io/kubernetes/pkg/scheduler/metrics"
-	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/dynamicresources"
 )
 
 var (
@@ -43,7 +42,7 @@ type Handle struct {
 }
 
 // NewHandle builds a framework Handle based on the provided informers and scheduler config.
-func NewHandle(ctx context.Context, informerFactory informers.SharedInformerFactory, schedConfig *schedulerconfig.KubeSchedulerConfiguration, draEnabled bool, csiEnabled bool) (*Handle, error) {
+func NewHandle(ctx context.Context, informerFactory informers.SharedInformerFactory, schedConfig *schedulerconfig.KubeSchedulerConfiguration, csiEnabled bool) (*Handle, error) {
 	if schedConfig == nil {
 		var err error
 		schedConfig, err = schedulerconfiglatest.Default()
@@ -64,11 +63,7 @@ func NewHandle(ctx context.Context, informerFactory informers.SharedInformerFact
 		schedulerframeworkruntime.WithSharedCSIManager(sharedCSIManager),
 	}
 
-	if draEnabled {
-		opts = append(opts, schedulerframeworkruntime.WithSharedDRAManager(sharedLister))
-	} else {
-		opts = append(opts, schedulerframeworkruntime.WithSharedDRAManager(dynamicresources.NewNoOpDRAManager()))
-	}
+	opts = append(opts, schedulerframeworkruntime.WithSharedDRAManager(sharedLister))
 
 	// TODO: We should always use sharedLister once this CSINode aware changes in CAS are
 	// enabled by default.

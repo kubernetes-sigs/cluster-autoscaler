@@ -519,11 +519,11 @@ func newTestPluginRunnerAndSnapshot(schedConfig *config.KubeSchedulerConfigurati
 		schedConfig = defaultConfig
 	}
 
-	fwHandle, err := framework.NewHandle(context.Background(), informers.NewSharedInformerFactory(clientsetfake.NewSimpleClientset(), 0), schedConfig, true, false)
+	fwHandle, err := framework.NewHandle(context.Background(), informers.NewSharedInformerFactory(clientsetfake.NewSimpleClientset(), 0), schedConfig, false)
 	if err != nil {
 		return nil, nil, err
 	}
-	snapshot := NewPredicateSnapshot(store.NewBasicSnapshotStore(), fwHandle, true, 1, false, 0)
+	snapshot := NewPredicateSnapshot(store.NewBasicSnapshotStore(), fwHandle, 1, false, 0)
 	return NewSchedulerPluginRunner(fwHandle, snapshot, 1, 0), snapshot, nil
 }
 

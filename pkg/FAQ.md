@@ -1029,7 +1029,6 @@ The following startup parameters are supported for cluster autoscaler:
 | `dynamic-node-delete-delay-after-taint-enabled` | Enables dynamic adjustment of NodeDeleteDelayAfterTaint based of the latency between CA and api-server |  |
 | `emit-per-nodegroup-metrics` | If true, emit per node group metrics. |  |
 | `enable-csi-node-aware-scheduling` | Whether logic for handling CSINode objects is enabled. | true |
-| `enable-dynamic-resource-allocation` | Handle DRA (Dynamic Resource Allocation) objects, locked to true. | true |
 | `enable-proactive-scaleup` | Whether to enable/disable proactive scale-ups, defaults to false |  |
 | `enable-provisioning-requests` | Whether the clusterautoscaler will be handling the ProvisioningRequest CRs. |  |
 | `enforce-node-group-min-size` | Should CA scale up the node group to the configured min size if needed. |  |

@@ -288,7 +288,7 @@ func TestRemovableAt(t *testing.T) {
 
 			factory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{
 				QuotaProvider:            resourcequotas.NewFakeProvider([]resourcequotas.Quota{}),
-				CustomResourcesProcessor: customresources.NewDefaultCustomResourcesProcessor(false, false),
+				CustomResourcesProcessor: customresources.NewDefaultCustomResourcesProcessor(false),
 			})
 			var nodes []*apiv1.Node
 			for _, n := range removableNodes {
@@ -491,7 +491,7 @@ func TestRemovableAt_UnremovableReasons(t *testing.T) {
 
 			factory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{
 				QuotaProvider:            resourcequotas.NewFakeProvider(tc.quotas),
-				CustomResourcesProcessor: customresources.NewDefaultCustomResourcesProcessor(false, false),
+				CustomResourcesProcessor: customresources.NewDefaultCustomResourcesProcessor(false),
 			})
 			tracker, _ := factory.NewMinQuotasTracker(context.Background(), &autoscalingCtx, []*apiv1.Node{node})
 

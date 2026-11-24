@@ -219,7 +219,6 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 
 	// Deprecated flags
 	fs.StringArrayVar(&p.ignoreTaints, "ignore-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group (Deprecated, use startup-taints instead)")
-	fs.BoolVar(&p.o.DynamicResourceAllocationEnabled, "enable-dynamic-resource-allocation", true, "Handle DRA (Dynamic Resource Allocation) objects, locked to true.")
 	fs.IntVar(&p.clusterSnapshotParallelism, "cluster-snapshot-parallelism", 16, "Maximum parallelism of cluster snapshot creation (Deprecated, use predicate-parallelism instead)")
 
 	// Properties specific to the cloud provider, but kept for the sake of POC
@@ -296,10 +295,6 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 
 	if p.o.MaxConcurrentNodesTainting < 1 {
 		return config.AutoscalingOptions{}, fmt.Errorf("Invalid value for --max-concurrent-nodes-tainting flag: %d", p.o.MaxConcurrentNodesTainting)
-	}
-
-	if p.o.DynamicResourceAllocationEnabled == false {
-		return config.AutoscalingOptions{}, fmt.Errorf("--enable-dynamic-resource-allocation flag must be true: %t", p.o.DynamicResourceAllocationEnabled)
 	}
 
 	allowedSchedulers, err := parseAllowedSchedulers(p.allowedSchedulers, p.bypassedSchedulers)

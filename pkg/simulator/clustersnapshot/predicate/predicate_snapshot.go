@@ -40,7 +40,6 @@ import (
 type PredicateSnapshot struct {
 	clustersnapshot.ClusterSnapshotStore
 	pluginRunner                 *SchedulerPluginRunner
-	draEnabled                   bool
 	enableCSINodeAwareScheduling bool
 	parallelism                  int
 	draSnapshot                  *drasnapshot.Snapshot
@@ -48,11 +47,10 @@ type PredicateSnapshot struct {
 }
 
 // NewPredicateSnapshot builds a PredicateSnapshot.
-func NewPredicateSnapshot(snapshotStore clustersnapshot.ClusterSnapshotStore, fwHandle *framework.Handle, draEnabled bool, parallelism int, enableCSINodeAwareScheduling bool, schedulerVerbosityOffset int) *PredicateSnapshot {
+func NewPredicateSnapshot(snapshotStore clustersnapshot.ClusterSnapshotStore, fwHandle *framework.Handle, parallelism int, enableCSINodeAwareScheduling bool, schedulerVerbosityOffset int) *PredicateSnapshot {
 	parallelism = max(parallelism, 1)
 	snapshot := &PredicateSnapshot{
 		ClusterSnapshotStore:         snapshotStore,
-		draEnabled:                   draEnabled,
 		enableCSINodeAwareScheduling: enableCSINodeAwareScheduling,
 		parallelism:                  parallelism,
 		draSnapshot:                  drasnapshot.NewEmptySnapshot(),
@@ -88,7 +86,7 @@ func (s *PredicateSnapshot) SetClusterState(ctx context.Context, nodes []*apiv1.
 	nodeNameToIdx := make(map[string]int, len(nodes))
 	for i, node := range nodes {
 		var slices []*resourceapi.ResourceSlice
-		if s.draEnabled && draSnapshot != nil {
+		if draSnapshot != nil {
 			slices, _ = draSnapshot.NodeResourceSlices(node.Name)
 		}
 		ni := framework.NewNodeInfo(node, slices)
@@ -140,7 +138,7 @@ func (s *PredicateSnapshot) setClusterStatePods(ctx context.Context, nodeInfos [
 		}
 
 		var claims []*resourceapi.ResourceClaim
-		if s.draEnabled && s.draSnapshot != nil {
+		if s.draSnapshot != nil {
 			var err error
 			claims, err = s.draSnapshot.PodClaims(pod)
 			if err != nil {
@@ -206,22 +204,20 @@ func (s *PredicateSnapshot) ListNodeInfos() ([]*framework.NodeInfo, error) {
 // The DRA slices and CSI data are explicitly pushed into the underlying
 // draSnapshot and csiSnapshot before being stored.
 func (s *PredicateSnapshot) AddNodeInfo(nodeInfo *framework.NodeInfo) error {
-	if s.draEnabled {
-		// TODO(DRA): Add transaction-like clean-up in case of errors here - don't modify the state on any errors.
-		if len(nodeInfo.LocalResourceSlices) > 0 {
-			if err := s.draSnapshot.AddNodeResourceSlices(nodeInfo.Node().Name, nodeInfo.LocalResourceSlices); err != nil {
-				return fmt.Errorf("couldn't add ResourceSlices to DRA snapshot: %v", err)
-			}
+	// TODO(DRA): Add transaction-like clean-up in case of errors here - don't modify the state on any errors.
+	if len(nodeInfo.LocalResourceSlices) > 0 {
+		if err := s.draSnapshot.AddNodeResourceSlices(nodeInfo.Node().Name, nodeInfo.LocalResourceSlices); err != nil {
+			return fmt.Errorf("couldn't add ResourceSlices to DRA snapshot: %v", err)
 		}
+	}
 
-		for _, podInfo := range nodeInfo.Pods() {
-			if len(podInfo.NeededResourceClaims) > 0 {
-				if err := s.modifyResourceClaimsForNewPod(podInfo); err != nil {
-					return err
-				}
-				if err := s.verifyScheduledPodResourceClaims(podInfo.Pod, nodeInfo.Node()); err != nil {
-					return err
-				}
+	for _, podInfo := range nodeInfo.Pods() {
+		if len(podInfo.NeededResourceClaims) > 0 {
+			if err := s.modifyResourceClaimsForNewPod(podInfo); err != nil {
+				return err
+			}
+			if err := s.verifyScheduledPodResourceClaims(podInfo.Pod, nodeInfo.Node()); err != nil {
+				return err
 			}
 		}
 	}
@@ -249,13 +245,11 @@ func (s *PredicateSnapshot) RemoveNodeInfo(ctx context.Context, nodeName string)
 		return err
 	}
 
-	if s.draEnabled {
-		s.draSnapshot.RemoveNodeResourceSlices(nodeName)
-
-		for _, pod := range nodeInfo.Pods() {
-			s.draSnapshot.RemovePodOwnedClaims(ctx, pod.Pod)
-		}
+	s.draSnapshot.RemoveNodeResourceSlices(nodeName)
+	for _, pod := range nodeInfo.Pods() {
+		s.draSnapshot.RemovePodOwnedClaims(ctx, pod.Pod)
 	}
+
 	if s.enableCSINodeAwareScheduling {
 		// generally a node name is same as csi node name and hence we should be safe
 		if nodeInfo.CSINode != nil {
@@ -274,7 +268,7 @@ func (s *PredicateSnapshot) SchedulePod(pod *apiv1.Pod, nodeName string) cluster
 		return schedErr
 	}
 
-	if s.draEnabled && len(pod.Spec.ResourceClaims) > 0 {
+	if len(pod.Spec.ResourceClaims) > 0 {
 		// TODO(DRA): Add transaction-like clean-up in case of errors here - don't modify the state on any errors.
 		if err := s.modifyResourceClaimsForScheduledPod(pod, node, cycleState); err != nil {
 			return clustersnapshot.NewSchedulingInternalError(pod, err.Error())
@@ -302,7 +296,7 @@ func (s *PredicateSnapshot) SchedulePodOnAnyNodeMatching(pod *apiv1.Pod, opts cl
 		return "", schedErr
 	}
 
-	if s.draEnabled && len(pod.Spec.ResourceClaims) > 0 {
+	if len(pod.Spec.ResourceClaims) > 0 {
 		// TODO(DRA): Add transaction-like clean-up in case of errors here - don't modify the state on any errors.
 		if err := s.modifyResourceClaimsForScheduledPod(pod, node, cycleState); err != nil {
 			return "", clustersnapshot.NewSchedulingInternalError(pod, err.Error())
@@ -324,27 +318,25 @@ func (s *PredicateSnapshot) SchedulePodOnAnyNodeMatching(pod *apiv1.Pod, opts cl
 
 // UnschedulePod removes the given Pod from the given Node inside the snapshot.
 func (s *PredicateSnapshot) UnschedulePod(namespace string, podName string, nodeName string) error {
-	if s.draEnabled {
-		nodeInfo, err := s.GetNodeInfo(nodeName)
-		if err != nil {
+	nodeInfo, err := s.GetNodeInfo(nodeName)
+	if err != nil {
+		return err
+	}
+
+	var foundPod *apiv1.Pod
+	for _, pod := range nodeInfo.Pods() {
+		if pod.Namespace == namespace && pod.Name == podName {
+			foundPod = pod.Pod
+			break
+		}
+	}
+	if foundPod == nil {
+		return fmt.Errorf("pod %s/%s not found on node %s", namespace, podName, nodeName)
+	}
+
+	if len(foundPod.Spec.ResourceClaims) > 0 {
+		if err := s.draSnapshot.UnreservePodClaims(foundPod); err != nil {
 			return err
-		}
-
-		var foundPod *apiv1.Pod
-		for _, pod := range nodeInfo.Pods() {
-			if pod.Namespace == namespace && pod.Name == podName {
-				foundPod = pod.Pod
-				break
-			}
-		}
-		if foundPod == nil {
-			return fmt.Errorf("pod %s/%s not found on node %s", namespace, podName, nodeName)
-		}
-
-		if len(foundPod.Spec.ResourceClaims) > 0 {
-			if err := s.draSnapshot.UnreservePodClaims(foundPod); err != nil {
-				return err
-			}
 		}
 	}
 
@@ -457,12 +449,10 @@ func (s *PredicateSnapshot) verifyScheduledPodResourceClaims(pod *apiv1.Pod, nod
 
 func (s *PredicateSnapshot) createPodInfo(pod *apiv1.Pod) (*framework.PodInfo, error) {
 	var claims []*resourceapi.ResourceClaim
-	if s.draEnabled {
-		var err error
-		claims, err = s.draSnapshot.PodClaims(pod)
-		if err != nil {
-			return nil, fmt.Errorf("couldn't obtain pod %s/%s claims: %v", pod.Namespace, pod.Name, err)
-		}
+	var err error
+	claims, err = s.draSnapshot.PodClaims(pod)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't obtain pod %s/%s claims: %v", pod.Namespace, pod.Name, err)
 	}
 	return framework.NewPodInfo(pod, claims), nil
 }
