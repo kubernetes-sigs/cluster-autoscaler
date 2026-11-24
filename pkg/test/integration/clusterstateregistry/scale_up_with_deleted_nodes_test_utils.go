@@ -28,7 +28,6 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core"
-	"sigs.k8s.io/cluster-autoscaler/pkg/test/integration"
 	synctestutils "sigs.k8s.io/cluster-autoscaler/pkg/test/integration/synctest"
 	fakek8s "sigs.k8s.io/cluster-autoscaler/pkg/utils/fake"
 	testutils "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
@@ -162,7 +161,7 @@ func RunTestClusterStateRegistryScaleUpWithDeletedNodes(t *testing.T, setupFacto
 // TestClusterStateRegistryScaleUpWithDeletedNodesSetupArgs groups arguments to TestClusterStateRegistryScaleUpWithDeletedNodesSetupFactory.
 type TestClusterStateRegistryScaleUpWithDeletedNodesSetupArgs struct {
 	// OptsOverride should be applied to the AutoscalingOptions used by the created Autoscaler.
-	OptsOverride integration.AutoscalingOptionOverride
+	OptsOverride config.AutoscalingOptionModifier
 	// NodeRegistrationDelay is the delay that Nodes should appear after in the K8s fake, since the NodeGroup.IncreaseSize() call. This behavior should likely be
 	// configured in the fake implementation of the API used to create new VMs in NodeGroup.IncreaseSize().
 	NodeRegistrationDelay time.Duration

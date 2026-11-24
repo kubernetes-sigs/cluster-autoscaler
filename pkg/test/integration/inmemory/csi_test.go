@@ -18,13 +18,13 @@ package inmemory
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
 	apiv1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/test/integration"
 	synctestutils "sigs.k8s.io/cluster-autoscaler/pkg/test/integration/synctest"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 )
 
@@ -124,18 +125,24 @@ func TestStaticAutoscaler_NodeWithoutCSINodeIsUpcoming(t *testing.T) {
 		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, time.Second)
 		assert.Equal(t, 1, fetchTargetSize(), "CA shouldn't scale up while the node without CSINode is upcoming")
 
-		// Past MaxNodeStartupTime the node is unready and no longer substituted, autoscaler goes for another scale up.
+		// Past MaxNodeStartupTime the first node is unready and no longer substituted.
+		// CA scales up second node and soft-taints the first node as deletion candidate.
 		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, startupTimeout)
 		assert.Equal(t, 2, fetchTargetSize(), "CA should scale up one more node once the Node without CSINode stops being upcoming")
 
-		// The first node finally reports the CSI driver, autoscaler no longer overrides it to unready, no scale up triggered.
+		// The second (untainted) node reports CSI driver and becomes ready, stopping further scale-ups.
+		// The first node is scaled down after 3*startupTimeout (> ScaleDownUnreadyTime).
 		nodes := fakes.K8s.Nodes().Items
 		require.Greater(t, len(nodes), 0)
-		csiNode := csiNodeWithDriver(nodes[0].Name, gcePersistentDiskCSIDriver)
+		i := slices.IndexFunc(nodes, func(n apiv1.Node) bool {
+			return !taints.HasDeletionCandidateTaint(&n)
+		})
+		require.NotEqual(t, -1, i, "expected an untainted node")
+		csiNode := csiNodeWithDriver(nodes[i].Name, gcePersistentDiskCSIDriver)
 		_, err = fakes.KubeClient.StorageV1().CSINodes().Create(ctx, csiNode, metav1.CreateOptions{})
 		require.NoError(t, err)
 		synctestutils.MustRunOnceAfter(ctx, t, autoscaler, startupTimeout*3)
-		assert.Equal(t, 2, fetchTargetSize(), "CA shouldn't scale up once the node reports the CSI driver")
+		assert.Equal(t, 1, fetchTargetSize(), "CA should scale down the timed-out first node and not scale up once the second node reports the CSI driver")
 	})
 }
 

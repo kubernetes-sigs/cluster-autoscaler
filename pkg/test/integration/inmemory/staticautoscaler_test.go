@@ -197,17 +197,17 @@ func TestFixNodeGroupSize_ZeroOrMaxNodeScaling(t *testing.T) {
 		autoscaler, _, err := integration.DefaultAutoscalingBuilder(options, infra).Build(ctx)
 		assert.NoError(t, err)
 
-		nodeGroupOpts := &config.NodeGroupAutoscalingOptions{
-			ZeroOrMaxNodeScaling: true,
-			MaxNodeProvisionTime: 10 * time.Second,
-		}
+		nodeGroupOpts := config.DefaultNodeGroupAutoscalingOptions(func(o *config.NodeGroupAutoscalingOptions) {
+			o.ZeroOrMaxNodeScaling = true
+			o.MaxNodeProvisionTime = 10 * time.Second
+		})
 
 		templateNode := test.BuildTestNode("atomic-ng-node-0", 2000, 8*1024*1024*1024, test.IsReady(true))
 		ng := fakes.CloudProvider.AddNodeGroup(
 			"atomic-ng",
 			fakecloudprovider.WithNodes(templateNode, 2),
 			fakecloudprovider.WithNGSize(0, 10),
-			fakecloudprovider.WithOptions(nodeGroupOpts),
+			fakecloudprovider.WithOptions(&nodeGroupOpts),
 		)
 
 		// Add non-empty pods running on each node to prevent scale-down from deleting them.

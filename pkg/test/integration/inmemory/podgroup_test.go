@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
 	schedulingv1beta1 "k8s.io/api/scheduling/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -131,6 +132,11 @@ func TestScaleDown_NodesWithPodGroupMembers(t *testing.T) {
 				member := test.SetRSPodSpec(test.BuildScheduledTestPod("member", 100, 100, "ng1-node-0"), "rs")
 				member.Spec.SchedulingGroup = &apiv1.PodSchedulingGroup{PodGroupName: new(podGroupName)}
 				fakes.K8s.AddPod(member)
+				_, err = fakes.KubeClient.AppsV1().ReplicaSets(apiv1.NamespaceDefault).Create(ctx, &appsv1.ReplicaSet{
+					ObjectMeta: metav1.ObjectMeta{Name: "rs", Namespace: apiv1.NamespaceDefault},
+					Spec:       appsv1.ReplicaSetSpec{Replicas: new(int32(1))},
+				}, metav1.CreateOptions{})
+				assert.NoError(t, err)
 
 				// The other node hosts a pod that must not be evicted, so it is
 				// never a scale-down candidate and the member's node is the only
