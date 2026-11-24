@@ -24,6 +24,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -4404,4 +4405,102 @@ func TestShouldScaleUp(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStaticAutoscalerNoDeadlockBetweenCSRAndScaleStateNotifier(t *testing.T) {
+	now := time.Now()
+	n1 := BuildTestNode("n1", 1000, 1000)
+	SetNodeReadyState(n1, true, now.Add(-2*time.Minute))
+	nodes := []*apiv1.Node{n1}
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	provider.AddNodeGroup("ng1", 1, 10, 2)
+	provider.AddNode("ng1", n1)
+	ng1 := provider.GetNodeGroup("ng1")
+
+	daemonSetLister, err := kube_util.NewTestDaemonSetLister(nil)
+	assert.NoError(t, err)
+	listers := kube_util.NewListerRegistry(kube_util.NewTestNodeLister(nodes), kube_util.NewTestNodeLister(nodes),
+		kube_util.NewTestPodLister(nil), kube_util.NewTestPodDisruptionBudgetLister(nil), daemonSetLister, nil, nil, nil, nil)
+	opts := config.AutoscalingOptions{
+		NodeGroupDefaults: config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 10 * time.Second},
+	}
+	callbacks := newStaticAutoscalerProcessorCallbacks()
+	processors, templateRegistry := processorstest.NewTestProcessors(opts)
+	autoscalingCtx, err := NewScaleTestAutoscalingContext(opts, &fake.Clientset{}, listers, provider, callbacks, nil, templateRegistry)
+	assert.NoError(t, err)
+	csr := clusterstate.NewNotifiedClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), processors.NodeGroupConfigProcessor, templateRegistry,
+		clusterstate.WithAsyncNodeGroupStateChecker(processors.AsyncNodeGroupStateChecker),
+		clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier))
+	sdPlanner, sdActuator := newScaleDownPlannerAndActuator(&autoscalingCtx, processors, csr, nil)
+	autoscalingCtx.ScaleDownActuator = sdActuator
+	callbacks.scaleDownPlanner = sdPlanner
+	autoscaler := &StaticAutoscaler{
+		AutoscalingContext:   &autoscalingCtx,
+		clusterStateRegistry: csr,
+		scaleDownPlanner:     sdPlanner,
+		scaleDownActuator:    sdActuator,
+		processors:           processors,
+		loopStartNotifier:    loopstart.NewObserversList(nil),
+		processorCallbacks:   callbacks,
+		initialized:          true,
+	}
+
+	csr.RegisterScaleUp(context.Background(), ng1, 1, now.Add(-time.Minute))
+	probe := &deadlockProbeObserver{csr: csr, inFailedScaleUp: make(chan struct{})}
+	processors.ScaleStateNotifier.Register(probe)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	locked := make(chan struct{})
+	scaleDownDone := make(chan struct{})
+	go func() {
+		defer close(scaleDownDone)
+		probe.mu.Lock()
+		defer probe.mu.Unlock()
+		close(locked)
+		select {
+		case <-probe.inFailedScaleUp:
+			processors.ScaleStateNotifier.RegisterScaleDown(ng1, n1.Name, now, now.Add(time.Minute))
+		case <-ctx.Done():
+		}
+	}()
+	<-locked
+	runOnceDone := make(chan error, 1)
+	go func() {
+		runOnceDone <- autoscaler.RunOnce(ctx, now)
+	}()
+
+	select {
+	case err := <-runOnceDone:
+		cancel()
+		<-scaleDownDone
+		assert.NoError(t, err)
+		assert.True(t, csr.BackoffStatusForNodeGroup(context.Background(), ng1, now).IsBackedOff)
+	case <-time.After(10 * time.Second):
+		t.Fatal("deadlock between ClusterStateRegistry and ScaleStateNotifier")
+	}
+}
+
+// If RunOnce notifies failed scale-ups under the ClusterStateRegistry lock,
+// RegisterFailedScaleUp waits for mu while the mu holder waits for that lock.
+type deadlockProbeObserver struct {
+	mu              sync.Mutex
+	csr             *clusterstate.ClusterStateRegistry
+	inFailedScaleUp chan struct{}
+}
+
+func (o *deadlockProbeObserver) RegisterScaleUp(context.Context, cloudprovider.NodeGroup, int, time.Time) {
+}
+
+func (o *deadlockProbeObserver) RegisterScaleDown(cloudprovider.NodeGroup, string, time.Time, time.Time) {
+}
+
+func (o *deadlockProbeObserver) RegisterFailedScaleUp(_ context.Context, nodeGroup cloudprovider.NodeGroup, _ int, _ cloudprovider.InstanceErrorInfo, _ time.Time) {
+	close(o.inFailedScaleUp)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	_ = o.csr.HasNodeGroupStartedScaleUp(nodeGroup.Id())
+}
+
+func (o *deadlockProbeObserver) RegisterFailedScaleDown(cloudprovider.NodeGroup, string, time.Time) {
 }
