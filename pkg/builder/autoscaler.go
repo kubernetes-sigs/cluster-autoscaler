@@ -54,6 +54,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/scaledowncandidates"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/scaledowncandidates/emptycandidates"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/scaledowncandidates/previouscandidates"
+	"sigs.k8s.io/cluster-autoscaler/pkg/processors/skippednodegroups"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/status"
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas/capacityquota"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
@@ -180,6 +181,21 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 
 	opts.Processors = ca_processors.DefaultProcessors(autoscalingOptions)
 	opts.Processors.TemplateNodeInfoProvider = nodeinfosprovider.NewDefaultTemplateNodeInfoProvider(&autoscalingOptions.NodeInfoCacheExpireTime, autoscalingOptions.ForceDaemonSets)
+
+	if autoscalingOptions.ScaleUpSimulationForSkippedNodeGroupsEnabled {
+		// The evaluator runs predicate checks on its own goroutine, so it needs its own framework
+		// handle (created here, before the informers are started, like the main one). The processor
+		// is composed right after the defaults so that the fake-pod filters below still run before it
+		// and the default (eventing) processor still runs after it.
+		evaluatorHandle, err := skippednodegroups.NewEvaluatorFrameworkHandle(ctx, b.informerFactory, autoscalingOptions.SchedulerConfig, autoscalingOptions.DynamicResourceAllocationEnabled, autoscalingOptions.CSINodeAwareSchedulingEnabled)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create framework handle for the skipped node groups evaluator: %w", err)
+		}
+		evaluator := skippednodegroups.NewEvaluator(evaluatorHandle, skippednodegroups.DefaultEvaluatorOptions())
+		go evaluator.Run(ctx)
+		opts.Processors.ScaleUpStatusProcessor = status.NewCombinedScaleUpStatusProcessor([]status.ScaleUpStatusProcessor{
+			skippednodegroups.NewScaleUpStatusProcessor(evaluator), opts.Processors.ScaleUpStatusProcessor})
+	}
 	podListProcessor := podlistprocessor.NewDefaultPodListProcessor(scheduling.ScheduleAnywhere)
 
 	opts.ScaleUpFailuresRegistry = scaleupfailures.NewRegistry()
