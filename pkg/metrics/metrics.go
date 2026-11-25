@@ -555,7 +555,13 @@ func newCaMetrics() *caMetrics {
 				Namespace: caNamespace,
 				Name:      "binpacking_heterogeneity",
 				Help:      "Number of groups of equivalent pods being processed as a part of the same binpacking simulation.",
-				Buckets:   k8smetrics.ExponentialBuckets(1, 2, 6), // 1, 2, 4, ..., 32
+				Buckets: []float64{
+					1, 2, 3, 4, 6, 8,
+					10, 12, 16, 20, 25, 30, 40, 60, 80,
+					100, 120, 160, 200, 250, 300, 400, 600, 800,
+					1000, 1200, 1600, 2000, 2500, 3000, 4000, 6000, 8000,
+					10000, 12000, 16000, 20000, 25000, 30000, 40000,
+				},
 			}, []string{"instance_type", "cpu_count", "namespace_count"},
 		),
 
