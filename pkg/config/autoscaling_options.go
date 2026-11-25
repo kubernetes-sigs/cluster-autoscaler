@@ -396,9 +396,17 @@ type AutoscalingOptions struct {
 	ScaleUpSimulationForSkippedNodeGroupsEnabled bool
 	// LazySchedulablePodGroupsEnabled tells whether schedulable pod groups are computed lazily during
 	// scale-up, only for node groups reached by binpacking (and their similar node groups). Node
-	// groups not reached by binpacking are evaluated afterwards for reporting only. When disabled,
-	// schedulable pod groups are computed for all node groups valid for scale-up before binpacking.
+	// groups not reached by binpacking are evaluated afterwards for reporting only, within
+	// MaxScaleUpReportingSimulationDuration. When disabled, schedulable pod groups are computed for
+	// all node groups valid for scale-up before binpacking.
 	LazySchedulablePodGroupsEnabled bool
+	// MaxScaleUpReportingSimulationDuration is the maximum time spent in a single scale-up on scheduling
+	// simulations which only serve reporting the scale-up status: evaluating node groups which were not
+	// reached during binpacking and skipped node groups. Pods which were not evaluated against all node
+	// groups not reached by binpacking before the deadline are reported as awaiting evaluation. Skipped
+	// node groups which were not simulated before the deadline are reported as skipped. Zero means no
+	// limit.
+	MaxScaleUpReportingSimulationDuration time.Duration
 	// PendingPodsBatchingTimeout is the maximum time spends when running scheduling simulations when preparing the batch of pods passed to scale up logic. This timeout is used in core filter-out pod list processor.
 	PendingPodsBatchingTimeout time.Duration
 	// GracefulDegradationEnabled tells if graceful degradation for unschedulable pods is enabled.

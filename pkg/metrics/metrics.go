@@ -155,6 +155,10 @@ type TimeoutType string
 const (
 	// BinpackingTimeout means that binpacking was cut short because it exceeded the maximum binpacking time.
 	BinpackingTimeout TimeoutType = "binpacking"
+	// ScaleUpReportingSimulationTimeout means that the simulations run only to report the scale-up
+	// status (e.g. for node groups not evaluated during binpacking or for skipped node groups) were
+	// cut short because they exceeded their maximum duration.
+	ScaleUpReportingSimulationTimeout TimeoutType = "scale_up_reporting_simulation"
 )
 
 // SchedulablePodGroupsPhase identifies the scale-up phase in which schedulable pod groups were computed.
@@ -726,7 +730,7 @@ func (m *caMetrics) InitMetrics() {
 	m.skippedScaleEventsCount.WithLabelValues(DirectionScaleUp, CpuResourceLimit).Add(0)
 	m.skippedScaleEventsCount.WithLabelValues(DirectionScaleUp, MemoryResourceLimit).Add(0)
 
-	for _, timeoutType := range []TimeoutType{BinpackingTimeout} {
+	for _, timeoutType := range []TimeoutType{BinpackingTimeout, ScaleUpReportingSimulationTimeout} {
 		m.timeoutsCount.WithLabelValues(string(timeoutType)).Add(0)
 	}
 }

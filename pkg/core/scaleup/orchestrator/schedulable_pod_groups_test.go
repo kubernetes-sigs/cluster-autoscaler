@@ -342,6 +342,53 @@ func TestLazySchedulablePodGroupsReportingCompletesUnevaluatedNodeGroups(t *test
 	assert.Contains(t, rejected, "ng3")
 }
 
+func TestLazySchedulablePodGroupsReportingDeadlineRoutesPodsToAwaitEvaluation(t *testing.T) {
+	env := newLazyTestEnv(t, []lazyTestNodeGroup{
+		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
+		{id: "ng2", cpu: 4000, mem: 1000, size: 1, max: 10},
+	}, func(o *config.AutoscalingOptions) { o.MaxScaleUpReportingSimulationDuration = time.Nanosecond }, 1)
+
+	scaleUpStatus := env.scaleUp(t,
+		utilstest.BuildTestPod("small", 500, 0),
+		utilstest.BuildTestPod("big", 3000, 0),
+		utilstest.BuildTestPod("huge", 10000, 0),
+	)
+
+	assert.True(t, scaleUpStatus.WasSuccessful())
+	// The reporting budget is exhausted immediately, so ng2 is never simulated.
+	assert.Equal(t, []string{"ng1"}, env.snapshot.evaluatedNodeGroups())
+	// Pods not evaluated against all node groups must not be reported as unschedulable, as that
+	// would emit misleading events and back off controllers of injected pods.
+	assert.Empty(t, scaleUpStatus.PodsRemainUnschedulable)
+	assert.Equal(t, []string{"big", "huge"}, podNames(scaleUpStatus.PodsAwaitEvaluation))
+}
+
+func TestLazySchedulablePodGroupsReportingDeadlineAfterSomeNodeGroups(t *testing.T) {
+	env := newLazyTestEnv(t, []lazyTestNodeGroup{
+		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
+		{id: "ng2", cpu: 1000, mem: 1000, size: 1, max: 10},
+		{id: "ng3", cpu: 1000, mem: 1000, size: 1, max: 10},
+	}, func(o *config.AutoscalingOptions) { o.MaxScaleUpReportingSimulationDuration = 20 * time.Millisecond }, 1)
+	env.failScaleUp["ng1"] = true
+	// The reporting simulation of ng2 completes, but exhausts the budget, so ng3 isn't simulated.
+	env.snapshot.onCheck = func(id string, count int) {
+		if id == "ng2" && count == 2 {
+			time.Sleep(60 * time.Millisecond)
+		}
+	}
+
+	scaleUpStatus, err := env.tryScaleUp(false, utilstest.BuildTestPod("p1", 500, 0), utilstest.BuildTestPod("huge", 10000, 0))
+
+	assert.Error(t, err)
+	assert.Equal(t, 2, env.snapshot.checks["ng2"])
+	assert.Zero(t, env.snapshot.forks["ng3"])
+	// Scaling up ng1 failed. p1 also fits ng2, so as with eager evaluation it is neither unhelpable
+	// nor awaiting evaluation, although ng3 wasn't evaluated. huge fits neither ng1 nor ng2, but
+	// wasn't evaluated against ng3, so it awaits evaluation.
+	assert.Empty(t, scaleUpStatus.PodsRemainUnschedulable)
+	assert.Equal(t, []string{"huge"}, podNames(scaleUpStatus.PodsAwaitEvaluation))
+}
+
 func TestLazySchedulablePodGroupsNoOptionsReportsAllNodeGroups(t *testing.T) {
 	env := newLazyTestEnv(t, []lazyTestNodeGroup{
 		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
@@ -385,6 +432,52 @@ func TestLazySchedulablePodGroupsSimilarNodeGroups(t *testing.T) {
 	assert.Equal(t, []string{"ng1", "ng2"}, scaledUp)
 }
 
+func TestLazySchedulablePodGroupsSkippedNodeGroupsSimulationDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		budget          time.Duration
+		wantSimulated   []string
+		wantSkippedNg3  bool
+		wantRejectedNg3 bool
+	}{
+		{
+			name:            "no deadline",
+			wantSimulated:   []string{"ng1", "ng3"},
+			wantRejectedNg3: true,
+		},
+		{
+			name:           "deadline exceeded",
+			budget:         time.Nanosecond,
+			wantSimulated:  []string{"ng1"},
+			wantSkippedNg3: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newLazyTestEnv(t, []lazyTestNodeGroup{
+				{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
+				// Skipped because it reached its max size.
+				{id: "ng3", cpu: 1000, mem: 1000, size: 1, max: 1},
+			}, func(o *config.AutoscalingOptions) {
+				o.ScaleUpSimulationForSkippedNodeGroupsEnabled = true
+				o.MaxScaleUpReportingSimulationDuration = tc.budget
+			}, 0)
+
+			scaleUpStatus := env.scaleUp(t, utilstest.BuildTestPod("huge", 10000, 0))
+
+			assert.Equal(t, status.ScaleUpNoOptionsAvailable, scaleUpStatus.Result)
+			assert.Equal(t, tc.wantSimulated, env.snapshot.evaluatedNodeGroups())
+			assert.Equal(t, []string{"huge"}, remainingPodNames(scaleUpStatus.PodsRemainUnschedulable))
+			info := scaleUpStatus.PodsRemainUnschedulable[0]
+			_, skipped := info.SkippedNodeGroups["ng3"]
+			_, rejected := info.RejectedNodeGroups["ng3"]
+			// A skipped node group which wasn't simulated is reported as skipped, as if the
+			// simulation was disabled.
+			assert.Equal(t, tc.wantSkippedNg3, skipped)
+			assert.Equal(t, tc.wantRejectedNg3, rejected)
+		})
+	}
+}
+
 func TestLazySchedulablePodGroupsDisabledEvaluatesAllNodeGroups(t *testing.T) {
 	env := newLazyTestEnv(t, []lazyTestNodeGroup{
 		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
@@ -410,9 +503,25 @@ func TestLazySchedulablePodGroupsDisabledEvaluatesAllNodeGroups(t *testing.T) {
 	assert.Empty(t, scaleUpStatus.PodsAwaitEvaluation)
 }
 
+func TestLazySchedulablePodGroupsSkippedNodeGroupsSimulatedOnlyForUnschedulablePods(t *testing.T) {
+	env := newLazyTestEnv(t, []lazyTestNodeGroup{
+		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
+		// Skipped because it reached its max size.
+		{id: "ng3", cpu: 1000, mem: 1000, size: 1, max: 1},
+	}, func(o *config.AutoscalingOptions) { o.ScaleUpSimulationForSkippedNodeGroupsEnabled = true }, 0)
+
+	scaleUpStatus := env.scaleUp(t, utilstest.BuildTestPod("p1", 500, 0))
+
+	assert.True(t, scaleUpStatus.WasSuccessful())
+	assert.Empty(t, scaleUpStatus.PodsRemainUnschedulable)
+	// No pod is unschedulable, so there is nothing to simulate against the skipped node group.
+	assert.Zero(t, env.snapshot.forks["ng3"])
+}
+
 func TestLazySchedulablePodGroupsFailedScaleUpEvaluatesUnevaluatedNodeGroups(t *testing.T) {
 	for _, tc := range []struct {
 		name                string
+		budget              time.Duration
 		wantRemaining       []string
 		wantAwaitEvaluation []string
 		wantSimulatedNg2    bool
@@ -421,12 +530,17 @@ func TestLazySchedulablePodGroupsFailedScaleUpEvaluatesUnevaluatedNodeGroups(t *
 			name:             "no deadline",
 			wantSimulatedNg2: true,
 		},
+		{
+			name:                "deadline exceeded",
+			budget:              time.Nanosecond,
+			wantAwaitEvaluation: []string{"p1"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newLazyTestEnv(t, []lazyTestNodeGroup{
 				{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
 				{id: "ng2", cpu: 1000, mem: 1000, size: 1, max: 10},
-			}, nil, 1)
+			}, func(o *config.AutoscalingOptions) { o.MaxScaleUpReportingSimulationDuration = tc.budget }, 1)
 			env.failScaleUp["ng1"] = true
 
 			scaleUpStatus, err := env.tryScaleUp(false, utilstest.BuildTestPod("p1", 500, 0))
@@ -434,7 +548,8 @@ func TestLazySchedulablePodGroupsFailedScaleUpEvaluatesUnevaluatedNodeGroups(t *
 			assert.Error(t, err)
 			assert.Equal(t, status.ScaleUpError, scaleUpStatus.Result)
 			// p1 also fits ng2, which binpacking didn't reach. As with eager evaluation, it is not
-			// reported as unschedulable because scaling up ng1 failed.
+			// reported as unschedulable because scaling up ng1 failed. If ng2 couldn't be evaluated,
+			// p1 awaits evaluation.
 			assert.Equal(t, tc.wantSimulatedNg2, env.snapshot.forks["ng2"] > 0)
 			assert.Equal(t, tc.wantRemaining, remainingPodNames(scaleUpStatus.PodsRemainUnschedulable))
 			assert.Equal(t, tc.wantAwaitEvaluation, podNames(scaleUpStatus.PodsAwaitEvaluation))
@@ -445,6 +560,7 @@ func TestLazySchedulablePodGroupsFailedScaleUpEvaluatesUnevaluatedNodeGroups(t *
 func TestLazySchedulablePodGroupsAllOptionsFilteredOutReportsAllNodeGroups(t *testing.T) {
 	for _, tc := range []struct {
 		name                string
+		budget              time.Duration
 		wantRemaining       []string
 		wantAwaitEvaluation []string
 	}{
@@ -452,12 +568,17 @@ func TestLazySchedulablePodGroupsAllOptionsFilteredOutReportsAllNodeGroups(t *te
 			name:          "no deadline",
 			wantRemaining: []string{"p1"},
 		},
+		{
+			name:                "deadline exceeded",
+			budget:              time.Nanosecond,
+			wantAwaitEvaluation: []string{"p1"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newLazyTestEnv(t, []lazyTestNodeGroup{
 				{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
 				{id: "ng2", cpu: 1000, mem: 1000, size: 1, max: 10},
-			}, nil, 1)
+			}, func(o *config.AutoscalingOptions) { o.MaxScaleUpReportingSimulationDuration = tc.budget }, 1)
 			env.expander.rejectAll = true
 
 			scaleUpStatus := env.scaleUp(t, utilstest.BuildTestPod("p1", 500, 0))
@@ -480,6 +601,7 @@ func TestLazySchedulablePodGroupsAllOptionsFilteredOutReportsAllNodeGroups(t *te
 func TestLazySchedulablePodGroupsErrorAfterBestOptionReportsAllNodeGroups(t *testing.T) {
 	for _, tc := range []struct {
 		name                string
+		budget              time.Duration
 		wantRemaining       []string
 		wantAwaitEvaluation []string
 	}{
@@ -487,12 +609,18 @@ func TestLazySchedulablePodGroupsErrorAfterBestOptionReportsAllNodeGroups(t *tes
 			name:          "no deadline",
 			wantRemaining: []string{"p1"},
 		},
+		{
+			name:                "deadline exceeded",
+			budget:              time.Nanosecond,
+			wantAwaitEvaluation: []string{"p1"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newLazyTestEnv(t, []lazyTestNodeGroup{
 				{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
 				{id: "ng2", cpu: 1000, mem: 1000, size: 1, max: 10},
 			}, func(o *config.AutoscalingOptions) {
+				o.MaxScaleUpReportingSimulationDuration = tc.budget
 				// The cluster is full: capping the best option's node count fails.
 				o.MaxNodesTotal = 2
 			}, 1)
@@ -559,13 +687,35 @@ func TestSchedulablePodGroupsCache(t *testing.T) {
 	assert.Zero(t, env.snapshot.forks["ng2"])
 }
 
+func TestSchedulablePodGroupsStopOnContextDone(t *testing.T) {
+	env := newLazyTestEnv(t, []lazyTestNodeGroup{
+		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
+	}, nil, 0)
+	ng1 := env.provider.GetNodeGroup("ng1")
+	egs := equivalence.BuildPodGroups([]*apiv1.Pod{
+		utilstest.BuildTestPod("p1", 500, 0),
+		utilstest.BuildTestPod("p2", 400, 0),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	podGroups, evaluated := env.orchestrator.schedulablePodGroups(ctx, egs, ng1, env.nodeInfos["ng1"], true)
+	assert.Empty(t, podGroups)
+	assert.Zero(t, evaluated)
+	assert.Zero(t, env.snapshot.checks["ng1"])
+
+	// The exported function never returns partial results.
+	podGroups = env.orchestrator.SchedulablePodGroups(ctx, egs, ng1, env.nodeInfos["ng1"])
+	assert.Len(t, podGroups, 2)
+}
+
 // BenchmarkLazySchedulablePodGroups measures scale-ups with many node groups and pod equivalence
 // groups, counting node group simulations (snapshot forks for schedulable pod groups):
 //   - binpacking stopping after the first option, when all pods fit it (best case for lazy evaluation),
 //   - binpacking evaluating all node groups (no limiter stop, the cost of eager evaluation),
-//   - binpacking stopping after the first option, when almost all pods fit no node group (worst
-//     case for lazy evaluation: reporting has to simulate the remaining node groups for the
-//     unschedulable pods),
+//   - binpacking stopping after the first option, when almost all pods fit no node group, without
+//     and with a reporting simulation budget (worst case for lazy evaluation: reporting has to
+//     simulate the remaining node groups for the unschedulable pods),
 //   - binpacking stopping after the first option, when all node groups are similar to it (worst
 //     case for balancing: similar node groups are simulated in the first binpacking iteration).
 func BenchmarkLazySchedulablePodGroups(b *testing.B) {
@@ -577,6 +727,7 @@ func BenchmarkLazySchedulablePodGroups(b *testing.B) {
 		name             string
 		stopAfterOptions int
 		unschedulable    bool
+		reportingBudget  time.Duration
 		balanceSimilar   bool
 		lazyDisabled     bool
 	}{
@@ -584,6 +735,7 @@ func BenchmarkLazySchedulablePodGroups(b *testing.B) {
 		{name: "stop after first option, all pods fit", stopAfterOptions: 1},
 		{name: "evaluate all node groups", stopAfterOptions: nodeGroupCount + 1},
 		{name: "stop after first option, 99% pods fit nowhere", stopAfterOptions: 1, unschedulable: true},
+		{name: "stop after first option, 99% pods fit nowhere, 5ms reporting budget", stopAfterOptions: 1, unschedulable: true, reportingBudget: 5 * time.Millisecond},
 		// All node groups are identical, so they are all similar to the first one and simulated
 		// in the first binpacking iteration.
 		{name: "stop after first option, all node groups similar", stopAfterOptions: 1, balanceSimilar: true},
@@ -597,6 +749,7 @@ func BenchmarkLazySchedulablePodGroups(b *testing.B) {
 			for b.Loop() {
 				b.StopTimer()
 				env := newLazyTestEnv(b, nodeGroups, func(o *config.AutoscalingOptions) {
+					o.MaxScaleUpReportingSimulationDuration = bc.reportingBudget
 					o.BalanceSimilarNodeGroups = bc.balanceSimilar
 					o.LazySchedulablePodGroupsEnabled = !bc.lazyDisabled
 				}, bc.stopAfterOptions)
