@@ -15,10 +15,11 @@
 export GOBIN ?= $(CURDIR)/bin
 export PATH := $(GOBIN):$(PATH)
 
-HELM      ?= go tool -modfile=tools/go.mod helm
-KIND      ?= go tool -modfile=tools/go.mod kind
-ENVTEST   ?= go tool -modfile=tools/go.mod setup-envtest
-GINKGO    ?= go tool -modfile=tools/go.mod ginkgo
+HELM          ?= go tool -modfile=tools/go.mod helm
+KIND          ?= go tool -modfile=tools/go.mod kind
+ENVTEST       ?= go tool -modfile=tools/go.mod setup-envtest
+GINKGO        ?= go tool -modfile=tools/go.mod ginkgo
+GOLANGCI_LINT ?= go tool -modfile=tools/golangci-lint.mod golangci-lint
 
 .PHONY: build-kwok
 build-kwok:
@@ -43,8 +44,11 @@ clean:
 
 .PHONY: format
 format:
-	test -z "$$(find . -path ./vendor -prune -type f -o -name '*.go' -exec gofmt -s -d {} + | tee /dev/stderr)" || \
-	test -z "$$(find . -path ./vendor -prune -type f -o -name '*.go' -exec gofmt -s -w {} + | tee /dev/stderr)"
+	$(GOLANGCI_LINT) fmt ./...
+
+.PHONY: lint
+lint:
+	$(GOLANGCI_LINT) run ./...
 
 .PHONY: setup-envtest
 setup-envtest: ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')

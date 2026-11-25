@@ -22,4 +22,5 @@ DIR=$(dirname $0)
 # Spell checking
 git ls-files --full-name \
     | grep -v -e vendor \
+    | grep -v -e tools/golangci-lint.mod -e tools/golangci-lint.sum \
     | xargs misspell -error -o stderr
