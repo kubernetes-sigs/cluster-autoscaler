@@ -578,7 +578,7 @@ func newCaMetrics() *caMetrics {
 				Namespace: caNamespace,
 				Name:      "node_removal_latency_seconds",
 				Help:      "Latency from when an unneeded node is eligible for scale down until it is removed (deleted=true) or it became needed again (deleted=false). The 'delay_reason' label indicates the technical bottleneck that delayed the scale-down ('none' if not delayed). The 'scaledown_reason' label indicates whether the node was 'empty' or 'underutilized'.",
-				Buckets:   k8smetrics.ExponentialBuckets(1, 1.5, 19), // ~1s → ~24min
+				Buckets:   []float64{5, 10, 20, 30, 60, 90, 120, 180, 240, 300, 420, 600, 900, 1200, 1800, 2700, 3600}, // 5s → 60min
 			}, []string{"deleted", "delay_reason", "scaledown_reason"},
 		),
 
