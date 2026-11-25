@@ -67,9 +67,10 @@ type Actuator struct {
 	// TODO: Move budget processor to scaledown planner, potentially merge into PostFilteringScaleDownNodeProcessor
 	// This is a larger change to the code structure which impacts some existing actuator unit tests
 	// as well as Cluster Autoscaler implementations that may override ScaleDownSetProcessor
-	budgetProcessor          *budgets.ScaleDownBudgetProcessor
-	configGetter             actuatorNodeGroupConfigGetter
-	scaledownDelayCalculator *nodeDelayAfterTaintCalculator
+	budgetProcessor            *budgets.ScaleDownBudgetProcessor
+	configGetter               actuatorNodeGroupConfigGetter
+	scaledownDelayCalculator   *nodeDelayAfterTaintCalculator
+	maxConcurrentNodesTainting int
 }
 
 // actuatorNodeGroupConfigGetter is an interface to limit the functions that can be used
@@ -90,14 +91,15 @@ func NewActuator(autoscalingCtx *ca_context.AutoscalingContext, scaleStateNotifi
 		evictor = NewEvictor(ndt, legacyFlagDrainConfig, false)
 	}
 	return &Actuator{
-		autoscalingCtx:           autoscalingCtx,
-		nodeDeletionTracker:      ndt,
-		nodeDeletionScheduler:    NewGroupDeletionScheduler(autoscalingCtx, ndt, ndb, evictor),
-		budgetProcessor:          budgets.NewScaleDownBudgetProcessor(autoscalingCtx),
-		deleteOptions:            deleteOptions,
-		drainabilityRules:        drainabilityRules,
-		configGetter:             configGetter,
-		scaledownDelayCalculator: newNodeDelayAfterTaintCalculator(autoscalingCtx.NodeDeleteDelayAfterTaint, autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled),
+		autoscalingCtx:             autoscalingCtx,
+		nodeDeletionTracker:        ndt,
+		nodeDeletionScheduler:      NewGroupDeletionScheduler(autoscalingCtx, ndt, ndb, evictor),
+		budgetProcessor:            budgets.NewScaleDownBudgetProcessor(autoscalingCtx),
+		deleteOptions:              deleteOptions,
+		drainabilityRules:          drainabilityRules,
+		configGetter:               configGetter,
+		scaledownDelayCalculator:   newNodeDelayAfterTaintCalculator(autoscalingCtx.NodeDeleteDelayAfterTaint, autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled),
+		maxConcurrentNodesTainting: max(autoscalingCtx.MaxConcurrentNodesTainting, 1),
 	}
 }
 
@@ -267,7 +269,7 @@ func (a *Actuator) taintNodesSync(ctx context.Context, buckets []*budgets.NodeGr
 	taintedAtomicNodes := make(map[string][]*apiv1.Node)
 
 	// context.Background() makes sure every node is either tainted, failed, or skipped.
-	workqueue.ParallelizeUntil(context.Background(), a.autoscalingCtx.MaxConcurrentNodesTainting, len(targets), func(i int) {
+	workqueue.ParallelizeUntil(context.Background(), a.maxConcurrentNodesTainting, len(targets), func(i int) {
 		t := targets[i]
 		isAtomic := t.bucket.Atomic
 
@@ -344,7 +346,7 @@ func (a *Actuator) taintNodesSync(ctx context.Context, buckets []*budgets.NodeGr
 
 // cleanTaintsSync removes ToBeDeletedTaint concurrently from nodes whose atomic nodegroup scale-down was aborted.
 func (a *Actuator) cleanTaintsSync(ctx context.Context, nodes []*apiv1.Node) {
-	workqueue.ParallelizeUntil(context.Background(), a.autoscalingCtx.MaxConcurrentNodesTainting, len(nodes), func(piece int) {
+	workqueue.ParallelizeUntil(context.Background(), a.maxConcurrentNodesTainting, len(nodes), func(piece int) {
 		node := nodes[piece]
 		if _, err := taints.CleanToBeDeleted(ctx, node, a.autoscalingCtx.ClientSet, a.autoscalingCtx.CordonNodeBeforeTerminate); err != nil {
 			klog.FromContext(ctx).Error(err, "Failed to remove ToBeDeleted taint after a failed scale-down", "node", klog.KObj(node))

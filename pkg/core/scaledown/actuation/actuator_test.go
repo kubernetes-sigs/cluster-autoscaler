@@ -50,6 +50,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/observers/nodegroupchange"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupconfig"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
+	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/options"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/utilization"
 	caerrors "sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
@@ -1541,13 +1542,8 @@ func runStartDeletionTest(t *testing.T, tc startDeletionTestCase, force bool) {
 	ndb := NewNodeDeletionBatcher(&autoscalingCtx, scaleStateNotifier, ndt, 0*time.Second)
 	legacyFlagDrainConfig := SingleRuleDrainConfig(autoscalingCtx.MaxGracefulTerminationSec)
 	evictor := Evictor{EvictionRetryTime: 0, PodEvictionHeadroom: DefaultPodEvictionHeadroom, shutdownGracePeriodByPodPriority: legacyFlagDrainConfig, fullDsEviction: force}
-	actuator := Actuator{
-		autoscalingCtx: &autoscalingCtx, nodeDeletionTracker: ndt,
-		nodeDeletionScheduler:    NewGroupDeletionScheduler(&autoscalingCtx, ndt, ndb, evictor),
-		budgetProcessor:          budgets.NewScaleDownBudgetProcessor(&autoscalingCtx),
-		configGetter:             nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.NodeGroupDefaults),
-		scaledownDelayCalculator: newNodeDelayAfterTaintCalculator(autoscalingCtx.NodeDeleteDelayAfterTaint, autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled),
-	}
+	actuator := NewActuator(&autoscalingCtx, scaleStateNotifier, ndt, options.NodeDeleteOptions{}, nil, nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.NodeGroupDefaults))
+	actuator.nodeDeletionScheduler = NewGroupDeletionScheduler(&autoscalingCtx, ndt, ndb, evictor)
 
 	var gotResult status.ScaleDownResult
 	var gotScaleDownNodes []*status.ScaleDownNode
@@ -1733,10 +1729,7 @@ func newTaintNodesTestActuator(t *testing.T, nodes []*apiv1.Node, failingNodes m
 	if err != nil {
 		t.Fatalf("Couldn't set up autoscaling context: %v", err)
 	}
-	actuator := &Actuator{
-		autoscalingCtx:      &autoscalingCtx,
-		nodeDeletionTracker: deletiontracker.NewNodeDeletionTracker(0),
-	}
+	actuator := NewActuator(&autoscalingCtx, nil, deletiontracker.NewNodeDeletionTracker(0), options.NodeDeleteOptions{}, nil, nil)
 	getUpdateAttempts := func() int {
 		mu.Lock()
 		defer mu.Unlock()
@@ -1988,12 +1981,8 @@ func TestStartDeletionInBatchBasic(t *testing.T) {
 			ndb := NewNodeDeletionBatcher(&autoscalingCtx, scaleStateNotifier, ndt, deleteInterval)
 			legacyFlagDrainConfig := SingleRuleDrainConfig(autoscalingCtx.MaxGracefulTerminationSec)
 			evictor := Evictor{EvictionRetryTime: 0, PodEvictionHeadroom: DefaultPodEvictionHeadroom, shutdownGracePeriodByPodPriority: legacyFlagDrainConfig}
-			actuator := Actuator{
-				autoscalingCtx: &autoscalingCtx, nodeDeletionTracker: ndt,
-				nodeDeletionScheduler:    NewGroupDeletionScheduler(&autoscalingCtx, ndt, ndb, evictor),
-				budgetProcessor:          budgets.NewScaleDownBudgetProcessor(&autoscalingCtx),
-				scaledownDelayCalculator: newNodeDelayAfterTaintCalculator(autoscalingCtx.NodeDeleteDelayAfterTaint, autoscalingCtx.AutoscalingOptions.DynamicNodeDeleteDelayAfterTaintEnabled),
-			}
+			actuator := NewActuator(&autoscalingCtx, scaleStateNotifier, ndt, options.NodeDeleteOptions{}, nil, nil)
+			actuator.nodeDeletionScheduler = NewGroupDeletionScheduler(&autoscalingCtx, ndt, ndb, evictor)
 
 			for _, nodes := range deleteNodes {
 				actuator.StartDeletion(context.Background(), nodes, []*apiv1.Node{})
