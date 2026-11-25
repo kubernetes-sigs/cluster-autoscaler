@@ -975,6 +975,7 @@ func BenchmarkRunOnceScaleDownAntiAffinity(b *testing.B) {
 			opts.NodeGroupDefaults.ScaleDownUnneededTime = 0
 			opts.MaxScaleDownParallelism = 2000
 			opts.MaxDrainParallelism = 2000
+			opts.MaxConcurrentNodesTainting = 5
 			opts.ScaleDownDelayAfterAdd = 0
 			opts.ScaleDownEnabled = true
 			opts.ScaleDownNonEmptyCandidatesCount = 2000
