@@ -383,16 +383,28 @@ func (o *ScaleUpOrchestrator) ComputeExpansionOption(
 	now time.Time,
 	allOrNothing bool,
 ) expander.Option {
+	return o.computeExpansionOption(ctx, nodeGroup, staticSchedulablePodGroups(schedulablePodGroups), nodeInfos, currentNodeCount, now, allOrNothing)
+}
+
+func (o *ScaleUpOrchestrator) computeExpansionOption(
+	ctx context.Context,
+	nodeGroup cloudprovider.NodeGroup,
+	schedulablePodGroups schedulablePodGroupsProvider,
+	nodeInfos map[string]*framework.NodeInfo,
+	currentNodeCount int,
+	now time.Time,
+	allOrNothing bool,
+) expander.Option {
 	logger := klog.FromContext(ctx)
 	option := expander.Option{NodeGroup: nodeGroup}
-	podGroups := schedulablePodGroups[nodeGroup.Id()]
+	podGroups, _ := schedulablePodGroups.Get(ctx, nodeGroup.Id())
 	nodeInfo := nodeInfos[nodeGroup.Id()]
 
 	if len(podGroups) == 0 {
 		return option
 	}
 
-	option.SimilarNodeGroups = o.ComputeSimilarNodeGroups(ctx, nodeGroup, nodeInfos, schedulablePodGroups, now)
+	option.SimilarNodeGroups = o.computeSimilarNodeGroups(ctx, nodeGroup, nodeInfos, schedulablePodGroups, now)
 	if option.SimilarNodeGroups != nil {
 		// if similar node groups are found, log about them
 		similarNodeGroupIds := make([]string, 0)
@@ -445,6 +457,17 @@ func (o *ScaleUpOrchestrator) CreateNodeGroup(
 	podEquivalenceGroups []*equivalence.PodGroup,
 	daemonSets []*appsv1.DaemonSet,
 ) ([]nodegroups.CreateNodeGroupResult, *status.ScaleUpStatus, errors.AutoscalerError) {
+	return o.createNodeGroup(ctx, initialOption, nodeInfos, staticSchedulablePodGroups(schedulablePodGroups), podEquivalenceGroups, daemonSets)
+}
+
+func (o *ScaleUpOrchestrator) createNodeGroup(
+	ctx context.Context,
+	initialOption *expander.Option,
+	nodeInfos map[string]*framework.NodeInfo,
+	schedulablePodGroups schedulablePodGroupsStore,
+	podEquivalenceGroups []*equivalence.PodGroup,
+	daemonSets []*appsv1.DaemonSet,
+) ([]nodegroups.CreateNodeGroupResult, *status.ScaleUpStatus, errors.AutoscalerError) {
 	oldId := initialOption.NodeGroup.Id()
 	res, aErr := o.processors.NodeGroupManager.CreateNodeGroup(o.autoscalingCtx, initialOption.NodeGroup)
 	return o.processCreateNodeGroupResult(ctx, initialOption, oldId, nodeInfos, schedulablePodGroups, podEquivalenceGroups, daemonSets, res, aErr)
@@ -460,6 +483,18 @@ func (o *ScaleUpOrchestrator) CreateNodeGroupAsync(
 	daemonSets []*appsv1.DaemonSet,
 	initializer nodegroups.AsyncNodeGroupInitializer,
 ) ([]nodegroups.CreateNodeGroupResult, *status.ScaleUpStatus, errors.AutoscalerError) {
+	return o.createNodeGroupAsync(ctx, initialOption, nodeInfos, staticSchedulablePodGroups(schedulablePodGroups), podEquivalenceGroups, daemonSets, initializer)
+}
+
+func (o *ScaleUpOrchestrator) createNodeGroupAsync(
+	ctx context.Context,
+	initialOption *expander.Option,
+	nodeInfos map[string]*framework.NodeInfo,
+	schedulablePodGroups schedulablePodGroupsStore,
+	podEquivalenceGroups []*equivalence.PodGroup,
+	daemonSets []*appsv1.DaemonSet,
+	initializer nodegroups.AsyncNodeGroupInitializer,
+) ([]nodegroups.CreateNodeGroupResult, *status.ScaleUpStatus, errors.AutoscalerError) {
 	oldId := initialOption.NodeGroup.Id()
 	res, aErr := o.processors.NodeGroupManager.CreateNodeGroupAsync(o.autoscalingCtx, initialOption.NodeGroup, initializer)
 	return o.processCreateNodeGroupResult(ctx, initialOption, oldId, nodeInfos, schedulablePodGroups, podEquivalenceGroups, daemonSets, res, aErr)
@@ -470,7 +505,7 @@ func (o *ScaleUpOrchestrator) processCreateNodeGroupResult(
 	initialOption *expander.Option,
 	initialOptionId string,
 	nodeInfos map[string]*framework.NodeInfo,
-	schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
+	schedulablePodGroups schedulablePodGroupsStore,
 	podEquivalenceGroups []*equivalence.PodGroup,
 	daemonSets []*appsv1.DaemonSet,
 	result nodegroups.CreateNodeGroupResult,
@@ -489,7 +524,8 @@ func (o *ScaleUpOrchestrator) processCreateNodeGroupResult(
 
 	// Use candidate template and scheduling results as a fallback
 	nodeInfos[newId] = nodeInfos[initialOptionId]
-	schedulablePodGroups[newId] = schedulablePodGroups[initialOptionId]
+	initialPodGroups, _ := schedulablePodGroups.Get(ctx, initialOptionId)
+	schedulablePodGroups.Set(result.MainCreatedNodeGroup, initialPodGroups)
 
 	// If possible, replace candidate node-info with node info based on created node group.
 	// The latter should be more in line with nodes which will be created by node group.
@@ -507,14 +543,14 @@ func (o *ScaleUpOrchestrator) processCreateNodeGroupResult(
 	if aErr == nil && len(result.ExtraCreatedNodeGroups) > 0 {
 		// Remove reference to initial id to prevent stale/duplicate entries in scheduling error reports
 		deletePodEquivalenceGroupsId(podEquivalenceGroups, initialOptionId)
-		schedulablePodGroups[newId] = o.SchedulablePodGroups(ctx, podEquivalenceGroups, result.MainCreatedNodeGroup, mainCreatedNodeInfo)
+		schedulablePodGroups.Set(result.MainCreatedNodeGroup, o.SchedulablePodGroups(ctx, podEquivalenceGroups, result.MainCreatedNodeGroup, mainCreatedNodeInfo))
 	} else {
 		patchPodEquivalenceGroupsId(podEquivalenceGroups, initialOptionId, newId)
 	}
 
 	if initialOptionId != newId {
 		delete(nodeInfos, initialOptionId)
-		delete(schedulablePodGroups, initialOptionId)
+		schedulablePodGroups.Delete(initialOptionId)
 	}
 
 	for _, nodeGroup := range result.ExtraCreatedNodeGroups {
@@ -524,7 +560,7 @@ func (o *ScaleUpOrchestrator) processCreateNodeGroupResult(
 			continue
 		}
 		nodeInfos[nodeGroup.Id()] = nodeInfo
-		schedulablePodGroups[nodeGroup.Id()] = o.SchedulablePodGroups(ctx, podEquivalenceGroups, nodeGroup, nodeInfo)
+		schedulablePodGroups.Set(nodeGroup, o.SchedulablePodGroups(ctx, podEquivalenceGroups, nodeGroup, nodeInfo))
 	}
 
 	// Update ClusterStateRegistry so similar nodegroups rebalancing works.
@@ -647,12 +683,12 @@ func (o *ScaleUpOrchestrator) balanceScaleUps(
 	nodeGroup cloudprovider.NodeGroup,
 	newNodes int,
 	nodeInfos map[string]*framework.NodeInfo,
-	schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
+	schedulablePodGroups schedulablePodGroupsProvider,
 	tracker *resourcequotas.Tracker,
 ) ([]nodegroupset.ScaleUpInfo, errors.AutoscalerError) {
 	// Recompute similar node groups in case they need to be updated
 	logger := klog.FromContext(ctx)
-	similarNodeGroups := o.ComputeSimilarNodeGroups(ctx, nodeGroup, nodeInfos, schedulablePodGroups, now)
+	similarNodeGroups := o.computeSimilarNodeGroups(ctx, nodeGroup, nodeInfos, schedulablePodGroups, now)
 
 	if similarNodeGroups != nil {
 		// if similar node groups are found, log about them
@@ -760,6 +796,19 @@ func (o *ScaleUpOrchestrator) ComputeSimilarNodeGroups(
 	schedulablePodGroups map[string][]estimator.PodEquivalenceGroup,
 	now time.Time,
 ) []cloudprovider.NodeGroup {
+	return o.computeSimilarNodeGroups(ctx, nodeGroup, nodeInfos, staticSchedulablePodGroups(schedulablePodGroups), now)
+}
+
+// computeSimilarNodeGroups finds similar node groups which can schedule the same set of pods as the
+// main node group. Schedulable pod groups of similar node groups are requested only after the cheap
+// checks pass, so a lazy provider computes them only when needed.
+func (o *ScaleUpOrchestrator) computeSimilarNodeGroups(
+	ctx context.Context,
+	nodeGroup cloudprovider.NodeGroup,
+	nodeInfos map[string]*framework.NodeInfo,
+	schedulablePodGroups schedulablePodGroupsProvider,
+	now time.Time,
+) []cloudprovider.NodeGroup {
 	logger := klog.FromContext(ctx)
 	if !o.autoscalingCtx.BalanceSimilarNodeGroups {
 		return nil
@@ -773,7 +822,7 @@ func (o *ScaleUpOrchestrator) ComputeSimilarNodeGroups(
 		return nil
 	}
 
-	podGroups, found := schedulablePodGroups[nodeGroup.Id()]
+	podGroups, found := schedulablePodGroups.Get(ctx, nodeGroup.Id())
 	if !found || len(podGroups) == 0 {
 		return nil
 	}
@@ -789,7 +838,7 @@ func (o *ScaleUpOrchestrator) ComputeSimilarNodeGroups(
 		// Non-existing node groups are created later so skip check for them.
 		if ng.Exist(ctx) && !o.clusterStateRegistry.NodeGroupScaleUpSafety(ctx, ng, now).SafeToScale {
 			logger.V(2).Info("Ignoring node group when balancing: group is not ready for scaleup", "nodeGroupId", ng.Id())
-		} else if similarPodGroups, found := schedulablePodGroups[ng.Id()]; found && matchingSchedulablePodGroups(podGroups, similarPodGroups) {
+		} else if similarPodGroups, found := schedulablePodGroups.Get(ctx, ng.Id()); found && matchingSchedulablePodGroups(podGroups, similarPodGroups) {
 			validSimilarNodeGroups = append(validSimilarNodeGroups, ng)
 		}
 	}
@@ -903,6 +952,20 @@ func (o *ScaleUpOrchestrator) abortAllOrNothing(ctx context.Context, args scaleU
 	logger.V(1).Info("Not attempting scale-up due to all-or-nothing strategy: not all pods would be accommodated")
 	args.podEquivalenceGroups = markAllGroupsAsUnschedulable(args.podEquivalenceGroups, AllOrNothingReason)
 	return o.noOptionsAvailableStatus(ctx, args)
+}
+
+// errorStatus returns the scale-up status for an error which occurred after the best option was picked.
+func (o *ScaleUpOrchestrator) errorStatus(ctx context.Context, args scaleUpCtx, bestOption *expander.Option, createNodeGroupResults []nodegroups.CreateNodeGroupResult, aErr errors.AutoscalerError) (*status.ScaleUpStatus, errors.AutoscalerError) {
+	markedEquivalenceGroups := markAllGroupsAsUnschedulable(args.podEquivalenceGroups, ScaleUpExecutionErrorReason)
+	return status.UpdateScaleUpError(
+		&status.ScaleUpStatus{
+			CreateNodeGroupResults:  createNodeGroupResults,
+			PodsTriggeredScaleUp:    bestOption.Pods,
+			PodsRemainUnschedulable: o.GetRemainingPods(ctx, markedEquivalenceGroups, args.nodeGroups, args.skippedNodeGroups, args.nodeInfos),
+			ConsideredNodeGroups:    args.nodeGroups,
+		},
+		aErr,
+	)
 }
 
 func findSkippedNodeGroupsSatisfyingPodPredicates(eg *equivalence.PodGroup, skipped map[string]status.Reasons) map[string]status.Reasons {
@@ -1050,7 +1113,7 @@ type scaleUpPlan struct {
 func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCtx) (scaleUpPlan, *status.ScaleUpStatus, errors.AutoscalerError) {
 	// Calculate expansion options
 	logger := klog.FromContext(ctx)
-	schedulablePodGroups := map[string][]estimator.PodEquivalenceGroup{}
+	schedulablePodGroups := staticSchedulablePodGroups{}
 	var options []expander.Option
 
 	// This code here runs a simulation to see which pods can be scheduled on which node groups.
@@ -1059,7 +1122,7 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 	}
 
 	for _, nodeGroup := range args.validNodeGroups {
-		option := o.ComputeExpansionOption(ctx, nodeGroup, schedulablePodGroups, args.nodeInfos, len(args.nodes), args.now, args.allOrNothing)
+		option := o.computeExpansionOption(ctx, nodeGroup, schedulablePodGroups, args.nodeInfos, len(args.nodes), args.now, args.allOrNothing)
 		o.processors.BinpackingLimiter.MarkProcessed(o.autoscalingCtx, nodeGroup.Id())
 
 		if len(option.Pods) == 0 || option.NodeCount == 0 {
@@ -1100,29 +1163,13 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 	// Cap new nodes to supported number of nodes in the cluster.
 	newNodes, aErr := o.GetCappedNewNodeCount(ctx, bestOption.NodeCount, len(args.nodes))
 	if aErr != nil {
-		markedEquivalenceGroups := markAllGroupsAsUnschedulable(args.podEquivalenceGroups, ScaleUpExecutionErrorReason)
-		st, err := status.UpdateScaleUpError(
-			&status.ScaleUpStatus{
-				PodsTriggeredScaleUp:    bestOption.Pods,
-				PodsRemainUnschedulable: o.GetRemainingPods(ctx, markedEquivalenceGroups, args.nodeGroups, args.skippedNodeGroups, args.nodeInfos),
-				ConsideredNodeGroups:    args.nodeGroups,
-			},
-			aErr,
-		)
+		st, err := o.errorStatus(ctx, args, bestOption, nil, aErr)
 		return scaleUpPlan{}, st, err
 	}
 
 	newNodes, aErr = o.applyLimits(ctx, newNodes, args.tracker, bestOption.NodeGroup, args.nodeInfos)
 	if aErr != nil {
-		markedEquivalenceGroups := markAllGroupsAsUnschedulable(args.podEquivalenceGroups, ScaleUpExecutionErrorReason)
-		st, err := status.UpdateScaleUpError(
-			&status.ScaleUpStatus{
-				PodsTriggeredScaleUp:    bestOption.Pods,
-				PodsRemainUnschedulable: o.GetRemainingPods(ctx, markedEquivalenceGroups, args.nodeGroups, args.skippedNodeGroups, args.nodeInfos),
-				ConsideredNodeGroups:    args.nodeGroups,
-			},
-			aErr,
-		)
+		st, err := o.errorStatus(ctx, args, bestOption, nil, aErr)
 		return scaleUpPlan{}, st, err
 	}
 
@@ -1144,9 +1191,9 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 		oldId := bestOption.NodeGroup.Id()
 		if o.autoscalingCtx.AsyncNodeGroupsEnabled {
 			initializer := NewAsyncNodeGroupInitializer(bestOption, args.nodeInfos[oldId], o.scaleUpExecutor, o.taintConfig, args.daemonSets, o.processors.ScaleUpStatusProcessor, o.autoscalingCtx, args.allOrNothing)
-			createNodeGroupResults, scaleUpStatus, aErr = o.CreateNodeGroupAsync(ctx, bestOption, args.nodeInfos, schedulablePodGroups, args.podEquivalenceGroups, args.daemonSets, initializer)
+			createNodeGroupResults, scaleUpStatus, aErr = o.createNodeGroupAsync(ctx, bestOption, args.nodeInfos, schedulablePodGroups, args.podEquivalenceGroups, args.daemonSets, initializer)
 		} else {
-			createNodeGroupResults, scaleUpStatus, aErr = o.CreateNodeGroup(ctx, bestOption, args.nodeInfos, schedulablePodGroups, args.podEquivalenceGroups, args.daemonSets)
+			createNodeGroupResults, scaleUpStatus, aErr = o.createNodeGroup(ctx, bestOption, args.nodeInfos, schedulablePodGroups, args.podEquivalenceGroups, args.daemonSets)
 		}
 		if aErr != nil {
 			markedEquivalenceGroups := markAllGroupsAsUnschedulable(args.podEquivalenceGroups, ScaleUpExecutionErrorReason)
@@ -1159,16 +1206,7 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 
 	scaleUpInfos, aErr := o.balanceScaleUps(ctx, args.now, bestOption.NodeGroup, newNodes, args.nodeInfos, schedulablePodGroups, args.tracker)
 	if aErr != nil {
-		markedEquivalenceGroups := markAllGroupsAsUnschedulable(args.podEquivalenceGroups, ScaleUpExecutionErrorReason)
-		st, err := status.UpdateScaleUpError(
-			&status.ScaleUpStatus{
-				CreateNodeGroupResults:  createNodeGroupResults,
-				PodsTriggeredScaleUp:    bestOption.Pods,
-				PodsRemainUnschedulable: o.GetRemainingPods(ctx, markedEquivalenceGroups, args.nodeGroups, args.skippedNodeGroups, args.nodeInfos),
-				ConsideredNodeGroups:    args.nodeGroups,
-			},
-			aErr,
-		)
+		st, err := o.errorStatus(ctx, args, bestOption, createNodeGroupResults, aErr)
 		return scaleUpPlan{}, st, err
 	}
 
