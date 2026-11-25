@@ -19,6 +19,7 @@ package scaledowncandidates
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -104,5 +105,45 @@ func TestSort(t *testing.T) {
 		if diff := cmp.Diff(test.sortedOrder, got); diff != "" {
 			t.Errorf("%s: NodeSorter.Sort() diff (-want +got):\n%s", test.name, diff)
 		}
+	}
+}
+
+func TestSortStable(t *testing.T) {
+	t.Parallel()
+
+	const nodeCount = 60
+	nodes := make([]*apiv1.Node, nodeCount)
+	scores := make([]int, nodeCount)
+	for i := range nodeCount {
+		nodes[i] = BuildTestNode(fmt.Sprintf("node-%d", i), 10, 100)
+		scores[i] = i % 3
+	}
+
+	var want []int
+	for tier := 2; tier >= 0; tier-- {
+		for i := range nodeCount {
+			if scores[i] == tier {
+				want = append(want, i)
+			}
+		}
+	}
+
+	sorter := NodeSorter{
+		nodes:      nodes,
+		processors: []CandidatesComparer{&scoreProcessor{scores: scores}},
+	}
+	sorted := sorter.Sort()
+
+	got := make([]int, len(sorted))
+	for i, node := range sorted {
+		suffix := strings.TrimPrefix(node.Name, "node-")
+		idx, err := strconv.Atoi(suffix)
+		if err != nil {
+			t.Fatalf("strconv.Atoi(%q) failed: %v", suffix, err)
+		}
+		got[i] = idx
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("NodeSorter.Sort() stability diff (-want +got):\n%s", diff)
 	}
 }

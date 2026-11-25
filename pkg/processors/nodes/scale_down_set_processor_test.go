@@ -18,8 +18,10 @@ package nodes
 
 import (
 	gocontext "context"
+	"fmt"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 
 	v1 "k8s.io/api/core/v1"
@@ -371,6 +373,79 @@ func TestAtomicResizeFilterUnremovableNodes(t *testing.T) {
 			assert.ElementsMatch(t, tc.expectedToBeRemoved, toBeRemoved)
 			assert.ElementsMatch(t, tc.expectedUnremovable, unRemovable)
 		})
+	}
+}
+
+func TestAtomicResizeFilterUnremovableNodesPreservesOrder(t *testing.T) {
+	t.Parallel()
+
+	const atomicGroupCount = 20
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	provider.AddNodeGroup("std", 0, 100, 2)
+	for i := range atomicGroupCount {
+		provider.AddNodeGroupWithCustomOptions(fmt.Sprintf("atomic-%02d", i), 0, 100, 2, &config.NodeGroupAutoscalingOptions{
+			ZeroOrMaxNodeScaling: true,
+		})
+	}
+	provider.AddNodeGroupWithCustomOptions("partial", 0, 100, 2, &config.NodeGroupAutoscalingOptions{
+		ZeroOrMaxNodeScaling: true,
+	})
+
+	var (
+		allNodes   []*v1.Node
+		candidates []simulator.NodeToBeRemoved
+	)
+	addCandidate := func(ng, name string) {
+		n := buildRemovableNode(name)
+		provider.AddNode(ng, n.Node)
+		allNodes = append(allNodes, n.Node)
+		candidates = append(candidates, n)
+	}
+
+	addCandidate("std", "std-0")
+	// Add the first node of every atomic group in order, then the second node in
+	// reverse group order, so only first-seen candidate order matches atomic-00..19.
+	for i := range atomicGroupCount {
+		addCandidate(fmt.Sprintf("atomic-%02d", i), fmt.Sprintf("atomic-%02d-a", i))
+	}
+	addCandidate("partial", "partial-a")
+	partialExtra := BuildTestNode("partial-b", 1000, 10)
+	provider.AddNode("partial", partialExtra)
+	allNodes = append(allNodes, partialExtra)
+	for i := atomicGroupCount - 1; i >= 0; i-- {
+		addCandidate(fmt.Sprintf("atomic-%02d", i), fmt.Sprintf("atomic-%02d-b", i))
+	}
+	addCandidate("std", "std-1")
+
+	autoscalingCtx, err := NewScaleTestAutoscalingContext(config.AutoscalingOptions{}, &fake.Clientset{}, nil, provider, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewScaleTestAutoscalingContext() failed: %v", err)
+	}
+	clustersnapshot.InitializeClusterSnapshotOrDie(t, autoscalingCtx.ClusterSnapshot, allNodes, nil)
+
+	processor := NewAtomicResizeFilteringProcessor()
+	gotRemovable, gotUnremovable := processor.FilterUnremovableNodes(t.Context(), &autoscalingCtx, NewDefaultScaleDownContext(), candidates)
+
+	wantRemovable := make([]string, 0, 2+atomicGroupCount*2)
+	wantRemovable = append(wantRemovable, "std-0", "std-1")
+	for i := range atomicGroupCount {
+		wantRemovable = append(wantRemovable, fmt.Sprintf("atomic-%02d-a", i), fmt.Sprintf("atomic-%02d-b", i))
+	}
+	gotRemovableNames := make([]string, len(gotRemovable))
+	for i, n := range gotRemovable {
+		gotRemovableNames[i] = n.Node.Name
+	}
+	if diff := cmp.Diff(wantRemovable, gotRemovableNames); diff != "" {
+		t.Errorf("AtomicResizeFilteringProcessor.FilterUnremovableNodes() removable order diff (-want +got):\n%s", diff)
+	}
+
+	wantUnremovable := []string{"partial-a"}
+	gotUnremovableNames := make([]string, len(gotUnremovable))
+	for i, n := range gotUnremovable {
+		gotUnremovableNames[i] = n.Node.Name
+	}
+	if diff := cmp.Diff(wantUnremovable, gotUnremovableNames); diff != "" {
+		t.Errorf("AtomicResizeFilteringProcessor.FilterUnremovableNodes() unremovable diff (-want +got):\n%s", diff)
 	}
 }
 

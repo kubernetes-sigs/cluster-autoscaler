@@ -36,7 +36,8 @@ type NodeSorter struct {
 	processors []CandidatesComparer
 }
 
-// Sort return list of nodes in descending order.
+// Sort returns the nodes sorted by the configured comparers, preserving the
+// input order among nodes that no comparer distinguishes.
 func (n *NodeSorter) Sort() []*apiv1.Node {
 	if len(n.processors) == 0 {
 		return n.nodes
@@ -44,7 +45,7 @@ func (n *NodeSorter) Sort() []*apiv1.Node {
 	for _, p := range n.processors {
 		p.ResetState()
 	}
-	sort.Sort(n)
+	sort.Stable(n)
 	return n.nodes
 }
 

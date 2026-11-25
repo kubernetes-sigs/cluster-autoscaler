@@ -19,6 +19,7 @@ package unneeded
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
@@ -36,12 +37,14 @@ import (
 	klog "k8s.io/klog/v2"
 )
 
-// Nodes tracks the state of cluster nodes that are not needed.
+// Nodes tracks the state of cluster nodes that are not needed, keeping them in
+// the order in which they were last passed to Update.
 type Nodes struct {
 	sdtg scaleDownTimeGetter
 
 	cachedList []*scaledown.UnneededNode
 	byName     map[string]*node
+	names      []string
 }
 
 type node struct {
@@ -131,8 +134,12 @@ func (n *Nodes) Update(ctx context.Context, autoscalingCtx *ca_context.Autoscali
 func (n *Nodes) updateInternalState(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, nodes []simulator.NodeToBeRemoved, ts time.Time, timestampGetter func(simulator.NodeToBeRemoved) *time.Time) {
 	logger := klog.FromContext(ctx)
 	updated := make(map[string]*node, len(nodes))
+	names := make([]string, 0, len(nodes))
 	for _, nn := range nodes {
 		name := nn.Node.Name
+		if _, seen := updated[name]; !seen {
+			names = append(names, name)
+		}
 
 		val, found := n.byName[name]
 		if found {
@@ -147,9 +154,11 @@ func (n *Nodes) updateInternalState(ctx context.Context, autoscalingCtx *ca_cont
 		}
 	}
 	n.byName = updated
+	n.names = names
 	n.cachedList = nil
 	if klog.V(4).Enabled() {
-		for k, v := range n.byName {
+		for _, k := range n.names {
+			v := n.byName[k]
 			logger.Info("Node is unneeded", "nodeName", k, "since", v.since, "duration", ts.Sub(v.since).String())
 		}
 	}
@@ -184,11 +193,13 @@ func (n *Nodes) Contains(nodeName string) bool {
 	return found
 }
 
-// AsList returns a slice of unneeded Node objects.
+// AsList returns a slice of unneeded Node objects in the order of the last
+// Update.
 func (n *Nodes) AsList() []*scaledown.UnneededNode {
 	if n.cachedList == nil {
-		n.cachedList = make([]*scaledown.UnneededNode, 0, len(n.byName))
-		for _, v := range n.byName {
+		n.cachedList = make([]*scaledown.UnneededNode, 0, len(n.names))
+		for _, name := range n.names {
+			v := n.byName[name]
 			scaleDownReason := metrics.Empty
 			if len(v.ntbr.PodsToReschedule) > 0 {
 				scaleDownReason = metrics.Underutilized
@@ -205,19 +216,26 @@ func (n *Nodes) AsList() []*scaledown.UnneededNode {
 
 // Drop stops tracking a specified node.
 func (n *Nodes) Drop(node string) {
+	if _, found := n.byName[node]; !found {
+		return
+	}
 	delete(n.byName, node)
+	n.names = slices.DeleteFunc(n.names, func(name string) bool { return name == node })
 	n.cachedList = nil
 }
 
 // RemovableAt returns all nodes that can be removed at a given time, divided
 // into empty and non-empty node lists, as well as a list of nodes that were
-// unneeded, but are not removable, annotated by reason.
+// unneeded, but are not removable, annotated by reason. Empty nodes are
+// evaluated before non-empty nodes, and within each group nodes are evaluated
+// and returned in the order of the last Update.
 func (n *Nodes) RemovableAt(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, scaleDownContext nodes.ScaleDownContext, ts time.Time) (empty, needDrain []simulator.NodeToBeRemoved, unremovable []simulator.UnremovableNode) {
 	logger := klog.FromContext(ctx)
 	nodeGroupSize := utils.GetNodeGroupSizeMap(ctx, autoscalingCtx.CloudProvider)
 	emptyNodes, drainNodes := n.splitEmptyAndNonEmptyNodes()
 
-	for nodeName, v := range emptyNodes {
+	for _, v := range emptyNodes {
+		nodeName := v.ntbr.Node.Name
 		logger.V(2).Info("Node is unneeded", "nodeName", nodeName, "duration", ts.Sub(v.since).String())
 		if r := n.unremovableReason(ctx, autoscalingCtx, scaleDownContext, v, ts, nodeGroupSize); r != simulator.NoReason {
 			unremovable = append(unremovable, simulator.UnremovableNode{Node: v.ntbr.Node, Reason: r})
@@ -225,7 +243,8 @@ func (n *Nodes) RemovableAt(ctx context.Context, autoscalingCtx *ca_context.Auto
 		}
 		empty = append(empty, v.ntbr)
 	}
-	for nodeName, v := range drainNodes {
+	for _, v := range drainNodes {
+		nodeName := v.ntbr.Node.Name
 		logger.V(2).Info("Node is unneeded", "nodeName", nodeName, "duration", ts.Sub(v.since).String())
 		if r := n.unremovableReason(ctx, autoscalingCtx, scaleDownContext, v, ts, nodeGroupSize); r != simulator.NoReason {
 			unremovable = append(unremovable, simulator.UnremovableNode{Node: v.ntbr.Node, Reason: r})
@@ -313,14 +332,15 @@ func (n *Nodes) unremovableReason(ctx context.Context, autoscalingCtx *ca_contex
 	return simulator.NoReason
 }
 
-func (n *Nodes) splitEmptyAndNonEmptyNodes() (empty, needDrain map[string]*node) {
-	empty = make(map[string]*node)
-	needDrain = make(map[string]*node)
-	for name, v := range n.byName {
+// splitEmptyAndNonEmptyNodes returns the empty and non-empty unneeded nodes,
+// each in the order of the last Update.
+func (n *Nodes) splitEmptyAndNonEmptyNodes() (empty, needDrain []*node) {
+	for _, name := range n.names {
+		v := n.byName[name]
 		if len(v.ntbr.PodsToReschedule) > 0 {
-			needDrain[name] = v
+			needDrain = append(needDrain, v)
 		} else {
-			empty[name] = v
+			empty = append(empty, v)
 		}
 	}
 	return
