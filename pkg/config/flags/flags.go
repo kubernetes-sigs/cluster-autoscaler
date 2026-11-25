@@ -187,6 +187,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&p.o.SalvoScaleUp, "salvo-scale-up", false, "Whether to allow multiple scale-ups in a single CA loop.")
 	fs.DurationVar(&p.o.SalvoScaleUpBudget, "salvo-scale-up-budget", time.Minute, "Maximum time CA spends on subsequent scale ups in a single CA loop. Requires salvo-scale-up flag to be enabled.")
 	fs.BoolVar(&p.o.ScaleUpSimulationForSkippedNodeGroupsEnabled, "scaleup-simulation-for-skipped-node-groups-enabled", false, "Whether to enable the scale up simulation for skipped node groups.")
+	fs.BoolVar(&p.o.LazySchedulablePodGroupsEnabled, "enable-lazy-schedulable-pod-groups", false, "Whether to compute schedulable pod groups only for node groups reached by binpacking during scale-up. Node groups not reached by binpacking are only evaluated for reporting the scale-up status. When disabled, all node groups are evaluated before binpacking.")
 	fs.BoolVar(&p.o.GCEOptions.BulkMigInstancesListingEnabled, "bulk-mig-instances-listing-enabled", false, "Fetch GCE mig instances in bulk instead of per mig")
 	fs.IntVar(&p.o.GCEOptions.ConcurrentRefreshes, "gce-concurrent-refreshes", 1, "Maximum number of concurrent refreshes per cloud object type.")
 	fs.DurationVar(&p.o.GCEOptions.MigInstancesMinRefreshWaitTime, "gce-mig-instances-min-refresh-wait-time", 5*time.Second, "The minimum time which needs to pass before GCE MIG instances from a given MIG can be refreshed.")
