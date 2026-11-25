@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -47,22 +48,45 @@ const (
 
 // LogEventRecorder records events on some top-level object, to give user (without access to logs) a view of most important CA actions.
 type LogEventRecorder struct {
-	recorder     record.EventRecorder
+	// recorder and active are set on construction and never mutated.
+	recorder record.EventRecorder
+	active   bool
+
+	// mu guards statusObject, published statusObject instances must be treated as
+	// immutable (including by callers of WriteStatusConfigMap when logRecorder != nil).
+	mu           sync.RWMutex
 	statusObject runtime.Object
-	active       bool
+}
+
+func (ler *LogEventRecorder) getStatusObject() runtime.Object {
+	ler.mu.RLock()
+	defer ler.mu.RUnlock()
+	return ler.statusObject
+}
+
+func (ler *LogEventRecorder) setStatusObject(statusObject runtime.Object) {
+	ler.mu.Lock()
+	defer ler.mu.Unlock()
+	ler.statusObject = statusObject
 }
 
 // Event records an event on underlying object. This does nothing if the underlying object is not set.
 func (ler *LogEventRecorder) Event(eventtype, reason, message string) {
-	if ler.active && ler.statusObject != nil {
-		ler.recorder.Event(ler.statusObject, eventtype, reason, message)
+	if !ler.active {
+		return
+	}
+	if statusObj := ler.getStatusObject(); statusObj != nil {
+		ler.recorder.Event(statusObj, eventtype, reason, message)
 	}
 }
 
 // Eventf records an event on underlying object. This does nothing if the underlying object is not set.
 func (ler *LogEventRecorder) Eventf(eventtype, reason, message string, args ...interface{}) {
-	if ler.active && ler.statusObject != nil {
-		ler.recorder.Eventf(ler.statusObject, eventtype, reason, message, args...)
+	if !ler.active {
+		return
+	}
+	if statusObj := ler.getStatusObject(); statusObj != nil {
+		ler.recorder.Eventf(statusObj, eventtype, reason, message, args...)
 	}
 }
 
@@ -147,7 +171,7 @@ func WriteStatusConfigMap(ctx context.Context, kubeClient kube_client.Interface,
 	// Having this as a side-effect is somewhat ugly
 	// But it makes error handling easier, as we get a free retry each loop
 	if logRecorder != nil {
-		logRecorder.statusObject = configMap
+		logRecorder.setStatusObject(configMap)
 	}
 	return configMap, nil
 }
