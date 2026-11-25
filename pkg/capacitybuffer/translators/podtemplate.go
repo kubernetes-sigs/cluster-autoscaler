@@ -24,30 +24,15 @@ import (
 	apiv1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer"
+	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/common"
 )
 
-const (
-	serviceAccountVolumeNamePrefix = "kube-api-access-"
-	podTemplateNamePrefix          = "capacitybuffer-"
-	podTemplateNameSuffix          = "-pod-template"
-	maxPodTemplateNameLength       = 253
-	maxBufferNameLen               = maxPodTemplateNameLength - len(podTemplateNamePrefix) - len(podTemplateNameSuffix)
-)
+const serviceAccountVolumeNamePrefix = "kube-api-access-"
 
-func getPodTemplateNameForBuffer(buffer *apiv1.CapacityBuffer) string {
-	bufferName := buffer.Name
-	// trim buffer name if the pod template name would exceed 253 chars, which is the max length for a k8s resource name
-	if len(bufferName) > maxBufferNameLen {
-		bufferName = bufferName[:maxBufferNameLen]
-	}
-
-	return podTemplateNamePrefix + bufferName + podTemplateNameSuffix
-}
-
-func getPodTemplateFromSpec(pts *corev1.PodTemplateSpec, buffer *apiv1.CapacityBuffer) *corev1.PodTemplate {
+func podTemplateFromSpec(pts *corev1.PodTemplateSpec, buffer *apiv1.CapacityBuffer) *corev1.PodTemplate {
 	return &corev1.PodTemplate{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      getPodTemplateNameForBuffer(buffer),
+			Name:      common.ManagedPodTemplateName(buffer.UID),
 			Namespace: buffer.Namespace,
 			OwnerReferences: []metav1.OwnerReference{
 				{

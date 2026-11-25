@@ -76,7 +76,7 @@ func (t *ScalableObjectsTranslator) useScaleResolver(buffer *apiv1.CapacityBuffe
 func (t *ScalableObjectsTranslator) Translate(buffers []*apiv1.CapacityBuffer) []error {
 	errors := []error{}
 	for _, buffer := range buffers {
-		if !isScalableObjectBuffer(buffer) {
+		if !isScalableObjectBuffer(buffer) || buffer.DeletionTimestamp != nil {
 			continue
 		}
 		if err := t.translateBuffer(context.TODO(), buffer); err != nil {
@@ -147,7 +147,7 @@ func (t *ScalableObjectsTranslator) resolveSpecAndReplicas(ctx context.Context, 
 }
 
 func (t *ScalableObjectsTranslator) ensureManagedPodTemplate(ctx context.Context, buffer *apiv1.CapacityBuffer, spec *corev1.PodTemplateSpec) (*corev1.PodTemplate, error) {
-	targetPodTemplate := getPodTemplateFromSpec(spec, buffer)
+	targetPodTemplate := podTemplateFromSpec(spec, buffer)
 
 	return t.client.EnsurePodTemplate(ctx, targetPodTemplate)
 }

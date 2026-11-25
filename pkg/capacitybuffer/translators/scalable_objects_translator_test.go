@@ -18,6 +18,7 @@ package translator
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -26,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	buffersfake "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/clientset/versioned/fake"
 	fakeclient "k8s.io/client-go/kubernetes/fake"
@@ -114,7 +116,7 @@ func TestScalableObjectsTranslator(t *testing.T) {
 				}, nil, ptr.To[int32](2)),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-pod-template"}, ptr.To[int32](2), ptr.To[int64](0), nil, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-uid-managed-pod-template"}, ptr.To[int32](2), ptr.To[int64](0), nil, testutil.GetConditionReady()),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -128,7 +130,7 @@ func TestScalableObjectsTranslator(t *testing.T) {
 				}, ptr.To[int32](50), nil),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-pod-template"}, ptr.To[int32](5), ptr.To[int64](0), nil, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-uid-managed-pod-template"}, ptr.To[int32](5), ptr.To[int64](0), nil, testutil.GetConditionReady()),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -142,7 +144,7 @@ func TestScalableObjectsTranslator(t *testing.T) {
 				}, ptr.To[int32](200), nil),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-pod-template"}, ptr.To[int32](20), ptr.To[int64](0), nil, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-uid-managed-pod-template"}, ptr.To[int32](20), ptr.To[int64](0), nil, testutil.GetConditionReady()),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -156,7 +158,7 @@ func TestScalableObjectsTranslator(t *testing.T) {
 				}, ptr.To[int32](200), ptr.To[int32](15)),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-pod-template"}, ptr.To[int32](20), ptr.To[int64](0), nil, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-uid-managed-pod-template"}, ptr.To[int32](20), ptr.To[int64](0), nil, testutil.GetConditionReady()),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -170,7 +172,7 @@ func TestScalableObjectsTranslator(t *testing.T) {
 				}, ptr.To[int32](50), ptr.To[int32](15)),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-pod-template"}, ptr.To[int32](15), ptr.To[int64](0), nil, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-uid-managed-pod-template"}, ptr.To[int32](15), ptr.To[int64](0), nil, testutil.GetConditionReady()),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -185,7 +187,7 @@ func TestScalableObjectsTranslator(t *testing.T) {
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
 				testutil.GetBufferStatus(
-					&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-pod-template"}, nil, ptr.To[int64](0), nil, testutil.GetConditionNotReadyWithMessage(notReadyMsg),
+					&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-uid-managed-pod-template"}, nil, ptr.To[int64](0), nil, testutil.GetConditionNotReadyWithMessage(notReadyMsg),
 				),
 			},
 			expectedNumberOfErrors: 0,
@@ -203,7 +205,7 @@ func TestScalableObjectsTranslator(t *testing.T) {
 				}),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-pod-template"}, ptr.To[int32](2), ptr.To[int64](0), nil, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-uid-managed-pod-template"}, ptr.To[int32](2), ptr.To[int64](0), nil, testutil.GetConditionReady()),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -220,7 +222,7 @@ func TestScalableObjectsTranslator(t *testing.T) {
 				}),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-pod-template"}, ptr.To[int32](2), ptr.To[int64](0), nil, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-uid-managed-pod-template"}, ptr.To[int32](2), ptr.To[int64](0), nil, testutil.GetConditionReady()),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -237,7 +239,7 @@ func TestScalableObjectsTranslator(t *testing.T) {
 				}),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-pod-template"}, ptr.To[int32](1), ptr.To[int64](0), nil, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-uid-managed-pod-template"}, ptr.To[int32](1), ptr.To[int64](0), nil, testutil.GetConditionReady()),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -254,7 +256,26 @@ func TestScalableObjectsTranslator(t *testing.T) {
 				}),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-pod-template"}, ptr.To[int32](2), ptr.To[int64](0), nil, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-buffer1-uid-managed-pod-template"}, ptr.To[int32](2), ptr.To[int64](0), nil, testutil.GetConditionReady()),
+			},
+			expectedNumberOfErrors: 0,
+		},
+		{
+			name: "Skips terminating scalableRef buffer",
+			buffers: []*v1.CapacityBuffer{
+				func() *v1.CapacityBuffer {
+					now := metav1.NewTime(time.Unix(1700000000, 0))
+					b := getTestBufferWithScalableAttributes("terminating-scalable", &v1.ScalableRef{
+						Name:     "replicaSet1",
+						Kind:     "ReplicaSet",
+						APIGroup: "apps",
+					}, nil, ptr.To[int32](2))
+					b.DeletionTimestamp = &now
+					return b
+				}(),
+			},
+			expectedStatus: []*v1.CapacityBufferStatus{
+				testutil.GetBufferStatus(nil, nil, nil, nil, nil),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -285,6 +306,7 @@ func getTestBufferWithScalableAttributes(bufferName string, scalableRef *v1.Scal
 	buffer := &v1.CapacityBuffer{}
 	buffer.Name = bufferName
 	buffer.Namespace = defaultNamespace
+	buffer.UID = types.UID(bufferName + "-uid")
 	buffer.Spec.ScalableRef = scalableRef
 	buffer.Spec.Percentage = percentage
 	buffer.Spec.Replicas = replicas

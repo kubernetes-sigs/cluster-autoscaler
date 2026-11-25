@@ -47,6 +47,7 @@ import (
 	scaleclient "k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/cache"
 	klog "k8s.io/klog/v2"
+	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/common"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -383,10 +384,18 @@ func (c *CapacityBufferClient) UpdatePodTemplate(podTemplate *corev1.PodTemplate
 	return nil, err
 }
 
-// EnsurePodTemplate upserts a pod template.
+// EnsurePodTemplate creates or updates a UID-named managed PodTemplate.
 func (c *CapacityBufferClient) EnsurePodTemplate(ctx context.Context, podTemplate *corev1.PodTemplate) (*corev1.PodTemplate, error) {
 	if c.kubernetesClient == nil {
 		return nil, fmt.Errorf("capacity buffer client is not configured for applying pod template")
+	}
+	desiredController := metav1.GetControllerOfNoCopy(podTemplate)
+	if desiredController == nil || desiredController.UID == "" {
+		return nil, fmt.Errorf("desired pod template %s/%s is missing a controller owner reference UID", podTemplate.Namespace, podTemplate.Name)
+	}
+	expectedName := common.ManagedPodTemplateName(desiredController.UID)
+	if podTemplate.Name != expectedName {
+		return nil, fmt.Errorf("pod template %s/%s does not match expected UID name %s", podTemplate.Namespace, podTemplate.Name, expectedName)
 	}
 
 	// Try to use the lister first to avoid unnecessary API calls.
@@ -397,8 +406,20 @@ func (c *CapacityBufferClient) EnsurePodTemplate(ctx context.Context, podTemplat
 		}
 		return nil, err
 	}
-	if equality.Semantic.DeepEqual(existing.Template, podTemplate.Template) &&
-		equality.Semantic.DeepEqual(existing.OwnerReferences, podTemplate.OwnerReferences) {
+
+	// During --cascade=orphan, GC clears PodTemplate ownerReferences while the CapacityBuffer still
+	// holds the "orphan" finalizer, which can arrive on podTemplateInformer before bufferInformer sees DeletionTimestamp.
+	existingController := metav1.GetControllerOfNoCopy(existing)
+	if (existingController == nil || existingController.UID != desiredController.UID) && c.buffersClient != nil {
+		liveBuf, err := c.buffersClient.AutoscalingV1beta1().CapacityBuffers(podTemplate.Namespace).Get(ctx, desiredController.Name, metav1.GetOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("verifying owning CapacityBuffer %s/%s before adopting pod template %s: %w", podTemplate.Namespace, desiredController.Name, podTemplate.Name, err)
+		}
+		if liveBuf.UID != desiredController.UID || liveBuf.DeletionTimestamp != nil {
+			return nil, fmt.Errorf("skipping adoption of pod template %s/%s: CapacityBuffer %s (%s) is deleting", podTemplate.Namespace, podTemplate.Name, desiredController.Name, desiredController.UID)
+		}
+	}
+	if equality.Semantic.DeepEqual(existing.Template, podTemplate.Template) && equality.Semantic.DeepEqual(existing.OwnerReferences, podTemplate.OwnerReferences) {
 		return existing, nil
 	}
 	existing.OwnerReferences = podTemplate.OwnerReferences
