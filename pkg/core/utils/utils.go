@@ -17,6 +17,7 @@ limitations under the License.
 package utils
 
 import (
+	"context"
 	"reflect"
 	"time"
 
@@ -59,7 +60,7 @@ func FilterOutNodesFromNotAutoscaledGroups(nodes []*apiv1.Node, cloudProvider cl
 		if isVirtualKubeletNode(node) {
 			continue
 		}
-		nodeGroup, err := cloudProvider.NodeGroupForNode(node)
+		nodeGroup, err := cloudProvider.NodeGroupForNode(context.TODO(), node)
 		if err != nil {
 			return []*apiv1.Node{}, errors.ToAutoscalerError(errors.CloudProviderError, err)
 		}
@@ -115,7 +116,12 @@ func UpdateClusterStateMetrics(csr *clusterstate.ClusterStateRegistry) {
 	}
 	metrics.UpdateClusterSafeToAutoscale(csr.IsClusterHealthy())
 	readiness := csr.GetClusterReadiness()
+
 	metrics.UpdateNodesCount(len(readiness.Ready), len(readiness.Unready), len(readiness.NotStarted), len(readiness.Suspended), len(readiness.LongUnregistered), len(readiness.Unregistered))
+
+	for nodeGroupID, readiness := range csr.GetPerNodeGroupReadiness() {
+		metrics.UpdateNodesCountPerNodeGroup(len(readiness.Ready), len(readiness.Unready), len(readiness.NotStarted), len(readiness.Suspended), len(readiness.LongUnregistered), len(readiness.Unregistered), nodeGroupID)
+	}
 }
 
 // GetOldestCreateTime returns oldest creation time out of the pods in the set

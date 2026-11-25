@@ -17,6 +17,7 @@ limitations under the License.
 package customresources
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -36,6 +37,7 @@ func TestFilterOutNodesWithUnreadyCSIResources(t *testing.T) {
 	testCases := map[string]struct {
 		nodeGroupsAllNodes         map[string][]*apiv1.Node
 		nodeGroupsTemplatesCSINode map[string]*storagev1.CSINode
+		registryNodeInfos          map[string]*framework.NodeInfo
 		nodesCSINode               map[string]*storagev1.CSINode
 		csiSnapshot                *csisnapshot.Snapshot
 		expectedNodesReadiness     map[string]bool
@@ -211,11 +213,11 @@ func TestFilterOutNodesWithUnreadyCSIResources(t *testing.T) {
 				"node_2_CSI_Ready": true,
 			},
 		},
-		"node missing from CSI snapshot stays ready": {
+		"node missing from CSI snapshot is treated as unready": {
 			nodeGroupsAllNodes: map[string][]*apiv1.Node{
 				"ng1": {
 					buildTestNode("node_1_CSI_Ready", true),
-					buildTestNode("node_2_CSI_Ready", true),
+					buildTestNode("node_2_CSI_Unready", true),
 				},
 			},
 			nodeGroupsTemplatesCSINode: map[string]*storagev1.CSINode{
@@ -223,11 +225,59 @@ func TestFilterOutNodesWithUnreadyCSIResources(t *testing.T) {
 			},
 			nodesCSINode: map[string]*storagev1.CSINode{
 				"node_1_CSI_Ready": createCSINode("node_1_CSI_Ready", []string{"driver1", "driver2"}),
-				// node_2_CSI_Ready is missing from snapshot
+				// node_2_CSI_Unready has no backing CSINode object yet.
 			},
 			expectedNodesReadiness: map[string]bool{
+				"node_1_CSI_Ready":   true,
+				"node_2_CSI_Unready": false,
+			},
+		},
+		"node missing from CSI snapshot stays ready when template has no CSINode": {
+			nodeGroupsAllNodes: map[string][]*apiv1.Node{
+				"ng1": {
+					buildTestNode("node_1_CSI_Ready", true),
+				},
+			},
+			nodeGroupsTemplatesCSINode: map[string]*storagev1.CSINode{},
+			nodesCSINode:               map[string]*storagev1.CSINode{},
+			expectedNodesReadiness: map[string]bool{
 				"node_1_CSI_Ready": true,
-				"node_2_CSI_Ready": true, // stays ready because error getting CSI node keeps it in ready list
+			},
+		},
+		"fallback to NodeGroup template when registry is missing": {
+			nodeGroupsAllNodes: map[string][]*apiv1.Node{
+				"ng1": {
+					buildTestNode("node_1", true),
+				},
+			},
+			nodeGroupsTemplatesCSINode: map[string]*storagev1.CSINode{
+				"ng1": createCSINode("ng1_template", []string{"driver1", "driver2"}),
+			},
+			registryNodeInfos: map[string]*framework.NodeInfo{},
+			nodesCSINode: map[string]*storagev1.CSINode{
+				"node_1": createCSINode("node_1", []string{"driver1"}),
+			},
+			expectedNodesReadiness: map[string]bool{
+				"node_1": false,
+			},
+		},
+		"registry preferred over NodeGroup template": {
+			nodeGroupsAllNodes: map[string][]*apiv1.Node{
+				"ng1": {
+					buildTestNode("node_1", true),
+				},
+			},
+			nodeGroupsTemplatesCSINode: map[string]*storagev1.CSINode{
+				"ng1": createCSINode("ng1_template", []string{"driver1"}),
+			},
+			registryNodeInfos: map[string]*framework.NodeInfo{
+				"ng1": framework.NewNodeInfo(buildTestNode("ng1_registry_template", true), nil).SetCSINode(createCSINode("ng1_registry_template", []string{"driver1", "driver2"})),
+			},
+			nodesCSINode: map[string]*storagev1.CSINode{
+				"node_1": createCSINode("node_1", []string{"driver1"}),
+			},
+			expectedNodesReadiness: map[string]bool{
+				"node_1": false,
 			},
 		},
 		"All together": {
@@ -303,11 +353,15 @@ func TestFilterOutNodesWithUnreadyCSIResources(t *testing.T) {
 
 			clusterSnapshotStore := store.NewBasicSnapshotStore()
 			clusterSnapshot, _, _ := testsnapshot.NewCustomTestSnapshotAndHandle(clusterSnapshotStore)
-			clusterSnapshot.SetClusterState([]*apiv1.Node{}, []*apiv1.Pod{}, nil, csiSnapshot)
+			clusterSnapshot.SetClusterState(context.Background(), []*apiv1.Node{}, []*apiv1.Pod{}, nil, csiSnapshot)
 
-			autoscalingCtx := &ca_context.AutoscalingContext{CloudProvider: provider, ClusterSnapshot: clusterSnapshot}
+			autoscalingCtx := &ca_context.AutoscalingContext{
+				CloudProvider:            provider,
+				ClusterSnapshot:          clusterSnapshot,
+				TemplateNodeInfoRegistry: newMockTemplateNodeInfoRegistry(tc.registryNodeInfos),
+			}
 			processor := CSICustomResourcesProcessor{}
-			newAllNodes, newReadyNodes := processor.FilterOutNodesWithUnreadyResources(autoscalingCtx, initialAllNodes, initialReadyNodes, nil, csiSnapshot)
+			newAllNodes, newReadyNodes := processor.FilterOutNodesWithUnreadyResources(context.Background(), autoscalingCtx, initialAllNodes, initialReadyNodes, nil, csiSnapshot)
 
 			readyNodes := make(map[string]bool)
 			for _, node := range newReadyNodes {

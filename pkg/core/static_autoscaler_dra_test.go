@@ -17,6 +17,7 @@ limitations under the License.
 package core
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"slices"
@@ -82,7 +83,7 @@ type fakeScaleUpStatusProcessor struct {
 	lastStatus *status.ScaleUpStatus
 }
 
-func (f *fakeScaleUpStatusProcessor) Process(autoscalingCtx *ca_context.AutoscalingContext, status *status.ScaleUpStatus) {
+func (f *fakeScaleUpStatusProcessor) Process(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, status *status.ScaleUpStatus) {
 	f.lastStatus = status
 }
 
@@ -93,7 +94,7 @@ type fakeScaleDownStatusProcessor struct {
 	lastStatus *scaledownstatus.ScaleDownStatus
 }
 
-func (f *fakeScaleDownStatusProcessor) Process(autoscalingCtx *ca_context.AutoscalingContext, status *scaledownstatus.ScaleDownStatus) {
+func (f *fakeScaleDownStatusProcessor) Process(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, status *scaledownstatus.ScaleDownStatus) {
 	f.lastStatus = status
 }
 
@@ -412,6 +413,7 @@ func TestStaticAutoscalerDynamicResources(t *testing.T) {
 					ScaleDownEnabled:                 true,
 					MaxScaleDownParallelism:          10,
 					MaxDrainParallelism:              10,
+					MaxConcurrentNodesTainting:       5,
 					NodeDeletionBatcherInterval:      0 * time.Second,
 					NodeDeleteDelayAfterTaint:        1 * time.Millisecond,
 					MaxNodesTotal:                    1000,

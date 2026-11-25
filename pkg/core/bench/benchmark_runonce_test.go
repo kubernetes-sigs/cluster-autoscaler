@@ -35,10 +35,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apimachineryruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	apimachinerywatch "k8s.io/apimachinery/pkg/watch"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/kubernetes/fake"
 	k8s_testing "k8s.io/client-go/testing"
-	featuretesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/features"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -58,6 +59,16 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 )
+
+func init() {
+	// Bump the default channel size of fake watchers (from default of 100)
+	// to avoid "panic: channel full" during large benchmarks.
+	// When simulating thousands of node deletions, corresponding delete events
+	// are written synchronously to the watcher's result channel. Since tests
+	// don't always actively drain these events synchronously, a larger channel
+	// buffer prevents the channel from filling up and causing benchmark failures.
+	apimachinerywatch.DefaultChanSize = 20000
+}
 
 // Benchmark evaluates the performance of the Cluster Autoscaler's primary control loop (RunOnce).
 //
@@ -121,6 +132,13 @@ func (s scenario) run(b *testing.B) {
 	klog.LogToStderr(false)
 	klog.SetOutput(io.Discard)
 	ctrl.SetLogger(klog.Background())
+
+	// Set scheduler feature gates from the options, the same as the CA binary does at startup.
+	opts := defaultCAOptions()
+	if s.config != nil {
+		s.config(&opts)
+	}
+	setFeatureGate(b, features.InterPodAffinityHostnameFastPath, opts.InterPodAffinityHostnameFastPath)
 
 	if !*withGC {
 		// Disable automatic Garbage Collection during the timed portion of the benchmark
@@ -203,6 +221,33 @@ func (s scenario) runIteration(b *testing.B, i int, fProf, fTrace *os.File) {
 			b.Fatalf("verify failed: %v", err)
 		}
 	}
+}
+
+// setFeatureGate sets a feature gate on the default gate until the benchmark finishes. It's used
+// instead of featuretesting.SetFeatureGateDuringTest, which logs every change through b.Logf,
+// and benchmarks always print that output.
+func setFeatureGate(b *testing.B, f featuregate.Feature, value bool) {
+	gate := utilfeature.DefaultMutableFeatureGate
+	if gate.Enabled(f) == value {
+		return
+	}
+	setter := gate.(featuregate.MutableFeatureGateWithLogger)
+	wasSet := gate.ExplicitlySet(f)
+	// The zero value klog.Logger discards everything.
+	if err := setter.SetFromMapWithLogger(klog.Logger{}, map[string]bool{string(f): value}); err != nil {
+		b.Fatalf("Failed to set feature gate %s=%v: %v", f, value, err)
+	}
+	b.Cleanup(func() {
+		var err error
+		if wasSet {
+			err = setter.SetFromMapWithLogger(klog.Logger{}, map[string]bool{string(f): !value})
+		} else {
+			err = gate.ResetFeatureValueToDefault(f)
+		}
+		if err != nil {
+			b.Errorf("Failed to restore feature gate %s: %v", f, err)
+		}
+	})
 }
 
 // newClusterFakes initializes a fake cluster with predefined resource limits.
@@ -292,8 +337,8 @@ type fastScaleUpNodeGroup struct {
 	*testprovider.NodeGroup
 }
 
-func (f *fastScaleUpNodeGroup) IncreaseSize(delta int) error {
-	return f.DecreaseTargetSize(-delta)
+func (f *fastScaleUpNodeGroup) IncreaseSize(ctx context.Context, delta int) error {
+	return f.DecreaseTargetSize(ctx, -delta)
 }
 
 // fastScaleUpCloudProvider is a wrapper around the fake cloud provider that uses
@@ -302,8 +347,8 @@ type fastScaleUpCloudProvider struct {
 	*testprovider.CloudProvider
 }
 
-func (f *fastScaleUpCloudProvider) NodeGroups() []cloudprovider.NodeGroup {
-	groups := f.CloudProvider.NodeGroups()
+func (f *fastScaleUpCloudProvider) NodeGroups(ctx context.Context) []cloudprovider.NodeGroup {
+	groups := f.CloudProvider.NodeGroups(ctx)
 	result := make([]cloudprovider.NodeGroup, len(groups))
 	for i, g := range groups {
 		ng := g.(*testprovider.NodeGroup)
@@ -619,7 +664,8 @@ func setupScaleDown60Percent(nodesCount int) func(*integration.FakeSet) error {
 // setupScaleDownAntiAffinity prepares a scale-down scenario on a large cluster where every 10th
 // node hosts a non-evictable pod with required hostname anti-affinity, so the affinity node
 // lists are read and invalidated for every pod rescheduled during drain simulation, against a
-// cluster-sized node list.
+// cluster-sized node list. Another 10% of nodes host an evictable anti-affinity pod, so pods with
+// anti-affinity are also moved during drain simulation.
 func setupScaleDownAntiAffinity(nodesCount int) func(*integration.FakeSet) error {
 	return func(clusterFakes *integration.FakeSet) error {
 		nTemplate := BuildTestNode("n-template", nodeCPU, nodeMem)
@@ -656,6 +702,19 @@ func setupScaleDownAntiAffinity(nodesCount int) func(*integration.FakeSet) error
 			pod := BuildTestPod(podName, int64(nodeCPU/5), int64(nodeMem/5),
 				WithLabels(antiAffinityLabels), WithPodHostnameAntiAffinity(antiAffinityLabels))
 			pod.Spec.NodeName = nodeName
+			clusterFakes.K8s.AddPod(pod)
+		}
+
+		// Evictable anti-affinity pods use 1% of node resources and sit on drainable nodes, so
+		// they're rescheduled during drain simulation, at most one per destination node.
+		evictableAntiAffinityLabels := map[string]string{"app": "evictable-anti-affinity-app"}
+		for i := 5; i < nodesCount; i += 10 {
+			podName := fmt.Sprintf("pod-eaa-%d", i)
+			nodeName := fmt.Sprintf("%s-node-%d", ng.Id(), i)
+			pod := BuildTestPod(podName, int64(nodeCPU/100), int64(nodeMem/100),
+				WithLabels(evictableAntiAffinityLabels), WithPodHostnameAntiAffinity(evictableAntiAffinityLabels))
+			pod.Spec.NodeName = nodeName
+			pod.Annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"] = "true"
 			clusterFakes.K8s.AddPod(pod)
 		}
 		return nil
@@ -816,7 +875,7 @@ func verifyTargetSize(expectedTargetSize int) func(*integration.FakeSet) error {
 		if ng == nil {
 			return fmt.Errorf("nodegroup %s not found", ngName)
 		}
-		targetSize, err := ng.TargetSize()
+		targetSize, err := ng.TargetSize(context.Background())
 		if err != nil {
 			return err
 		}
@@ -873,14 +932,15 @@ func BenchmarkRunOnceScaleUpDRA(b *testing.B) {
 }
 
 func BenchmarkRunOnceScaleUpAntiAffinity(b *testing.B) {
-	featuretesting.SetFeatureGateDuringTest(b, utilfeature.DefaultFeatureGate, features.InterPodAffinityHostnameFastPath, true)
 	const existingNodes = 3000
+	const schedulablePods = 5000
 	const spreadPods = 500
 	s := scenario{
-		setup:  setupScaleUpAntiAffinity(existingNodes, 5000, spreadPods),
+		setup:  setupScaleUpAntiAffinity(existingNodes, schedulablePods, spreadPods),
 		verify: verifyTargetSize(existingNodes + spreadPods),
 		config: func(opts *config.AutoscalingOptions) {
 			opts.MaxNodesPerScaleUp = maxNGSize
+			opts.InterPodAffinityHostnameFastPath = true
 		},
 	}
 	s.run(b)
@@ -894,6 +954,7 @@ func BenchmarkRunOnceScaleDown(b *testing.B) {
 			opts.NodeGroupDefaults.ScaleDownUnneededTime = 0
 			opts.MaxScaleDownParallelism = 2000
 			opts.MaxDrainParallelism = 2000
+			opts.MaxConcurrentNodesTainting = 5
 			opts.ScaleDownDelayAfterAdd = 0
 			opts.ScaleDownEnabled = true
 			opts.ScaleDownNonEmptyCandidatesCount = 2000
@@ -905,20 +966,22 @@ func BenchmarkRunOnceScaleDown(b *testing.B) {
 }
 
 func BenchmarkRunOnceScaleDownAntiAffinity(b *testing.B) {
-	featuretesting.SetFeatureGateDuringTest(b, utilfeature.DefaultFeatureGate, features.InterPodAffinityHostnameFastPath, true)
 	s := scenario{
 		setup: setupScaleDownAntiAffinity(2000),
-		// 1800 drainable nodes at 20% repack into 240 of them + spare capacity on the anti-affinity nodes -> 1560 drained.
-		verify: verifyToBeDeleted(1560),
+		// 1800 drainable nodes at 20%, plus 200 evictable anti-affinity pods at 1%, repack into 242 of them
+		// + spare capacity on the non-evictable anti-affinity nodes -> 1558 drained.
+		verify: verifyToBeDeleted(1558),
 		config: func(opts *config.AutoscalingOptions) {
 			opts.NodeGroupDefaults.ScaleDownUnneededTime = 0
 			opts.MaxScaleDownParallelism = 2000
 			opts.MaxDrainParallelism = 2000
+			opts.MaxConcurrentNodesTainting = 5
 			opts.ScaleDownDelayAfterAdd = 0
 			opts.ScaleDownEnabled = true
 			opts.ScaleDownNonEmptyCandidatesCount = 2000
 			opts.ScaleDownUnreadyEnabled = true
 			opts.ScaleDownSimulationTimeout = 60 * time.Second
+			opts.InterPodAffinityHostnameFastPath = true
 		},
 	}
 	s.run(b)
@@ -932,6 +995,7 @@ func BenchmarkRunOnceScaleDownDRA(b *testing.B) {
 			opts.NodeGroupDefaults.ScaleDownUnneededTime = 0
 			opts.MaxScaleDownParallelism = 2000
 			opts.MaxDrainParallelism = 2000
+			opts.MaxConcurrentNodesTainting = 5
 			opts.ScaleDownDelayAfterAdd = 0
 			opts.ScaleDownEnabled = true
 			opts.ScaleDownNonEmptyCandidatesCount = 2000

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	schedulingv1beta1 "k8s.io/api/scheduling/v1beta1"
 	cbv1beta1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	provreqclientset "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/client/clientset/versioned"
 	"k8s.io/client-go/informers"
@@ -45,6 +46,7 @@ import (
 	ca_processors "sigs.k8s.io/cluster-autoscaler/pkg/processors"
 	cbprocessor "sigs.k8s.io/cluster-autoscaler/pkg/processors/capacitybuffer"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodeinfosprovider"
+	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodes"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/podinjection"
 	podinjectionbackoff "sigs.k8s.io/cluster-autoscaler/pkg/processors/podinjection/backoff"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/pods"
@@ -61,7 +63,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/options"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/scheduling"
-	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
@@ -197,17 +199,21 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 	var capacitybufferClientError error
 	var fakePodsResolver fakepods.Resolver
 	if autoscalingOptions.CapacitybufferControllerEnabled {
-		restConfig := kube_util.GetKubeConfig(autoscalingOptions.KubeClientOpts)
-		capacitybufferClient, capacitybufferClientError = capacityclient.NewCapacityBufferClientFromConfig(restConfig)
+		capacitybufferClient, capacitybufferClientError = capacityclient.NewCapacityBufferClientFromManager(b.manager)
 		if capacitybufferClientError == nil && capacitybufferClient != nil {
 			if autoscalingOptions.CapacityBufferPodDryRunEnabled {
 				fakePodsResolver = fakepods.NewDryRunResolver(b.kubeClient)
 			} else {
 				fakePodsResolver = fakepods.NewDefaultingResolver()
 			}
-			cbctrl.InitializeAndRunDefaultBufferController(ctx, capacitybufferClient, fakePodsResolver)
+			err = cbctrl.InitializeAndRunDefaultBufferController(ctx, b.manager, capacitybufferClient, fakePodsResolver)
+			if err != nil {
+				return nil, nil, err
+			}
 		}
 	}
+
+	autoscalingStatusProcessors := []status.AutoscalingStatusProcessor{opts.Processors.AutoscalingStatusProcessor}
 
 	if autoscalingOptions.CapacitybufferPodInjectionEnabled {
 		// Add CapacityBuffer types to the default scheme for event recording.
@@ -215,8 +221,7 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 			klog.Warningf("Failed to add CapacityBuffer (v1beta1) to scheme: %v", err)
 		}
 		if capacitybufferClient == nil {
-			restConfig := kube_util.GetKubeConfig(autoscalingOptions.KubeClientOpts)
-			capacitybufferClient, capacitybufferClientError = capacityclient.NewCapacityBufferClientFromConfig(restConfig)
+			capacitybufferClient, capacitybufferClientError = capacityclient.NewCapacityBufferClientFromManager(b.manager)
 		}
 		if capacitybufferClientError == nil && capacitybufferClient != nil {
 			buffersPodsRegistry := fakepods.NewRegistry(nil)
@@ -228,8 +233,17 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 			podListProcessor = pods.NewCombinedPodListProcessor([]pods.PodListProcessor{bufferPodInjector, podListProcessor})
 			opts.Processors.ScaleUpStatusProcessor = status.NewCombinedScaleUpStatusProcessor([]status.ScaleUpStatusProcessor{
 				cbprocessor.NewFakePodsScaleUpStatusProcessor(buffersPodsRegistry), opts.Processors.ScaleUpStatusProcessor})
+			if opts.CapacityBufferReadyReplicasEnabled {
+				readyReplicasController := cbctrl.NewReadyReplicasController(b.manager.GetClient())
+				if err := readyReplicasController.SetupWithManager(b.manager); err != nil {
+					return nil, nil, fmt.Errorf("failed to setup CapacityBuffer ReadyReplicas controller: %w", err)
+				}
+				autoscalingStatusProcessors = append(autoscalingStatusProcessors, cbprocessor.NewCapacityBufferAutoscalingStatusProcessor(readyReplicasController, buffersPodsRegistry))
+			}
 		}
 	}
+
+	opts.Processors.AutoscalingStatusProcessor = status.NewCombinedAutoscalingStatusProcessor(autoscalingStatusProcessors)
 
 	if autoscalingOptions.CapacityQuotasEnabled {
 		cqReconciler := capacityquota.NewCapacityQuotaReconciler(b.manager.GetClient(), capacityquota.ReconcilerOptions{
@@ -262,6 +276,16 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 	opts.Processors.ScaleDownCandidatesNotifier.Register(sdCandidatesSorting)
 
 	cp := scaledowncandidates.NewCombinedScaleDownCandidatesProcessor()
+	if autoscalingOptions.PodGroupSupportEnabled {
+		cp.Register(nodes.NewGangScaleDownNodeProcessor(b.manager.GetClient()))
+		// Register the PodGroup informer now, so that it syncs at manager
+		// startup along with the others instead of on first use mid-iteration,
+		// and so that a cluster not serving the API is reported at startup.
+		// The cache is not running yet, so this must not block.
+		if _, err := b.manager.GetCache().GetInformer(ctx, &schedulingv1beta1.PodGroup{}, cache.BlockUntilSynced(false)); err != nil {
+			klog.Errorf("PodGroup support is enabled, but PodGroups cannot be watched; nodes hosting gang pods will not be protected from scale-down: %v", err)
+		}
+	}
 	cp.Register(scaledowncandidates.NewScaleDownCandidatesSortingProcessor(scaleDownCandidatesComparers))
 
 	if autoscalingOptions.ScaleDownDelayTypeLocal {

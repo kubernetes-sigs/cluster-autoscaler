@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"time"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
@@ -40,13 +41,13 @@ func RegisterAll(emitPerNodeGroupMetrics bool) {
 
 // UpdateDurationFromStart records the duration of the step identified by the
 // label using start time
-func UpdateDurationFromStart(label FunctionLabel, start time.Time) {
-	DefaultMetrics.UpdateDurationFromStart(label, start)
+func UpdateDurationFromStart(ctx context.Context, label FunctionLabel, start time.Time) {
+	DefaultMetrics.UpdateDurationFromStart(ctx, label, start)
 }
 
 // UpdateDuration records the duration of the step identified by the label
-func UpdateDuration(label FunctionLabel, duration time.Duration) {
-	DefaultMetrics.UpdateDuration(label, duration)
+func UpdateDuration(ctx context.Context, label FunctionLabel, duration time.Duration) {
+	DefaultMetrics.UpdateDuration(ctx, label, duration)
 }
 
 // UpdateLastTime records the time the step identified by the label was started
@@ -193,8 +194,17 @@ func UpdateScaleDownInCooldown(inCooldown bool) {
 
 // RegisterOldUnregisteredNodesRemoved records number of old unregistered
 // nodes that have been removed by the cluster autoscaler
+//
+// Deprecated: superseded by RegisterNodesDeleted with NodeDeletionReasonOldUnregistered.
+// Scheduled for removal in 1.38.
 func RegisterOldUnregisteredNodesRemoved(nodesCount int) {
 	DefaultMetrics.RegisterOldUnregisteredNodesRemoved(nodesCount)
+}
+
+// RegisterNodesDeleted records number of nodes the cluster autoscaler attempted
+// to delete, broken down by the reason for the deletion and its result
+func RegisterNodesDeleted(nodesCount int, reason NodeDeletionReason, result NodeDeletionResult) {
+	DefaultMetrics.RegisterNodesDeleted(nodesCount, reason, result)
 }
 
 // UpdateOverflowingControllers sets the number of controllers that could not
@@ -248,8 +258,8 @@ func ObserveBinpackingHeterogeneity(instanceType, cpuCount, namespaceCount strin
 
 // UpdateScaleDownNodeRemovalLatency records the time after which node was deleted/needed
 // again after being marked unneeded
-func UpdateScaleDownNodeRemovalLatency(deleted bool, delayReason string, duration time.Duration) {
-	DefaultMetrics.UpdateScaleDownNodeRemovalLatency(deleted, delayReason, duration)
+func UpdateScaleDownNodeRemovalLatency(deleted bool, delayReason string, scaleDownReason NodeScaleDownReason, duration time.Duration) {
+	DefaultMetrics.UpdateScaleDownNodeRemovalLatency(deleted, delayReason, scaleDownReason, duration)
 }
 
 // ObserveMaxNodeSkipEvalDurationSeconds records the longest time during which node was skipped during ScaleDown.
@@ -261,4 +271,9 @@ func ObserveMaxNodeSkipEvalDurationSeconds(duration time.Duration) {
 // UpdateSkippedPodsCount records the number of pods skipped when doing scheduling simulations.
 func UpdateSkippedPodsCount(podsCount int, label string) {
 	DefaultMetrics.UpdateSkippedPodsCount(podsCount, label)
+}
+
+// UpdateNodesCountPerNodeGroup records the number of nodes per node group ID in cluster.
+func UpdateNodesCountPerNodeGroup(ready, unready, starting, suspended, longUnregistered, unregistered int, nodeGroupID string) {
+	DefaultMetrics.UpdateNodesCountPerNodeGroup(ready, unready, starting, suspended, longUnregistered, unregistered, nodeGroupID)
 }

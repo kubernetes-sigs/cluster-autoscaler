@@ -17,6 +17,7 @@ limitations under the License.
 package efficiency
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -142,8 +143,7 @@ func (scenario scaleDownScenario) run(b *testing.B) {
 			scaleDownCandidates = nodes
 			podDestinations = nodes
 		} else {
-			scaleDownCandidates, err = sdDeps.Processors.ScaleDownNodeProcessor.GetScaleDownCandidates(
-				sdDeps.AutoscalingCtx, nodes)
+			scaleDownCandidates, err = sdDeps.Processors.ScaleDownNodeProcessor.GetScaleDownCandidates(context.Background(), sdDeps.AutoscalingCtx, nodes)
 			if err != nil {
 				b.Fatalf("error getting scale-down candidates: %s", err.Error())
 			}
@@ -154,24 +154,23 @@ func (scenario scaleDownScenario) run(b *testing.B) {
 		}
 
 		currentTime := time.Now()
-		err = sdDeps.Planner.UpdateClusterState(podDestinations, scaleDownCandidates, sdDeps.Actuator.actuationStatus, currentTime)
+		err = sdDeps.Planner.UpdateClusterState(context.Background(), podDestinations, scaleDownCandidates, sdDeps.Actuator.actuationStatus, currentTime)
 		if err != nil {
 			b.Fatalf("error updating cluster state: %s", err.Error())
 		}
 
-		empty, needDrain := sdDeps.Planner.NodesToDelete(currentTime)
+		empty, needDrain := sdDeps.Planner.NodesToDelete(context.Background(), currentTime)
 
 		budgetProcessor := budgets.NewScaleDownBudgetProcessor(sdDeps.AutoscalingCtx)
-		emptyGrouped, drainGrouped := budgetProcessor.CropNodes(sdDeps.Actuator.actuationStatus, empty, needDrain)
-
+		croppedGroups := budgetProcessor.CropNodes(context.Background(), sdDeps.Actuator.actuationStatus, empty, needDrain)
 		empty = []*apiv1.Node{}
-		for _, group := range emptyGrouped {
-			empty = append(empty, group.Nodes...)
-		}
-
 		needDrain = []*apiv1.Node{}
-		for _, group := range drainGrouped {
-			needDrain = append(needDrain, group.Nodes...)
+		for _, group := range croppedGroups {
+			if group.Drain {
+				needDrain = append(needDrain, group.Nodes...)
+			} else {
+				empty = append(empty, group.Nodes...)
+			}
 		}
 
 		// No more nodes to delete, final state reached.

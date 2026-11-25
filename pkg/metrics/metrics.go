@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"time"
@@ -49,6 +50,12 @@ type NodeGroupType string
 // PodEvictionResult describes result of the pod eviction attempt
 type PodEvictionResult string
 
+// NodeDeletionReason describes why Cluster Autoscaler attempted to delete a node
+type NodeDeletionReason string
+
+// NodeDeletionResult describes result of the node deletion attempt
+type NodeDeletionResult string
+
 const (
 	caNamespace           = "cluster_autoscaler"
 	readyLabel            = "ready"
@@ -57,6 +64,8 @@ const (
 	suspendedLabel        = "suspended"
 	unregisteredLabel     = "unregistered"
 	longUnregisteredLabel = "longUnregistered"
+
+	nodeGroupIDLabel = "node_group_id"
 
 	// Underutilized node was removed because of low utilization
 	Underutilized NodeScaleDownReason = "underutilized"
@@ -98,7 +107,22 @@ const (
 	// PodEvictionFailed means creation of the pod eviction object failed
 	PodEvictionFailed PodEvictionResult = "failed"
 
+	// NodeDeletionReasonScaleDown means the node was deleted by the scale-down pipeline
+	NodeDeletionReasonScaleDown NodeDeletionReason = "scale_down"
+	// NodeDeletionReasonCreateErrors means the node was deleted because it failed to be created
+	NodeDeletionReasonCreateErrors NodeDeletionReason = "create_errors"
+	// NodeDeletionReasonOldUnregistered means the node was deleted because it did not register in time
+	NodeDeletionReasonOldUnregistered NodeDeletionReason = "old_unregistered"
+
+	// NodeDeletionSucceeded means the node deletion request succeeded
+	NodeDeletionSucceeded NodeDeletionResult = "succeeded"
+	// NodeDeletionFailed means the node deletion request failed
+	NodeDeletionFailed NodeDeletionResult = "failed"
+
 	gpuNodeMetricsDeprecatedVersion = "1.36.0"
+	// nodeDeletionMetricsDeprecatedVersion is the version in which metrics superseded
+	// by nodes_deleted_total were deprecated. They are scheduled for removal in 1.38.
+	nodeDeletionMetricsDeprecatedVersion = "1.37.0"
 )
 
 // Names of Cluster Autoscaler operations
@@ -160,6 +184,7 @@ type caMetrics struct {
 	nodesGroupHealthiness  *k8smetrics.GaugeVec
 	nodeGroupBackOffStatus *k8smetrics.GaugeVec
 	skippedPodsCounts      *k8smetrics.GaugeVec
+	nodesCountPerNodeGroup *k8smetrics.GaugeVec
 
 	// Metrics related to autoscaler execution
 	lastActivity            *k8smetrics.GaugeVec
@@ -181,6 +206,7 @@ type caMetrics struct {
 	unremovableNodesCount            *k8smetrics.GaugeVec
 	scaleDownInCooldown              *k8smetrics.Gauge
 	oldUnregisteredNodesRemovedCount *k8smetrics.Counter
+	nodeDeletionCount                *k8smetrics.CounterVec
 	overflowingControllersCount      *k8smetrics.Gauge
 	skippedScaleEventsCount          *k8smetrics.CounterVec
 	nodeGroupCreationCount           *k8smetrics.CounterVec
@@ -309,6 +335,14 @@ func newCaMetrics() *caMetrics {
 				Name:      "node_group_backoff_status",
 				Help:      "Whether or not node group is backoff for not autoscaling. 1 if it is, 0 otherwise.",
 			}, []string{"node_group", "reason"},
+		),
+
+		nodesCountPerNodeGroup: k8smetrics.NewGaugeVec(
+			&k8smetrics.GaugeOpts{
+				Namespace: caNamespace,
+				Name:      "nodes_count_per_node_group",
+				Help:      "Number of nodes per node groups in cluster.",
+			}, []string{"state", "node_group"},
 		),
 
 		/**** Metrics related to autoscaler execution ****/
@@ -449,10 +483,19 @@ func newCaMetrics() *caMetrics {
 
 		oldUnregisteredNodesRemovedCount: k8smetrics.NewCounter(
 			&k8smetrics.CounterOpts{
-				Namespace: caNamespace,
-				Name:      "old_unregistered_nodes_removed_count",
-				Help:      "Number of unregistered nodes removed by CA.",
+				Namespace:         caNamespace,
+				Name:              "old_unregistered_nodes_removed_count",
+				Help:              "Number of unregistered nodes removed by CA. Superseded by nodes_deleted_total with reason=old_unregistered.",
+				DeprecatedVersion: nodeDeletionMetricsDeprecatedVersion,
 			},
+		),
+
+		nodeDeletionCount: k8smetrics.NewCounterVec(
+			&k8smetrics.CounterOpts{
+				Namespace: caNamespace,
+				Name:      "nodes_deleted_total",
+				Help:      "Number of nodes CA attempted to delete, by reason and result.",
+			}, []string{"reason", "result"},
 		),
 
 		overflowingControllersCount: k8smetrics.NewGauge(
@@ -512,7 +555,13 @@ func newCaMetrics() *caMetrics {
 				Namespace: caNamespace,
 				Name:      "binpacking_heterogeneity",
 				Help:      "Number of groups of equivalent pods being processed as a part of the same binpacking simulation.",
-				Buckets:   k8smetrics.ExponentialBuckets(1, 2, 6), // 1, 2, 4, ..., 32
+				Buckets: []float64{
+					1, 2, 3, 4, 6, 8,
+					10, 12, 16, 20, 25, 30, 40, 60, 80,
+					100, 120, 160, 200, 250, 300, 400, 600, 800,
+					1000, 1200, 1600, 2000, 2500, 3000, 4000, 6000, 8000,
+					10000, 12000, 16000, 20000, 25000, 30000, 40000,
+				},
 			}, []string{"instance_type", "cpu_count", "namespace_count"},
 		),
 
@@ -528,9 +577,9 @@ func newCaMetrics() *caMetrics {
 			&k8smetrics.HistogramOpts{
 				Namespace: caNamespace,
 				Name:      "node_removal_latency_seconds",
-				Help:      "Latency from when an unneeded node is eligible for scale down until it is removed (deleted=true) or it became needed again (deleted=false). The 'delay_reason' label indicates the technical bottleneck that delayed the scale-down ('none' if not delayed).",
-				Buckets:   k8smetrics.ExponentialBuckets(1, 1.5, 19), // ~1s → ~24min
-			}, []string{"deleted", "delay_reason"},
+				Help:      "Latency from when an unneeded node is eligible for scale down until it is removed (deleted=true) or it became needed again (deleted=false). The 'delay_reason' label indicates the technical bottleneck that delayed the scale-down ('none' if not delayed). The 'scaledown_reason' label indicates whether the node was 'empty' or 'underutilized'.",
+				Buckets:   []float64{5, 10, 20, 30, 60, 90, 120, 180, 240, 300, 420, 600, 900, 1200, 1800, 2700, 3600}, // 5s → 60min
+			}, []string{"deleted", "delay_reason", "scaledown_reason"},
 		),
 
 		nodeTemplateResourcesMismatch: k8smetrics.NewGaugeVec(
@@ -587,6 +636,7 @@ func (m *caMetrics) RegisterAll(emitPerNodeGroupMetrics bool) {
 	m.mustRegister(m.unremovableNodesCount)
 	m.mustRegister(m.scaleDownInCooldown)
 	m.mustRegister(m.oldUnregisteredNodesRemovedCount)
+	m.mustRegister(m.nodeDeletionCount)
 	m.mustRegister(m.overflowingControllersCount)
 	m.mustRegister(m.skippedScaleEventsCount)
 	m.mustRegister(m.nodeGroupCreationCount)
@@ -605,6 +655,7 @@ func (m *caMetrics) RegisterAll(emitPerNodeGroupMetrics bool) {
 		m.mustRegister(m.nodesGroupTargetSize)
 		m.mustRegister(m.nodesGroupHealthiness)
 		m.mustRegister(m.nodeGroupBackOffStatus)
+		m.mustRegister(m.nodesCountPerNodeGroup)
 	}
 }
 
@@ -627,6 +678,12 @@ func (m *caMetrics) InitMetrics() {
 		m.evictionsCount.WithLabelValues(string(result)).Add(0)
 	}
 
+	for _, reason := range []NodeDeletionReason{NodeDeletionReasonScaleDown, NodeDeletionReasonCreateErrors, NodeDeletionReasonOldUnregistered} {
+		for _, result := range []NodeDeletionResult{NodeDeletionSucceeded, NodeDeletionFailed} {
+			m.nodeDeletionCount.WithLabelValues(string(reason), string(result)).Add(0)
+		}
+	}
+
 	m.skippedScaleEventsCount.WithLabelValues(DirectionScaleDown, CpuResourceLimit).Add(0)
 	m.skippedScaleEventsCount.WithLabelValues(DirectionScaleDown, MemoryResourceLimit).Add(0)
 	m.skippedScaleEventsCount.WithLabelValues(DirectionScaleUp, CpuResourceLimit).Add(0)
@@ -636,15 +693,16 @@ func (m *caMetrics) InitMetrics() {
 
 // UpdateDurationFromStart records the duration of the step identified by the
 // label using start time
-func (m *caMetrics) UpdateDurationFromStart(label FunctionLabel, start time.Time) {
+func (m *caMetrics) UpdateDurationFromStart(ctx context.Context, label FunctionLabel, start time.Time) {
 	duration := time.Now().Sub(start)
-	m.UpdateDuration(label, duration)
+	m.UpdateDuration(ctx, label, duration)
 }
 
 // UpdateDuration records the duration of the step identified by the label
-func (m *caMetrics) UpdateDuration(label FunctionLabel, duration time.Duration) {
+func (m *caMetrics) UpdateDuration(ctx context.Context, label FunctionLabel, duration time.Duration) {
+	logger := klog.FromContext(ctx)
 	if duration > LogLongDurationThreshold {
-		klog.V(4).Infof("Function %s took %v to complete", label, duration)
+		logger.V(4).Info("Function completed", "functionLabel", label, "duration", duration)
 	}
 	m.functionDuration.WithLabelValues(string(label)).Observe(duration.Seconds())
 	m.functionDurationSummary.WithLabelValues(string(label)).Observe(duration.Seconds())
@@ -869,8 +927,17 @@ func (m *caMetrics) UpdateScaleDownInCooldown(inCooldown bool) {
 
 // RegisterOldUnregisteredNodesRemoved records number of old unregistered
 // nodes that have been removed by the cluster autoscaler
+//
+// Deprecated: superseded by RegisterNodesDeleted with NodeDeletionReasonOldUnregistered.
+// Scheduled for removal in 1.38.
 func (m *caMetrics) RegisterOldUnregisteredNodesRemoved(nodesCount int) {
 	m.oldUnregisteredNodesRemovedCount.Add(float64(nodesCount))
+}
+
+// RegisterNodesDeleted records number of nodes the cluster autoscaler attempted
+// to delete, broken down by the reason for the deletion and its result
+func (m *caMetrics) RegisterNodesDeleted(nodesCount int, reason NodeDeletionReason, result NodeDeletionResult) {
+	m.nodeDeletionCount.WithLabelValues(string(reason), string(result)).Add(float64(nodesCount))
 }
 
 // UpdateOverflowingControllers sets the number of controllers that could not
@@ -924,8 +991,8 @@ func (m *caMetrics) ObserveBinpackingHeterogeneity(instanceType, cpuCount, names
 
 // UpdateScaleDownNodeRemovalLatency records the time after which node was deleted/needed
 // again after being marked unneeded
-func (m *caMetrics) UpdateScaleDownNodeRemovalLatency(deleted bool, delayReason string, duration time.Duration) {
-	m.scaleDownNodeRemovalLatency.WithLabelValues(strconv.FormatBool(deleted), delayReason).Observe(duration.Seconds())
+func (m *caMetrics) UpdateScaleDownNodeRemovalLatency(deleted bool, delayReason string, scaleDownReason NodeScaleDownReason, duration time.Duration) {
+	m.scaleDownNodeRemovalLatency.WithLabelValues(strconv.FormatBool(deleted), delayReason, string(scaleDownReason)).Observe(duration.Seconds())
 }
 
 // ObserveMaxNodeSkipEvalDurationSeconds records the longest time during which node was skipped during ScaleDown.
@@ -937,4 +1004,14 @@ func (m *caMetrics) ObserveMaxNodeSkipEvalDurationSeconds(duration time.Duration
 // UpdateSkippedPodsCount records the number of pods skipped when doing scheduling simulations.
 func (m *caMetrics) UpdateSkippedPodsCount(podsCount int, label string) {
 	m.skippedPodsCounts.WithLabelValues(label).Set(float64(podsCount))
+}
+
+// UpdateNodesPerNodeGroupCount records the number of nodes per node group in cluster
+func (m *caMetrics) UpdateNodesCountPerNodeGroup(ready, unready, starting, suspended, longUnregistered, unregistered int, nodeGroupID string) {
+	m.nodesCountPerNodeGroup.WithLabelValues(readyLabel, nodeGroupID).Set(float64(ready))
+	m.nodesCountPerNodeGroup.WithLabelValues(unreadyLabel, nodeGroupID).Set(float64(unready))
+	m.nodesCountPerNodeGroup.WithLabelValues(startingLabel, nodeGroupID).Set(float64(starting))
+	m.nodesCountPerNodeGroup.WithLabelValues(suspendedLabel, nodeGroupID).Set(float64(suspended))
+	m.nodesCountPerNodeGroup.WithLabelValues(longUnregisteredLabel, nodeGroupID).Set(float64(longUnregistered))
+	m.nodesCountPerNodeGroup.WithLabelValues(unregisteredLabel, nodeGroupID).Set(float64(unregistered))
 }

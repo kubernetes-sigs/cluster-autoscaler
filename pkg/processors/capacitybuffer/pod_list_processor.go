@@ -17,6 +17,7 @@ limitations under the License.
 package capacitybufferpodlister
 
 import (
+	"context"
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -84,23 +85,28 @@ func NewCapacityBufferPodListProcessor(client *client.CapacityBufferClient, prov
 }
 
 // Process updates unschedulablePods by injecting fake pods to match replicas defined in buffers status
-func (p *CapacityBufferPodListProcessor) Process(autoscalingCtx *ca_context.AutoscalingContext, unschedulablePods []*apiv1.Pod) ([]*apiv1.Pod, error) {
+func (p *CapacityBufferPodListProcessor) Process(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, unschedulablePods []*apiv1.Pod) ([]*apiv1.Pod, error) {
+	logger := klog.FromContext(ctx)
 	buffers, err := p.client.ListCapacityBuffers("")
 	if err != nil {
-		klog.Errorf("CapacityBufferPodListProcessor failed to list buffers with error: %v", err.Error())
+		logger.Error(err, "CapacityBufferPodListProcessor failed to list buffers")
 		return unschedulablePods, nil
 	}
 	buffers = p.filterBuffersProvStrategy(buffers)
-	_, buffers = p.statusFilter.Filter(buffers)
-	_, buffers = p.podTemplateGenFilter.Filter(buffers)
+	// All buffers with an allowed provisioning strategy are considered processed by this
+	// processor, even if they're filtered out below or no fake pods are created for them.
+	// This is done in order for their .status.readyReplicas to be set to 0.
+	p.markBuffersProcessed(buffers)
+	_, buffers = p.statusFilter.Filter(ctx, buffers)
+	_, buffers = p.podTemplateGenFilter.Filter(ctx, buffers)
 
 	totalFakePods := []*apiv1.Pod{}
 	for _, buffer := range buffers {
-		fakePods := p.provision(buffer)
+		fakePods := p.provision(ctx, buffer)
 		p.updateCapacityBufferRegistry(fakePods, buffer)
 		totalFakePods = append(totalFakePods, fakePods...)
 	}
-	klog.V(2).Infof("Capacity pod processor injecting %v fake pods provisioning %v capacity buffers", len(totalFakePods), len(buffers))
+	logger.V(2).Info("Capacity pod processor injecting fake pods provisioning capacity buffers", "fakePodsCount", len(totalFakePods), "buffersCount", len(buffers))
 	unschedulablePods = append(unschedulablePods, totalFakePods...)
 	return unschedulablePods, nil
 }
@@ -118,6 +124,15 @@ func (p *CapacityBufferPodListProcessor) updateCapacityBufferRegistry(fakePods [
 	}
 }
 
+func (p *CapacityBufferPodListProcessor) markBuffersProcessed(buffers []*v1beta1.CapacityBuffer) {
+	if p.buffersRegistry == nil {
+		return
+	}
+	for _, buffer := range buffers {
+		p.buffersRegistry.MarkProcessed(buffer)
+	}
+}
+
 func (p *CapacityBufferPodListProcessor) clearCapacityBufferRegistry() {
 	if p.buffersRegistry == nil {
 		return
@@ -125,18 +140,18 @@ func (p *CapacityBufferPodListProcessor) clearCapacityBufferRegistry() {
 	p.buffersRegistry.Clear()
 }
 
-func (p *CapacityBufferPodListProcessor) provision(buffer *v1beta1.CapacityBuffer) []*apiv1.Pod {
+func (p *CapacityBufferPodListProcessor) provision(ctx context.Context, buffer *v1beta1.CapacityBuffer) []*apiv1.Pod {
 	if buffer.Status.PodTemplateRef == nil || buffer.Status.Replicas == nil || meta.IsStatusConditionFalse(buffer.Status.Conditions, capacitybuffer.ReadyForProvisioningCondition) {
 		changed := common.UpdateBufferStatusToFailedProvisioning(buffer, NotReadyForProvisioningReason, "CapacityBuffer is not ready for provisioning")
 		if changed {
-			p.updateBufferStatus(buffer)
+			p.updateBufferStatus(ctx, buffer)
 		}
 		return []*apiv1.Pod{}
 	}
 	if *buffer.Status.Replicas == 0 {
 		changed := common.UpdateBufferStatusToFailedProvisioning(buffer, BufferIsEmptyReason, "CapacityBuffer has zero replicas")
 		if changed {
-			p.updateBufferStatus(buffer)
+			p.updateBufferStatus(ctx, buffer)
 		}
 		return []*apiv1.Pod{}
 	}
@@ -146,7 +161,7 @@ func (p *CapacityBufferPodListProcessor) provision(buffer *v1beta1.CapacityBuffe
 	if err != nil {
 		changed := common.UpdateBufferStatusToFailedProvisioning(buffer, FailedToGetPodTemplateReason, fmt.Sprintf("failed to get pod template with error: %v", err.Error()))
 		if changed {
-			p.updateBufferStatus(buffer)
+			p.updateBufferStatus(ctx, buffer)
 		}
 		return []*apiv1.Pod{}
 	}
@@ -154,12 +169,12 @@ func (p *CapacityBufferPodListProcessor) provision(buffer *v1beta1.CapacityBuffe
 	if err != nil {
 		changed := common.UpdateBufferStatusToFailedProvisioning(buffer, FailedToMakeFakePodsReason, fmt.Sprintf("failed to create fake pods with error: %v", err.Error()))
 		if changed {
-			p.updateBufferStatus(buffer)
+			p.updateBufferStatus(ctx, buffer)
 		}
 		return []*apiv1.Pod{}
 	}
 	common.UpdateBufferStatusToSuccessfullyProvisioning(buffer, FakePodsInjectedReason)
-	p.updateBufferStatus(buffer)
+	p.updateBufferStatus(ctx, buffer)
 	return fakePods
 }
 
@@ -173,10 +188,11 @@ func (p *CapacityBufferPodListProcessor) filterBuffersProvStrategy(buffers []*v1
 	return filteredBuffers
 }
 
-func (p *CapacityBufferPodListProcessor) updateBufferStatus(buffer *v1beta1.CapacityBuffer) {
+func (p *CapacityBufferPodListProcessor) updateBufferStatus(ctx context.Context, buffer *v1beta1.CapacityBuffer) {
+	logger := klog.FromContext(ctx)
 	_, err := p.client.UpdateCapacityBuffer(buffer)
 	if err != nil {
-		klog.Errorf("Failed to update buffer status for buffer %v, error: %v", buffer.Name, err.Error())
+		logger.Error(err, "Failed to update buffer status", "buffer", buffer.Name)
 	}
 }
 

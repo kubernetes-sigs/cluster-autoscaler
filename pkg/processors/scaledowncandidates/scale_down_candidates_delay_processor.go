@@ -17,6 +17,8 @@ limitations under the License.
 package scaledowncandidates
 
 import (
+	"context"
+	"sync"
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -30,6 +32,7 @@ import (
 // ScaleDownCandidatesDelayProcessor is a processor to filter out
 // nodes according to scale down delay per nodegroup
 type ScaleDownCandidatesDelayProcessor struct {
+	mutex             sync.RWMutex
 	scaleUps          map[string]time.Time
 	scaleDowns        map[string]time.Time
 	scaleDownFailures map[string]time.Time
@@ -42,19 +45,22 @@ func (p *ScaleDownCandidatesDelayProcessor) GetPodDestinationCandidates(autoscal
 }
 
 // GetScaleDownCandidates returns filter nodes based on if scale down is enabled or disabled per nodegroup.
-func (p *ScaleDownCandidatesDelayProcessor) GetScaleDownCandidates(autoscalingCtx *ca_context.AutoscalingContext,
+func (p *ScaleDownCandidatesDelayProcessor) GetScaleDownCandidates(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext,
 	nodes []*apiv1.Node) ([]*apiv1.Node, errors.AutoscalerError) {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	logger := klog.FromContext(ctx)
 	result := []*apiv1.Node{}
 	alreadyLoggedGroups := make(map[string]bool)
 
 	for _, node := range nodes {
-		nodeGroup, err := autoscalingCtx.CloudProvider.NodeGroupForNode(node)
+		nodeGroup, err := autoscalingCtx.CloudProvider.NodeGroupForNode(ctx, node)
 		if err != nil {
-			klog.Warningf("Error while checking node group for %s: %v", node.Name, err)
+			logger.Info("Error while checking node group for node", "node", klog.KObj(node), "err", err)
 			continue
 		}
 		if nodeGroup == nil {
-			klog.V(4).Infof("Node %s should not be processed by cluster autoscaler (no node group config)", node.Name)
+			logger.V(4).Info("Node should not be processed by cluster autoscaler (no node group config)", "node", klog.KObj(node))
 			continue
 		}
 
@@ -63,8 +69,7 @@ func (p *ScaleDownCandidatesDelayProcessor) GetScaleDownCandidates(autoscalingCt
 		recent := func(m map[string]time.Time, d time.Duration, msg string) bool {
 			if !m[nodeGroup.Id()].IsZero() && m[nodeGroup.Id()].Add(d).After(currentTime) {
 				if !alreadyLoggedGroups[nodeGroup.Id()] {
-					klog.V(4).Infof("Skipping scale down on node group %s because it %s recently at %v",
-						nodeGroup.Id(), msg, m[nodeGroup.Id()])
+					logger.V(4).Info("Skipping scale down on node group due to recent activity", "nodeGroupId", nodeGroup.Id(), "activity", msg, "time", m[nodeGroup.Id()])
 					alreadyLoggedGroups[nodeGroup.Id()] = true
 				}
 				return true
@@ -95,24 +100,30 @@ func (p *ScaleDownCandidatesDelayProcessor) CleanUp() {
 }
 
 // RegisterScaleUp records when the last scale up happened for a nodegroup.
-func (p *ScaleDownCandidatesDelayProcessor) RegisterScaleUp(nodeGroup cloudprovider.NodeGroup,
+func (p *ScaleDownCandidatesDelayProcessor) RegisterScaleUp(ctx context.Context, nodeGroup cloudprovider.NodeGroup,
 	_ int, currentTime time.Time) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
 	p.scaleUps[nodeGroup.Id()] = currentTime
 }
 
 // RegisterScaleDown records when the last scale down happened for a nodegroup.
 func (p *ScaleDownCandidatesDelayProcessor) RegisterScaleDown(nodeGroup cloudprovider.NodeGroup,
 	nodeName string, currentTime time.Time, _ time.Time) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
 	p.scaleDowns[nodeGroup.Id()] = currentTime
 }
 
 // RegisterFailedScaleUp records when the last scale up failed for a nodegroup.
-func (p *ScaleDownCandidatesDelayProcessor) RegisterFailedScaleUp(_ cloudprovider.NodeGroup, _ int, _ cloudprovider.InstanceErrorInfo, currentTime time.Time) {
+func (p *ScaleDownCandidatesDelayProcessor) RegisterFailedScaleUp(ctx context.Context, _ cloudprovider.NodeGroup, _ int, _ cloudprovider.InstanceErrorInfo, currentTime time.Time) {
 }
 
 // RegisterFailedScaleDown records failed scale-down for a nodegroup.
 func (p *ScaleDownCandidatesDelayProcessor) RegisterFailedScaleDown(nodeGroup cloudprovider.NodeGroup,
 	reason string, currentTime time.Time) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
 	p.scaleDownFailures[nodeGroup.Id()] = currentTime
 }
 

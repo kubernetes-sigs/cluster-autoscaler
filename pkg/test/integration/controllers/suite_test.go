@@ -25,9 +25,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	clockutil "k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -35,9 +33,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	capacitybuffer "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/clientset/versioned"
-	cqv1beta1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacityquota/autoscaling.x-k8s.io/v1beta1"
+	"sigs.k8s.io/cluster-autoscaler/pkg/builder"
 	cbapi "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer"
 	cbclient "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/client"
 	cbctrl "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/controller"
@@ -63,6 +62,7 @@ var crClient client.Client
 var ctx context.Context
 var cancel context.CancelFunc
 var reconciliationCache *cbmetrics.ReconciliationCache
+var readyReplicasController *cbctrl.ReadyReplicasController
 var clock = clockutil.RealClock{}
 
 var _ = BeforeSuite(func() {
@@ -71,7 +71,11 @@ var _ = BeforeSuite(func() {
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "apis", "config", "crd")},
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "..", "apis", "config", "crd"),
+			// Test only kinds, e.g. a custom scalable resource for dynamic watches.
+			filepath.Join("testdata", "crd"),
+		},
 		ErrorIfCRDPathMissing: true,
 	}
 
@@ -84,11 +88,7 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
 
-	scheme := runtime.NewScheme()
-	err = clientgoscheme.AddToScheme(scheme)
-	Expect(err).NotTo(HaveOccurred())
-	err = cqv1beta1.AddToScheme(scheme)
-	Expect(err).NotTo(HaveOccurred())
+	scheme := builder.NewScheme()
 
 	k8sClient, err = kubernetes.NewForConfig(cfg)
 	Expect(err).NotTo(HaveOccurred())
@@ -104,19 +104,15 @@ var _ = BeforeSuite(func() {
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
+		// Disable the metrics server so the suite doesn't depend on :8080 being free.
+		Metrics: metricsserver.Options{BindAddress: "0"},
 	})
 	Expect(err).ToNot(HaveOccurred())
 
 	err = cqctrl.NewCapacityQuotaReconciler(mgr.GetClient(), cqctrl.ReconcilerOptions{NodeFilter: utils.VirtualKubeletNodeFilter{}}).SetupWithManager(mgr)
 	Expect(err).ToNot(HaveOccurred())
 
-	go func() {
-		defer GinkgoRecover()
-		err = mgr.Start(ctx)
-		Expect(err).ToNot(HaveOccurred(), "failed to run manager")
-	}()
-
-	client, err := cbclient.NewCapacityBufferClientFromConfig(cfg)
+	client, err := cbclient.NewCapacityBufferClientFromManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
 	resolver := fakepods.NewDryRunResolver(k8sClient)
@@ -128,8 +124,19 @@ var _ = BeforeSuite(func() {
 		reconciliationCache,
 		clock,
 	)
+	// Registers the buffer controller and the dynamic scalable ref watcher it owns.
+	err = controller.SetupWithManager(ctx, mgr)
+	Expect(err).ToNot(HaveOccurred())
 
-	go controller.Run(ctx.Done())
+	readyReplicasController = cbctrl.NewReadyReplicasController(mgr.GetClient())
+	err = readyReplicasController.SetupWithManager(mgr)
+	Expect(err).ToNot(HaveOccurred())
+
+	go func() {
+		defer GinkgoRecover()
+		err = mgr.Start(ctx)
+		Expect(err).ToNot(HaveOccurred(), "failed to run manager")
+	}()
 })
 
 var _ = AfterSuite(func() {

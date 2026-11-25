@@ -17,6 +17,7 @@ limitations under the License.
 package debuggingsnapshot
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -60,10 +61,10 @@ func TestBasicSnapshotRequest(t *testing.T) {
 	}()
 
 	for !snapshotter.IsDataCollectionAllowed() {
-		snapshotter.StartDataCollection()
+		snapshotter.StartDataCollection(context.Background())
 	}
-	snapshotter.SetClusterNodes(nodeGroups)
-	snapshotter.Flush()
+	snapshotter.SetClusterNodes(context.Background(), nodeGroups)
+	snapshotter.Flush(context.Background())
 
 	wg.Wait()
 	resp := w.Result()
@@ -85,9 +86,9 @@ func TestFlushWithoutData(t *testing.T) {
 	}()
 
 	for !snapshotter.IsDataCollectionAllowed() {
-		snapshotter.StartDataCollection()
+		snapshotter.StartDataCollection(context.Background())
 	}
-	snapshotter.Flush()
+	snapshotter.Flush(context.Background())
 
 	wg.Wait()
 	resp := w.Result()
@@ -109,7 +110,7 @@ func TestRequestTerminationOnShutdown(t *testing.T) {
 	}()
 
 	for !snapshotter.IsDataCollectionAllowed() {
-		snapshotter.StartDataCollection()
+		snapshotter.StartDataCollection(context.Background())
 	}
 
 	go snapshotter.Cleanup()
@@ -132,7 +133,7 @@ func TestRejectParallelRequest(t *testing.T) {
 	}()
 
 	for !snapshotter.IsDataCollectionAllowed() {
-		snapshotter.StartDataCollection()
+		snapshotter.StartDataCollection(context.Background())
 	}
 
 	w1 := httptest.NewRecorder()
@@ -140,8 +141,8 @@ func TestRejectParallelRequest(t *testing.T) {
 	snapshotter.ResponseHandler(w1, req1)
 	assert.Equal(t, http.StatusTooManyRequests, w1.Code)
 
-	snapshotter.SetClusterNodes(nil)
-	snapshotter.Flush()
+	snapshotter.SetClusterNodes(context.Background(), nil)
+	snapshotter.Flush(context.Background())
 	wg.Wait()
 
 	assert.Equal(t, http.StatusOK, w.Code)

@@ -40,45 +40,65 @@ const (
 )
 
 // MaxSize returns maximum size of the node group.
-func (nodeGroup *NodeGroup) MaxSize() int {
+func (nodeGroup *NodeGroup) MaxSize(ctx context.Context) int {
 	return nodeGroup.maxSize
 }
 
 // MinSize returns minimum size of the node group.
-func (nodeGroup *NodeGroup) MinSize() int {
+func (nodeGroup *NodeGroup) MinSize(ctx context.Context) int {
 	return nodeGroup.minSize
 }
 
 // TargetSize returns the current TARGET size of the node group. It is possible that the
 // number is different from the number of nodes registered in Kubernetes.
-func (nodeGroup *NodeGroup) TargetSize() (int, error) {
+func (nodeGroup *NodeGroup) TargetSize(ctx context.Context) (int, error) {
+	nodeGroup.mu.Lock()
+	defer nodeGroup.mu.Unlock()
 	return nodeGroup.targetSize, nil
 }
 
+// setTargetSize overwrites the target size of the node group.
+func (nodeGroup *NodeGroup) setTargetSize(size int) {
+	nodeGroup.mu.Lock()
+	defer nodeGroup.mu.Unlock()
+	nodeGroup.targetSize = size
+}
+
 // IncreaseSize increases NodeGroup size.
-func (nodeGroup *NodeGroup) IncreaseSize(delta int) error {
+func (nodeGroup *NodeGroup) IncreaseSize(ctx context.Context, delta int) error {
 	if delta <= 0 {
 		return fmt.Errorf(sizeIncreaseMustBePositiveErr)
 	}
+
+	// Hold the lock for the whole operation so that concurrent size changes
+	// can't push the node group above its max size.
+	nodeGroup.mu.Lock()
+	defer nodeGroup.mu.Unlock()
+
 	size := nodeGroup.targetSize
 	newSize := int(size) + delta
-	if newSize > nodeGroup.MaxSize() {
-		return fmt.Errorf("%s, desired: %d max: %d", maxSizeReachedErr, newSize, nodeGroup.MaxSize())
+	if newSize > nodeGroup.MaxSize(context.TODO()) {
+		return fmt.Errorf("%s, desired: %d max: %d", maxSizeReachedErr, newSize, nodeGroup.MaxSize(context.TODO()))
 	}
 
 	klog.V(5).Infof("increasing size of nodegroup '%s' to %v (old size: %v, delta: %v)", nodeGroup.name, newSize, size, delta)
 
-	schedNode, err := nodeGroup.TemplateNodeInfo()
-	if err != nil {
+	if nodeGroup.nodeTemplate == nil {
 		return fmt.Errorf("couldn't create a template node for nodegroup %s", nodeGroup.name)
 	}
 
 	for i := 0; i < delta; i++ {
-		node := schedNode.Node()
+		// Every new node must be built from a fresh copy of the template,
+		// otherwise the shared node group template would be mutated in place.
+		node := nodeGroup.nodeTemplate.DeepCopy()
 		node.Name = fmt.Sprintf("%s-%s", nodeGroup.name, rand.String(5))
 		if node.Annotations == nil {
 			node.Annotations = map[string]string{}
 		}
+		if node.Labels == nil {
+			node.Labels = make(map[string]string)
+		}
+		node.Labels["kubernetes.io/hostname"] = node.Name
 		node.Annotations["metrics.k8s.io/resource-metrics-path"] = fmt.Sprintf("/metrics/nodes/%s/metrics/resource", node.Name)
 		node.Spec.ProviderID = getProviderID(node.Name)
 		_, err := nodeGroup.kubeClient.CoreV1().Nodes().Create(context.Background(), node, v1.CreateOptions{})
@@ -92,18 +112,23 @@ func (nodeGroup *NodeGroup) IncreaseSize(delta int) error {
 }
 
 // AtomicIncreaseSize is not implemented.
-func (nodeGroup *NodeGroup) AtomicIncreaseSize(delta int) error {
+func (nodeGroup *NodeGroup) AtomicIncreaseSize(ctx context.Context, delta int) error {
 	return cloudprovider.ErrNotImplemented
 }
 
 // DeleteNodes deletes the specified nodes from the node group.
-func (nodeGroup *NodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
+func (nodeGroup *NodeGroup) DeleteNodes(ctx context.Context, nodes []*apiv1.Node) error {
+	// Hold the lock for the whole operation so that concurrent deletions
+	// can't push the node group below its min size.
+	nodeGroup.mu.Lock()
+	defer nodeGroup.mu.Unlock()
+
 	size := nodeGroup.targetSize
-	if size <= nodeGroup.MinSize() {
+	if size <= nodeGroup.MinSize(context.TODO()) {
 		return fmt.Errorf(minSizeReachedErr)
 	}
 
-	if size-len(nodes) < nodeGroup.MinSize() {
+	if size-len(nodes) < nodeGroup.MinSize(context.TODO()) {
 		return fmt.Errorf(belowMinSizeErr)
 	}
 
@@ -125,17 +150,21 @@ func (nodeGroup *NodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 }
 
 // ForceDeleteNodes deletes nodes from the group regardless of constraints.
-func (nodeGroup *NodeGroup) ForceDeleteNodes(nodes []*apiv1.Node) error {
+func (nodeGroup *NodeGroup) ForceDeleteNodes(ctx context.Context, nodes []*apiv1.Node) error {
 	return cloudprovider.ErrNotImplemented
 }
 
 // DecreaseTargetSize decreases the target size of the node group. This function
 // doesn't permit to delete any existing node and can be used only to reduce the
 // request for new nodes that have not been yet fulfilled. Delta should be negative.
-func (nodeGroup *NodeGroup) DecreaseTargetSize(delta int) error {
+func (nodeGroup *NodeGroup) DecreaseTargetSize(ctx context.Context, delta int) error {
 	if delta >= 0 {
 		return fmt.Errorf(sizeDecreaseMustBeNegativeErr)
 	}
+
+	nodeGroup.mu.Lock()
+	defer nodeGroup.mu.Unlock()
+
 	size := nodeGroup.targetSize
 	nodes, err := nodeGroup.getNodeNamesForNodeGroup()
 	if err != nil {
@@ -174,12 +203,12 @@ func (nodeGroup *NodeGroup) Id() string {
 }
 
 // Debug returns a debug string for the nodegroup.
-func (nodeGroup *NodeGroup) Debug() string {
-	return fmt.Sprintf("%s (%d:%d)", nodeGroup.Id(), nodeGroup.MinSize(), nodeGroup.MaxSize())
+func (nodeGroup *NodeGroup) Debug(ctx context.Context) string {
+	return fmt.Sprintf("%s (%d:%d)", nodeGroup.Id(), nodeGroup.MinSize(context.TODO()), nodeGroup.MaxSize(context.TODO()))
 }
 
 // Nodes returns a list of all nodes that belong to this node group.
-func (nodeGroup *NodeGroup) Nodes() ([]cloudprovider.Instance, error) {
+func (nodeGroup *NodeGroup) Nodes(ctx context.Context) ([]cloudprovider.Instance, error) {
 	instances := make([]cloudprovider.Instance, 0)
 	nodeNames, err := nodeGroup.getNodeNamesForNodeGroup()
 	if err != nil {
@@ -195,39 +224,40 @@ func (nodeGroup *NodeGroup) Nodes() ([]cloudprovider.Instance, error) {
 }
 
 // TemplateNodeInfo returns a node template for this node group.
-func (nodeGroup *NodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) {
-	nodeInfo := framework.NewNodeInfo(nodeGroup.nodeTemplate, nil, framework.NewPodInfo(cloudprovider.BuildKubeProxy(nodeGroup.Id()), nil))
+func (nodeGroup *NodeGroup) TemplateNodeInfo(ctx context.Context) (*framework.NodeInfo, error) {
+	// Return a copy so that callers can't mutate the node group template.
+	nodeInfo := framework.NewNodeInfo(nodeGroup.nodeTemplate.DeepCopy(), nil, framework.NewPodInfo(cloudprovider.BuildKubeProxy(nodeGroup.Id()), nil))
 	return nodeInfo, nil
 }
 
 // Exist checks if the node group really exists on the cloud provider side.
 // Since kwok nodegroup is not backed by anything on cloud provider side
 // We can safely return `true` here
-func (nodeGroup *NodeGroup) Exist() bool {
+func (nodeGroup *NodeGroup) Exist(ctx context.Context) bool {
 	return true
 }
 
 // Create creates the node group on the cloud provider side.
 // Left unimplemented because Create is not used anywhere
 // in the core autoscaler as of writing this
-func (nodeGroup *NodeGroup) Create() (cloudprovider.NodeGroup, error) {
+func (nodeGroup *NodeGroup) Create(ctx context.Context) (cloudprovider.NodeGroup, error) {
 	return nil, cloudprovider.ErrNotImplemented
 }
 
 // Delete deletes the node group on the cloud provider side.
 // Left unimplemented because Delete is not used anywhere
 // in the core autoscaler as of writing this
-func (nodeGroup *NodeGroup) Delete() error {
+func (nodeGroup *NodeGroup) Delete(ctx context.Context) error {
 	return cloudprovider.ErrNotImplemented
 }
 
 // Autoprovisioned returns true if the node group is autoprovisioned.
-func (nodeGroup *NodeGroup) Autoprovisioned() bool {
+func (nodeGroup *NodeGroup) Autoprovisioned(ctx context.Context) bool {
 	return false
 }
 
 // GetOptions returns NodeGroupAutoscalingOptions that should be used for this particular
 // NodeGroup. Returning a nil will result in using default options.
-func (nodeGroup *NodeGroup) GetOptions(defaults config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error) {
+func (nodeGroup *NodeGroup) GetOptions(ctx context.Context, defaults config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error) {
 	return &defaults, nil
 }

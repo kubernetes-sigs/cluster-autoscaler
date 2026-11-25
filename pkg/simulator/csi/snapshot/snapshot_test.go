@@ -26,7 +26,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 )
 
@@ -292,58 +291,6 @@ func TestSnapshotCSINodeLister(t *testing.T) {
 			t.Errorf("List(): unexpected CSINodes (-want +got): %s", diff)
 		}
 	})
-}
-
-func TestSnapshotAddCSINodeInfoToNodeInfo(t *testing.T) {
-	for _, tc := range []struct {
-		testName string
-
-		csiNodes map[string]*storagev1.CSINode
-
-		nodeName    string
-		wantCSINode *storagev1.CSINode
-		wantErr     error
-	}{
-		{
-			testName: "AddCSINodeInfoToNodeInfo(): missing CSI node is an error",
-			csiNodes: map[string]*storagev1.CSINode{
-				node1Name: node1CSINode.DeepCopy(),
-			},
-			nodeName: node2Name,
-			wantErr:  cmpopts.AnyError,
-		},
-		{
-			testName: "AddCSINodeInfoToNodeInfo(): CSI node info is correctly added to NodeInfo",
-			csiNodes: map[string]*storagev1.CSINode{
-				node1Name: node1CSINode.DeepCopy(),
-				node2Name: node2CSINode.DeepCopy(),
-			},
-			nodeName:    node1Name,
-			wantCSINode: node1CSINode,
-		},
-	} {
-		t.Run(tc.testName, func(t *testing.T) {
-			snapshot := NewSnapshot(tc.csiNodes)
-
-			node := test.BuildTestNode(tc.nodeName, 1000, 1000)
-			nodeInfo := framework.NewNodeInfo(node, nil)
-			resultNodeInfo, err := snapshot.AddCSINodeInfoToNodeInfo(nodeInfo)
-
-			if diff := cmp.Diff(tc.wantErr, err, cmpopts.EquateErrors()); diff != "" {
-				t.Fatalf("AddCSINodeInfoToNodeInfo(): unexpected error (-want +got): %s", diff)
-			}
-
-			if tc.wantCSINode != nil {
-				if resultNodeInfo == nil {
-					t.Fatal("AddCSINodeInfoToNodeInfo(): returned nil NodeInfo")
-				}
-				gotCSINode := resultNodeInfo.CSINode
-				if diff := cmp.Diff(tc.wantCSINode, gotCSINode, cmpopts.EquateEmpty()); diff != "" {
-					t.Errorf("AddCSINodeInfoToNodeInfo(): unexpected CSINode (-want +got): %s", diff)
-				}
-			}
-		})
-	}
 }
 
 func TestSnapshotForkCommitRevert(t *testing.T) {

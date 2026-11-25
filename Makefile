@@ -12,88 +12,87 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+export GOBIN ?= $(CURDIR)/bin
+export PATH := $(GOBIN):$(PATH)
 
-GO_TEST_DEFAULT_ANALYZERS?=all
-TAG?=dev
-FLAGS=
-LDFLAGS?=-s
-ENVVAR=CGO_ENABLED=0
-GOOS?=linux
-GOARCH?=$(shell go env GOARCH)
-DOCKER_NETWORK?=default
+HELM      ?= go tool -modfile=tools/go.mod helm
+KIND      ?= go tool -modfile=tools/go.mod kind
+ENVTEST   ?= go tool -modfile=tools/go.mod setup-envtest
+GINKGO    ?= go tool -modfile=tools/go.mod ginkgo
 
-build:
-	@$(MAKE) build-arch-$(GOARCH)
+.PHONY: build-kwok
+build-kwok:
+	@CGO_ENABLED=0 GOOS=linux go build -o cluster-autoscaler-kwok ./kwok
 
-build-arch-%: clean-arch-%
-	$(ENVVAR) GOOS=$(GOOS) GOARCH=$* go build -o cluster-autoscaler-$* ${LDFLAGS_FLAG} ${TAGS_FLAG} ./pkg
+.PHONY: image-kwok
+image-kwok: TAG?=dev
+image-kwok: build-kwok
+	@docker build -t cluster-autoscaler-kwok:${TAG} -f kwok/Dockerfile .
 
-test-unit: clean build
-	go test -race $$(go list ./... ) -vet="${GO_TEST_DEFAULT_ANALYZERS}" ${TAGS_FLAG}
+.PHONY: test
+test: setup-envtest
+	@go test -race ./...
 
-test-controllers: setup-envtest clean build
-	ginkgo --race --vet="${GO_TEST_DEFAULT_ANALYZERS}" ${TAGS_FLAG} ./pkg/test/integration/controllers/...
+.PHONY: test-controllers
+test-controllers: setup-envtest
+	@$(GINKGO) --race ./pkg/test/integration/controllers/...
 
-test-ci: setup-envtest
-	go test -race $$(go list ./... ) -vet="${GO_TEST_DEFAULT_ANALYZERS}" ${TAGS_FLAG}
+.PHONY: clean
+clean:
+	@rm -f cluster-autoscaler-kwok
 
-benchmark:
-	go test $$(go list ./... ) -bench=. -run='^$$' -vet="${GO_TEST_DEFAULT_ANALYZERS}"
-
-clean: clean-arch-$(GOARCH)
-
-clean-arch-%:
-	rm -f cluster-autoscaler-$*
-
+.PHONY: format
 format:
 	test -z "$$(find . -path ./vendor -prune -type f -o -name '*.go' -exec gofmt -s -d {} + | tee /dev/stderr)" || \
 	test -z "$$(find . -path ./vendor -prune -type f -o -name '*.go' -exec gofmt -s -w {} + | tee /dev/stderr)"
 
-## Location to install dependencies to
-LOCALBIN ?= $(shell pwd)/bin
-$(LOCALBIN):
-	mkdir -p $(LOCALBIN)
-
-ENVTEST ?= $(LOCALBIN)/setup-envtest
-#ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
-ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
-#ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
-ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
-
-
 .PHONY: setup-envtest
-setup-envtest: envtest ## Download the binaries required for ENVTEST in the local bin directory.
+setup-envtest: ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
+setup-envtest:
+	@mkdir -p $(GOBIN)
 	@echo "Setting up envtest binaries for Kubernetes version $(ENVTEST_K8S_VERSION)..."
-	@$(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path || { \
+	@$(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(GOBIN) -p path || { \
 		echo "Warning: Failed to set up envtest binaries for version $(ENVTEST_K8S_VERSION)."; \
 		echo "Attempting fallback to latest available envtest binaries version."; \
-		$(ENVTEST) use latest --bin-dir $(LOCALBIN) -p path || { \
+		$(ENVTEST) use latest --bin-dir $(GOBIN) -p path || { \
 			echo "Error: Failed to set up envtest binaries."; \
 			exit 1; \
 		}; \
 	}
-	@echo ""
-	@echo "Successfully set up envtest binaries."
+	@chmod -R +w $(GOBIN)/k8s
 
-.PHONY: envtest
-envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
-$(ENVTEST): $(LOCALBIN)
-	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
+.PHONY: run-e2e
+run-e2e: e2e-kwok-cluster e2e-install-ca
+	@go test -tags e2e -timeout 1h -v ./test/e2e/... -args -v=4
+	@$(MAKE) e2e-teardown
 
-# go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
-# $1 - target path with name of binary
-# $2 - package url which can be installed
-# $3 - specific version of package
-define go-install-tool
-@[ -f "$(1)-$(3)" ] || { \
-set -e; \
-package=$(2)@$(3) ;\
-echo "Downloading $${package}" ;\
-rm -f $(1) || true ;\
-GOBIN=$(LOCALBIN) go install $${package} ;\
-mv $(1) $(1)-$(3) ;\
-} ;\
-ln -sf $(1)-$(3) $(1)
-endef
+E2E_CLUSTER_NAME ?= ca-e2e-kwok
 
-.PHONY: all build test-unit clean format
+.PHONY: e2e-kwok-cluster
+e2e-kwok-cluster: E2E_KIND_CONFIG ?= kind-config.yaml
+e2e-kwok-cluster: KWOK_REPO_URL ?= https://kwok.sigs.k8s.io/charts/
+e2e-kwok-cluster:
+	@$(KIND) create cluster --name $(E2E_CLUSTER_NAME) --config $(E2E_KIND_CONFIG)
+	@$(HELM) repo add kwok-charts $(KWOK_REPO_URL)
+	@$(HELM) upgrade --install kwok --namespace kube-system kwok-charts/kwok --set hostNetwork=true --wait
+	@$(HELM) upgrade --install kwok-stage-fast --namespace kube-system kwok-charts/stage-fast --wait
+	@kubectl apply -f pkg/apis/config/crd/
+
+.PHONY: e2e-install-ca
+e2e-install-ca: image-kwok
+	@$(KIND) load docker-image cluster-autoscaler-kwok:dev --name $(E2E_CLUSTER_NAME)
+	@$(HELM) upgrade --install cluster-autoscaler --namespace kube-system ./kwok/charts/ --wait \
+		--set tolerations[0].key=node-role.kubernetes.io/control-plane \
+		--set tolerations[0].operator=Exists \
+		--set tolerations[0].effect=NoSchedule \
+		--set extraArgs.scale-down-unneeded-time=10s \
+		--set extraArgs.scale-down-delay-after-add=0s \
+		--set extraArgs.unremovable-node-recheck-timeout=0s \
+		--set extraArgs.enable-csi-node-aware-scheduling=false \
+		--set extraArgs.capacity-buffer-controller-enabled=true \
+		--set extraArgs.capacity-buffer-pod-injection-enabled=true \
+		--set extraArgs.bypassed-scheduler-names=non-existing-bypassed-scheduler
+
+.PHONY: e2e-teardown
+e2e-teardown:
+	@$(KIND) delete cluster --name $(E2E_CLUSTER_NAME)

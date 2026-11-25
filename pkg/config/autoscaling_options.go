@@ -40,7 +40,9 @@ type NodeGroupAutoscalingOptions struct {
 	// ScaleDownUtilizationThreshold sets threshold for nodes to be considered for scale down if cpu or memory utilization is over threshold.
 	// Well-utilized nodes are not touched.
 	ScaleDownUtilizationThreshold float64
-	// ScaleDownGpuUtilizationThreshold sets threshold for gpu nodes to be considered for scale down if gpu utilization is over threshold.
+	// ScaleDownGpuUtilizationThreshold sets the maximum per-resource utilization
+	// across resources representing the selected GPU family, at or below which a
+	// node can be considered for scale down.
 	// Well-utilized nodes are not touched.
 	ScaleDownGpuUtilizationThreshold float64
 	// ScaleDownUnneededTime sets the duration CA expects a node to be unneeded/eligible for removal
@@ -61,6 +63,7 @@ type NodeGroupAutoscalingOptions struct {
 }
 
 // GCEOptions contain autoscaling options specific to GCE cloud provider.
+// TODO(Choraden): remove it once GCE cloud provider would be migrate to google managed repository.
 type GCEOptions struct {
 	// ConcurrentRefreshes is the maximum number of concurrently refreshed instance groups or instance templates or zones with mig instances
 	ConcurrentRefreshes int
@@ -272,6 +275,8 @@ type AutoscalingOptions struct {
 	MaxScaleDownParallelism int
 	// MaxDrainParallelism is the maximum number of nodes needing drain, that can be drained and deleted in parallel.
 	MaxDrainParallelism int
+	// MaxConcurrentNodesTainting is the maximum number of nodes that can be tainted/untainted as ToBeDeleted at the same time.
+	MaxConcurrentNodesTainting int
 	// RecordDuplicatedEvents controls whether events should be duplicated within a 5 minute window.
 	RecordDuplicatedEvents bool
 	// MaxNodesPerScaleUp controls how many nodes can be added in a single scale-up.
@@ -334,6 +339,10 @@ type AutoscalingOptions struct {
 	DynamicResourceAllocationEnabled bool
 	// CSINodeAwareSchedulingEnabled configures whether logic for handling CSINode objects is enabled.
 	CSINodeAwareSchedulingEnabled bool
+	// PodGroupSupportEnabled configures whether logic for handling scheduling.k8s.io PodGroups is
+	// enabled: nodes hosting pods of gang-scheduled PodGroups are not scaled down. It requires the
+	// GenericWorkload feature gate and the scheduling.k8s.io/v1beta1 API to be enabled on the API server.
+	PodGroupSupportEnabled bool
 	// PredicateParallelism is the number of goroutines to use for running scheduler predicates.
 	PredicateParallelism int
 	// CheckCapacityProcessorInstance is the name of the processor instance.
@@ -376,6 +385,8 @@ type AutoscalingOptions struct {
 	CapacitybufferPodInjectionEnabled bool
 	// CapacityBufferPodDryRunEnabled tells if CA should use server dry run to build managed pod templates for the buffers
 	CapacityBufferPodDryRunEnabled bool
+	// CapacityBufferReadyReplicas tells if CA should reconcile readyReplicas status field of capacity buffers.
+	CapacityBufferReadyReplicasEnabled bool
 	// MaxNodeSkipEvalTimeTrackerEnabled is used to enabled/disable the tracking of maximum evaluation time of a node being skipped during ScaleDown.
 	MaxNodeSkipEvalTimeTrackerEnabled bool
 	// NodeRemovalLatencyTrackingEnabled is used to enable/disable node removal latency tracking.

@@ -17,6 +17,8 @@ limitations under the License.
 package status
 
 import (
+	"context"
+	"errors"
 	"time"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate"
@@ -26,7 +28,7 @@ import (
 // AutoscalingStatusProcessor processes the status of the cluster after each autoscaling iteration.
 // It's triggered at the end of Autoscaler's RunOnce method.
 type AutoscalingStatusProcessor interface {
-	Process(autoscalingCtx *ca_context.AutoscalingContext, csr *clusterstate.ClusterStateRegistry, now time.Time) error
+	Process(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, csr *clusterstate.ClusterStateRegistry, now time.Time) error
 	CleanUp()
 }
 
@@ -41,10 +43,41 @@ func NewDefaultAutoscalingStatusProcessor() AutoscalingStatusProcessor {
 type NoOpAutoscalingStatusProcessor struct{}
 
 // Process processes the status of the cluster after an autoscaling iteration.
-func (p *NoOpAutoscalingStatusProcessor) Process(autoscalingCtx *ca_context.AutoscalingContext, csr *clusterstate.ClusterStateRegistry, now time.Time) error {
+func (p *NoOpAutoscalingStatusProcessor) Process(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, csr *clusterstate.ClusterStateRegistry, now time.Time) error {
 	return nil
 }
 
 // CleanUp cleans up the processor's internal structures.
 func (p *NoOpAutoscalingStatusProcessor) CleanUp() {
+}
+
+// CombinedAutoscalingStatusProcessor combines multiple AutoscalingStatusProcessors.
+type CombinedAutoscalingStatusProcessor struct {
+	processors []AutoscalingStatusProcessor
+}
+
+// Process runs Process of every child processor and returns combined error if any.
+func (p *CombinedAutoscalingStatusProcessor) Process(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, csr *clusterstate.ClusterStateRegistry, now time.Time) error {
+	var errs []error
+	for _, processor := range p.processors {
+		err := processor.Process(ctx, autoscalingCtx, csr, now)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// CleanUp runs Cleanup of every child processor.
+func (p *CombinedAutoscalingStatusProcessor) CleanUp() {
+	for _, processor := range p.processors {
+		processor.CleanUp()
+	}
+}
+
+// NewCombinedAutoscalingStatusProcessor returns a new CombinedAutoscalingStatusProcessor.
+func NewCombinedAutoscalingStatusProcessor(processors []AutoscalingStatusProcessor) *CombinedAutoscalingStatusProcessor {
+	return &CombinedAutoscalingStatusProcessor{
+		processors: processors,
+	}
 }

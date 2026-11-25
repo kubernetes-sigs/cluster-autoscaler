@@ -19,7 +19,6 @@ package flags
 import (
 	"flag"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -49,25 +48,23 @@ const (
 // for parsing and building the AutoscalingOptions struct from commandline flags.
 type AutoscalingFlags struct {
 	// Flags that require post-processing to be converted to the AutoscalingOptions struct
-	schedulerConfigFile        string
-	coresTotal                 string
-	memoryTotal                string
-	drainPriorityConfig        string
-	gpuTotal                   []string
-	nodeGroups                 []string
-	nodeGroupAutodiscovery     []string
-	startupTaints              []string
-	statusTaints               []string
-	ignoreTaints               []string
-	bypassedSchedulers         []string
-	allowedSchedulers          []string
-	maxGracefulTerminationSec  int
-	kubeClientQPS              float64
-	clusterSnapshotParallelism int
-	startupTaintPrefixes       []string
-	balancingIgnoreLabels      []string
-	balancingLabels            []string
-	schedulerVerbosity         int
+	schedulerConfigFile       string
+	coresTotal                string
+	memoryTotal               string
+	drainPriorityConfig       string
+	gpuTotal                  []string
+	nodeGroups                []string
+	nodeGroupAutodiscovery    []string
+	startupTaints             []string
+	statusTaints              []string
+	bypassedSchedulers        []string
+	allowedSchedulers         []string
+	maxGracefulTerminationSec int
+	kubeClientQPS             float64
+	startupTaintPrefixes      []string
+	balancingIgnoreLabels     []string
+	balancingLabels           []string
+	schedulerVerbosity        int
 	// The AutoscalingOptions struct that will be populated by the flags
 	// as a result of parsing the flags
 	o config.AutoscalingOptions
@@ -84,7 +81,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&p.o.KubeClientOpts.KubeClientBurst, "kube-client-burst", rest.DefaultBurst, "Burst value for kubernetes client.")
 	fs.Float64Var(&p.kubeClientQPS, "kube-client-qps", float64(rest.DefaultQPS), "QPS value for kubernetes client.")
 	fs.StringVar(&p.o.CloudConfig, "cloud-config", "", "The path to the cloud provider configuration file.  Empty string for no configuration file.")
-	fs.StringVar(&p.o.CloudProviderName, "cloud-provider", "gce", "Cloud provider type. Available values: ["+strings.Join(cloudBuilder.AvailableCloudProviders(), ",")+"]")
+	fs.StringVar(&p.o.CloudProviderName, "cloud-provider", cloudBuilder.DefaultCloudProvider(), "Cloud provider type. Available values: ["+strings.Join(cloudBuilder.AvailableCloudProviders(), ",")+"]")
 	fs.StringVar(&p.o.ConfigNamespace, "namespace", "kube-system", "Namespace in which cluster-autoscaler run.")
 	fs.BoolVar(&p.o.EnforceNodeGroupMinSize, "enforce-node-group-min-size", false, "Should CA scale up the node group to the configured min size if needed.")
 	fs.BoolVar(&p.o.ScaleDownUnreadyEnabled, "scale-down-unready-enabled", true, "Should CA scale down unready nodes of the cluster")
@@ -96,8 +93,9 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&p.o.NodeGroupDefaults.ScaleDownUnreadyTime, "scale-down-unready-time", config.DefaultScaleDownUnreadyTime, "How long an unready node should be unneeded before it is eligible for scale down")
 	fs.Float64Var(&p.o.NodeGroupDefaults.ScaleDownUtilizationThreshold, "scale-down-utilization-threshold", config.DefaultScaleDownUtilizationThreshold, "The maximum value between the sum of cpu requests and sum of memory requests of all pods running on the node divided by node's corresponding allocatable resource, below which a node can be considered for scale down")
 	fs.Float64Var(&p.o.NodeGroupDefaults.ScaleDownGpuUtilizationThreshold, "scale-down-gpu-utilization-threshold", config.DefaultScaleDownGpuUtilizationThreshold,
-		"Sum of gpu requests of all pods running on the node divided by node's allocatable resource, below which a node can be considered for scale down."+
-			"Utilization calculation only cares about gpu resource for accelerator node. cpu and memory utilization will be ignored.")
+		"Maximum across resources representing the selected GPU family of the sum of pod requests divided by the node's allocatable resource, at or below which a node can be considered for scale down. "+
+			"NVIDIA whole-GPU, MIG, and time-sliced resources are evaluated together. "+
+			"CPU and memory utilization are ignored for GPU nodes.")
 	fs.IntVar(&p.o.ScaleDownNonEmptyCandidatesCount, "scale-down-non-empty-candidates-count", 30,
 		"Maximum number of non empty nodes considered in one iteration as candidates for scale down with drain."+
 			"Lower value means better CA responsiveness but possible slower scale down latency."+
@@ -159,6 +157,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&p.o.NodeGroupBackoffResetTimeout, "node-group-backoff-reset-timeout", 3*time.Hour, "nodeGroupBackoffResetTimeout is the time after last failed scale-up when the backoff duration is reset.")
 	fs.IntVar(&p.o.MaxScaleDownParallelism, "max-scale-down-parallelism", 10, "Maximum number of nodes (both empty and needing drain) that can be deleted in parallel.")
 	fs.IntVar(&p.o.MaxDrainParallelism, "max-drain-parallelism", 1, "Maximum number of nodes needing drain, that can be drained and deleted in parallel.")
+	fs.IntVar(&p.o.MaxConcurrentNodesTainting, "max-concurrent-nodes-tainting", 5, "Maximum number of nodes that can be tainted/untainted as ToBeDeleted at the same time.")
 	fs.BoolVar(&p.o.RecordDuplicatedEvents, "record-duplicated-events", false, "enable duplication of similar events within a 5 minute window.")
 	fs.IntVar(&p.o.MaxNodesPerScaleUp, "max-nodes-per-scaleup", 1000, "Max nodes added in a single scale-up. This is intended strictly for optimizing CA algorithm latency and not a tool to rate-limit scale-up throughput.")
 	fs.DurationVar(&p.o.MaxNodeGroupBinpackingDuration, "max-nodegroup-binpacking-duration", 10*time.Second, "Maximum time that will be spent in binpacking simulation for each NodeGroup.")
@@ -198,25 +197,25 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&p.o.CheckCapacityProvisioningRequestBatchTimebox, "check-capacity-provisioning-request-batch-timebox", 10*time.Second, "Maximum time to process a batch of provisioning requests.")
 	fs.BoolVar(&p.o.ForceDeleteLongUnregisteredNodes, "force-delete-unregistered-nodes", false, "Whether to enable force deletion of long unregistered nodes, regardless of the min size of the node group the belong to.")
 	fs.BoolVar(&p.o.ForceDeleteFailedNodes, "force-delete-failed-nodes", false, "Whether to enable force deletion of failed nodes, regardless of the min size of the node group the belong to.")
-	fs.BoolVar(&p.o.CSINodeAwareSchedulingEnabled, "enable-csi-node-aware-scheduling", false, "Whether logic for handling CSINode objects is enabled.")
+	fs.BoolVar(&p.o.CSINodeAwareSchedulingEnabled, "enable-csi-node-aware-scheduling", true, "Whether logic for handling CSINode objects is enabled.")
+	fs.BoolVar(&p.o.PodGroupSupportEnabled, "enable-pod-group-support", false, "Whether logic for handling scheduling.k8s.io PodGroups is enabled: nodes hosting pods of gang-scheduled PodGroups (gang policy with minCount > 1) are not scaled down. Requires the GenericWorkload feature gate and the scheduling.k8s.io/v1beta1 API to be enabled on the API server.")
 	fs.IntVar(&p.o.PredicateParallelism, "predicate-parallelism", 4, "Maximum parallelism of scheduler predicate checking.")
 	fs.StringVar(&p.o.CheckCapacityProcessorInstance, "check-capacity-processor-instance", "", "Name of the processor instance. Only ProvisioningRequests that define this name in their parameters with the key \"processorInstance\" will be processed by this CA instance. It only refers to check capacity ProvisioningRequests, but if not empty, best-effort atomic ProvisioningRequests processing is disabled in this instance. Not recommended: Until CA 1.35, ProvisioningRequests with this name as prefix in their class will be also processed.")
 	fs.DurationVar(&p.o.NodeDeletionCandidateTTL, "node-deletion-candidate-ttl", time.Duration(0), "Maximum time a node can be marked as removable before the marking becomes stale. This sets the TTL of Cluster-Autoscaler's state if the Cluste-Autoscaler deployment becomes inactive (default 0s)")
 	fs.BoolVar(&p.o.CapacitybufferControllerEnabled, "capacity-buffer-controller-enabled", false, "Whether to enable the default controller for capacity buffers or not")
 	fs.BoolVar(&p.o.CapacitybufferPodInjectionEnabled, "capacity-buffer-pod-injection-enabled", false, "Whether to enable pod list processor that processes ready capacity buffers and injects fake pods accordingly")
 	fs.BoolVar(&p.o.CapacityBufferPodDryRunEnabled, "capacity-buffer-pod-dry-run-enabled", true, "Whether to use server dry run to build managed pod templates for capacity buffers. That ensures that the buffers' fake pods will more reliably resemble real pods by going through the pod defaulting, mutating and validating webhooks. No-op if --capacity-buffer-controller-enabled is false. Note: requires \"create\" permission on pods to call server dry run. No real pods will be created.")
+	fs.BoolVar(&p.o.CapacityBufferReadyReplicasEnabled, "capacity-buffer-ready-replicas-enabled", true, "Whether to reconcile capacity buffers' readyReplicas status field. No-op if --capacity-buffer-pod-injection-enabled is false.")
 	fs.BoolVar(&p.o.NodeRemovalLatencyTrackingEnabled, "node-removal-latency-tracking-enabled", false, "Whether to track latency from when an unneeded node is eligible for scale down until it is removed or needed again.")
 	fs.BoolVar(&p.o.MaxNodeSkipEvalTimeTrackerEnabled, "max-node-skip-eval-time-tracker-enabled", false, "Whether to enable the tracking of the maximum time of node being skipped during ScaleDown")
 	fs.BoolVar(&p.o.CapacityQuotasEnabled, "capacity-quotas-enabled", false, "Whether to enable CapacityQuota CRD support.")
 	fs.DurationVar(&p.o.PendingPodsBatchingTimeout, "pending-pods-batching-timeout", 4*time.Minute, "The maximum time spends when running scheduling simulations when preparing the batch of pods passed to scale up logic. This timeout is used in core filter-out pod list processor.")
 	fs.BoolVar(&p.o.GracefulDegradationEnabled, "enable-graceful-degradation", false, "Enables graceful degradation for unschedulable pods. When enabled, scheduling simulations during filter out pod list processor will be stopped after a timeout(specified by scheduling-simulation-timeout) and CA will proceed with a sub set of pods.")
 	fs.BoolVar(&p.o.InterPodAffinityHostnameFastPath, "enable-inter-pod-affinity-hostname-fast-path", false, "Enable the InterPodAffinityHostnameFastPath scheduler feature gate.")
+	fs.BoolVar(&p.o.ScaleDownEnabled, "scale-down-enabled", true, "Should CA scale down the cluster")
 
 	// Deprecated flags
-	fs.StringArrayVar(&p.ignoreTaints, "ignore-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group (Deprecated, use startup-taints instead)")
 	fs.BoolVar(&p.o.DynamicResourceAllocationEnabled, "enable-dynamic-resource-allocation", true, "Handle DRA (Dynamic Resource Allocation) objects, locked to true.")
-	fs.IntVar(&p.clusterSnapshotParallelism, "cluster-snapshot-parallelism", 16, "Maximum parallelism of cluster snapshot creation (Deprecated, use predicate-parallelism instead)")
-	fs.BoolVar(&p.o.ScaleDownEnabled, "scale-down-enabled", true, "[Deprecated] Should CA scale down the cluster")
 
 	// Properties specific to the cloud provider, but kept for the sake of POC
 	fs.StringArrayVar(&p.nodeGroups, "nodes", []string{}, "sets min,max size and other configuration data for a node group in a format accepted by cloud provider. Can be used multiple times. Format: <min>:<max>:<other...>")
@@ -233,7 +232,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&p.memoryTotal, "memory-total", minMaxFlagString(0, config.DefaultMaxClusterMemory), "Minimum and maximum number of gigabytes of memory in cluster, in the format <min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers.")
 	fs.IntVar(&p.maxGracefulTerminationSec, "max-graceful-termination-sec", MaxGracefulTerminationSecDefault, "Maximum number of seconds CA waits for pod termination when trying to scale down a node. This flag is mutually exclusion with drain-priority-config flag which allows more configuration options.")
 	fs.StringArrayVar(&p.gpuTotal, "gpu-total", []string{}, "Minimum and maximum number of different GPUs in cluster, in the format <gpu_type>:<min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers. Can be passed multiple times. CURRENTLY THIS FLAG ONLY WORKS ON GKE.")
-	fs.StringArrayVar(&p.startupTaints, "startup-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group (Equivalent to ignore-taint)")
+	fs.StringArrayVar(&p.startupTaints, "startup-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group")
 	fs.StringArrayVar(&p.statusTaints, "status-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group but nodes will not be treated as unready")
 	fs.StringSliceVar(&p.bypassedSchedulers, "bypassed-scheduler-names", []string{}, "Names of schedulers to bypass. If set to non-empty value, CA will not wait for pods to reach a certain age before triggering a scale-up.")
 	fs.StringSliceVar(&p.allowedSchedulers, "allowed-scheduler-names", []string{}, "If set to non-empty value, CA will proceed only with pods targeting schedulers in the list, from the list of unschedulable and scheduler unprocessed pods")
@@ -242,7 +241,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 			"--max-graceful-termination-sec flag should not be set when this flag is set. Not setting this flag will use unordered evictor by default."+
 			"Priority evictor reuses the concepts of drain logic in kubelet(https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/2712-pod-priority-based-graceful-node-shutdown#migration-from-the-node-graceful-shutdown-feature)."+
 			"Eg. flag usage:  '10000:20,1000:100,0:60'")
-	fs.IntVar(&p.schedulerVerbosity, "scheduler-verbosity", 0, "Specifies the verbosity threshold for logs produced by the scheduler.")
+	fs.IntVar(&p.schedulerVerbosity, "scheduler-verbosity", -1, "Specifies the verbosity threshold for logs produced by the scheduler. Should not be greater than -v flag value. If it's set to -1 the scheduler log verbosity will be equal to -v flag value.")
 }
 
 // Options builds AutoscalingOptions from the flags and returns them by value
@@ -290,6 +289,10 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 		return config.AutoscalingOptions{}, fmt.Errorf("Invalid value for --predicate-parallelism flag: %d", p.o.PredicateParallelism)
 	}
 
+	if p.o.MaxConcurrentNodesTainting < 1 {
+		return config.AutoscalingOptions{}, fmt.Errorf("Invalid value for --max-concurrent-nodes-tainting flag: %d", p.o.MaxConcurrentNodesTainting)
+	}
+
 	if p.o.DynamicResourceAllocationEnabled == false {
 		return config.AutoscalingOptions{}, fmt.Errorf("--enable-dynamic-resource-allocation flag must be true: %t", p.o.DynamicResourceAllocationEnabled)
 	}
@@ -299,31 +302,29 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 		return config.AutoscalingOptions{}, err
 	}
 
-	if p.o.ScaleDownEnabled == false {
-		klog.Warningf("--scale-down-enabled flag is deprecated and will be removed in a future release")
-	}
-
 	maxHealthCheckTimeout := max(p.o.MaxInactivityTime, p.o.MaxFailingTime, p.o.MaxStartupTime)
 	if p.o.MaxStartupTime < maxHealthCheckTimeout {
 		klog.Warningf("--max-startup-time needs to be at least as high as --max-failing-time and --max-inactivity, overriding it to the highest value out of them: %v", maxHealthCheckTimeout)
 		p.o.MaxStartupTime = maxHealthCheckTimeout
 	}
 
-	var verbosity int = p.schedulerVerbosity
+	var verbosity int
 	if vFlag := flag.CommandLine.Lookup("v"); vFlag != nil {
 		if v, err := strconv.Atoi(vFlag.Value.String()); err == nil {
 			verbosity = v
 		}
 	}
-
 	if verbosity < p.schedulerVerbosity {
-		klog.Warningf("--scheduler-verbosity should be at most as high as -v flag, overriding it to: %d", verbosity)
+		klog.Warningf("--scheduler-verbosity should be at most as high as --v flag, overriding it to: %d", verbosity)
+		p.schedulerVerbosity = verbosity
+	}
+	if p.schedulerVerbosity < 0 {
 		p.schedulerVerbosity = verbosity
 	}
 
 	p.o.AllowedSchedulers = allowedSchedulers
 	p.o.BypassedSchedulers = scheduler_util.SchedulersMap(p.bypassedSchedulers)
-	p.o.StartupTaints = slices.Concat(p.ignoreTaints, p.startupTaints)
+	p.o.StartupTaints = p.startupTaints
 	p.o.MaxGracefulTerminationSec = p.maxGracefulTerminationSec
 	p.o.NodeGroupAutoDiscovery = p.nodeGroupAutodiscovery
 	p.o.DrainPriorityConfig = drainPriorityConfigMap

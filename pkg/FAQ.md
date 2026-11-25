@@ -65,6 +65,7 @@ this document:
   * [What events are emitted by CA?](#what-events-are-emitted-by-ca)
   * [My cluster is below minimum / above maximum number of nodes, but CA did not fix that! Why?](#my-cluster-is-below-minimum--above-maximum-number-of-nodes-but-ca-did-not-fix-that-why)
   * [What happens in scale-up when I have no more quota in the cloud provider?](#what-happens-in-scale-up-when-i-have-no-more-quota-in-the-cloud-provider)
+  * [Node scale-down after Job pods evicted or failed](#node-scale-down-after-job-pods-evicted-or-failed)
 * [Developer](#developer)
   * [What go version should be used to compile CA?](#what-go-version-should-be-used-to-compile-ca)
   * [How can I run e2e tests?](#how-can-i-run-e2e-tests)
@@ -299,10 +300,7 @@ Status taints are defined as:
 
 Ignore taints are now deprecated and treated as startup taints.
 
-Ignore taints are defined as:
-
-* all taints with the prefix `ignore-taint.cluster-autoscaler.kubernetes.io/`,
-* all taints defined using `--ignore-taint` flag.
+Ignore taints are defined as all taints with the prefix `ignore-taint.cluster-autoscaler.kubernetes.io/`.
 
 ### How does Cluster Autoscaler handle Dynamic Resource Allocation (DRA)?
 
@@ -1017,7 +1015,6 @@ The following startup parameters are supported for cluster autoscaler:
 | `cloud-provider-gce-l7lb-src-cidrs` | CIDRs opened in GCE firewall for L7 LB traffic proxy & health checks | 130.211.0.0/22,35.191.0.0/16 |
 | `cloud-provider-gce-lb-src-cidrs` | CIDRs opened in GCE firewall for L4 LB traffic proxy & health checks | 130.211.0.0/22,209.85.152.0/22,209.85.204.0/22,35.191.0.0/16 |
 | `cluster-name` | Autoscaled cluster name, if available |  |
-| `cluster-snapshot-parallelism` | Maximum parallelism of cluster snapshot creation. | 16 |
 | `clusterapi-cloud-config-authoritative` | Treat the cloud-config flag authoritatively (do not fallback to using kubeconfig flag). ClusterAPI only |  |
 | `cordon-node-before-terminating` | Should CA cordon nodes before terminating during downscale process | true |
 | `cores-total` | Minimum and maximum number of cores in cluster, in the format <min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers. | "0:320000" |
@@ -1027,7 +1024,7 @@ The following startup parameters are supported for cluster autoscaler:
 | `drain-priority-config` | List of ',' separated pairs (priority:terminationGracePeriodSeconds) of integers separated by ':' enables priority evictor. Priority evictor groups pods into priority groups based on pod priority and evict pods in the ascending order of group priorities--max-graceful-termination-sec flag should not be set when this flag is set. Not setting this flag will use unordered evictor by default.Priority evictor reuses the concepts of drain logic in kubelet(https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/2712-pod-priority-based-graceful-node-shutdown#migration-from-the-node-graceful-shutdown-feature).Eg. flag usage: '10000:20,1000:100,0:60' |  |
 | `dynamic-node-delete-delay-after-taint-enabled` | Enables dynamic adjustment of NodeDeleteDelayAfterTaint based of the latency between CA and api-server |  |
 | `emit-per-nodegroup-metrics` | If true, emit per node group metrics. |  |
-| `enable-csi-node-aware-scheduling` | Whether logic for handling CSINode objects is enabled. |  |
+| `enable-csi-node-aware-scheduling` | Whether logic for handling CSINode objects is enabled. | true |
 | `enable-dynamic-resource-allocation` | Handle DRA (Dynamic Resource Allocation) objects, locked to true. | true |
 | `enable-proactive-scaleup` | Whether to enable/disable proactive scale-ups, defaults to false |  |
 | `enable-provisioning-requests` | Whether the clusterautoscaler will be handling the ProvisioningRequest CRs. |  |
@@ -1048,7 +1045,6 @@ The following startup parameters are supported for cluster autoscaler:
 | `grpc-expander-url` | URL to reach gRPC expander server. |  |
 | `ignore-daemonsets-utilization` | Should CA ignore DaemonSet pods when calculating resource utilization for scaling down |  |
 | `ignore-mirror-pods-utilization` | Should CA ignore Mirror pods when calculating resource utilization for scaling down |  |
-| `ignore-taint` | Specifies a taint to ignore in node templates when considering to scale a node group (Deprecated, use startup-taints instead) | [] |
 | `initial-node-group-backoff-duration` | initialNodeGroupBackoffDuration is the duration of first backoff after a new node failed to start. | 5m0s |
 | `kube-api-content-type` | Content type of requests sent to apiserver. | "application/vnd.kubernetes.protobuf" |
 | `kube-client-burst` | Burst value for kubernetes client. | 10 |
@@ -1140,7 +1136,7 @@ The following startup parameters are supported for cluster autoscaler:
 | `skip-nodes-with-custom-controller-pods` | If true cluster autoscaler will never delete nodes with pods owned by custom controllers | true |
 | `skip-nodes-with-local-storage` | If true cluster autoscaler will never delete nodes with pods with local storage, e.g. EmptyDir or HostPath | true |
 | `skip-nodes-with-system-pods` | If true cluster autoscaler will wait for --blocking-system-pod-distruption-timeout before deleting nodes with pods from kube-system (except for DaemonSet or mirror pods) | true |
-| `startup-taint` | Specifies a taint to ignore in node templates when considering to scale a node group (Equivalent to ignore-taint) | [] |
+| `startup-taint` | Specifies a taint to ignore in node templates when considering to scale a node group | [] |
 | `startup-taint-prefix` | Specifies a taint key prefix. Any taint whose key starts with this prefix will be treated as a startup taint (in addition to the built-in prefixes). Can be used multiple times. | [] |
 | `status-config-map-name` | Status configmap name | "cluster-autoscaler-status" |
 | `status-taint` | Specifies a taint to ignore in node templates when considering to scale a node group but nodes will not be treated as unready | [] |
@@ -1362,6 +1358,16 @@ move back to the previous size until the quota arrives or the scale-up-triggerin
 
 From version 0.6.2, Cluster Autoscaler backs off from scaling up a node group after failure.
 Depending on how long scale-ups have been failing, it may wait up to 30 minutes before next attempt.
+
+### Node scale-down after Job pods evicted or failed
+
+When a Job's pods are evicted or fail, the controller enters an exponential backoff period that can
+last up to 6 minutes. Because no pending pods exist during this backoff, proactive scale-up does
+not trigger, potentially leading to the scale-down of nodes intended for replacement pods.
+This behavior is documented in [kubernetes/kubernetes#130881](https://github.com/kubernetes/kubernetes/issues/130881).
+
+Note that you can apply `safe-to-evict=false` on critical Job pods to prevent the eviction-induced
+backoff and subsequent premature scale-down.
 
 # Developer
 

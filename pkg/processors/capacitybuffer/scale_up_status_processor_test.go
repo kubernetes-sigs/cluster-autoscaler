@@ -17,6 +17,7 @@ limitations under the License.
 package capacitybufferpodlister
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -29,7 +30,6 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/fakepods"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	testprovider "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/test"
-	"sigs.k8s.io/cluster-autoscaler/pkg/context"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupset"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/status"
@@ -85,7 +85,7 @@ func TestProcess(t *testing.T) {
 			autoscalingCtx := &ca_context.AutoscalingContext{}
 
 			p := NewFakePodsScaleUpStatusProcessor(fakepods.NewRegistry(nil))
-			p.Process(autoscalingCtx, scaleUpStatus)
+			p.Process(context.Background(), autoscalingCtx, scaleUpStatus)
 
 			assert.ElementsMatch(t, tc.expectedPodsRemainUnschedulable, extractPodsFromNoScaleUpInfo(scaleUpStatus.PodsRemainUnschedulable))
 			assert.ElementsMatch(t, tc.expectedPodsAwaitEvaluation, scaleUpStatus.PodsAwaitEvaluation)
@@ -102,13 +102,13 @@ func TestBuffersEvent(t *testing.T) {
 		Group:       nodeGroup1,
 		CurrentSize: 5,
 		NewSize:     6,
-		MaxSize:     nodeGroup1.MaxSize(),
+		MaxSize:     nodeGroup1.MaxSize(context.Background()),
 	}
 	scaleUpInfo2 := nodegroupset.ScaleUpInfo{
 		Group:       nodeGroup2,
 		CurrentSize: 8,
 		NewSize:     9,
-		MaxSize:     nodeGroup1.MaxSize(),
+		MaxSize:     nodeGroup1.MaxSize(context.Background()),
 	}
 	buffer1 := &v1beta1.CapacityBuffer{
 		ObjectMeta: metav1.ObjectMeta{
@@ -124,16 +124,17 @@ func TestBuffersEvent(t *testing.T) {
 	}
 
 	notSchedulableReason := &testReason{"not schedulable for testing"}
-	alsoNotSchedulableReason := &testReason{"also not schedulable for testing"}
+	maxNodeGroupSizeReachedReason := &testReason{"max node group size reached"}
 	reasons := map[string]status.Reasons{
 		nodeGroup1.Id(): notSchedulableReason,
-		nodeGroup2.Id(): alsoNotSchedulableReason,
+		nodeGroup2.Id(): maxNodeGroupSizeReachedReason,
 	}
 	testCases := map[string]struct {
-		state                       *status.ScaleUpStatus
-		buffersRegistry             *fakepods.Registry
-		expectedTriggeredScaleUp    int
-		expectedNotTriggeredScaleUp int
+		state                           *status.ScaleUpStatus
+		buffersRegistry                 *fakepods.Registry
+		expectedTriggeredScaleUp        int
+		expectedNotTriggeredScaleUp     int
+		expectedNotTriggerScaleUpEvents []string
 	}{
 		"One fake pod, successful scale up": {
 			buffersRegistry: fakepods.NewRegistry(map[types.UID]*v1beta1.CapacityBuffer{"fake-pod-1": buffer1}),
@@ -203,6 +204,9 @@ func TestBuffersEvent(t *testing.T) {
 			},
 			expectedTriggeredScaleUp:    0,
 			expectedNotTriggeredScaleUp: 1,
+			expectedNotTriggerScaleUpEvents: []string{
+				"Normal NotTriggerScaleUp capacity buffer 1 fake pods didn't trigger scale-up: 1 max node group size reached, 1 not schedulable for testing",
+			},
 		},
 		"One fake pod, unschedulalble with error": {
 			buffersRegistry: fakepods.NewRegistry(map[types.UID]*v1beta1.CapacityBuffer{"fake-pod-1": buffer1}),
@@ -239,6 +243,9 @@ func TestBuffersEvent(t *testing.T) {
 			},
 			expectedTriggeredScaleUp:    1,
 			expectedNotTriggeredScaleUp: 1,
+			expectedNotTriggerScaleUpEvents: []string{
+				"Normal NotTriggerScaleUp capacity buffer 1 fake pods didn't trigger scale-up: 1 max node group size reached, 1 not schedulable for testing",
+			},
 		},
 		"multiple pods for multiple buffers with mixed conditions": {
 			buffersRegistry: fakepods.NewRegistry(map[types.UID]*v1beta1.CapacityBuffer{
@@ -276,22 +283,82 @@ func TestBuffersEvent(t *testing.T) {
 			},
 			expectedTriggeredScaleUp:    2,
 			expectedNotTriggeredScaleUp: 2,
+			expectedNotTriggerScaleUpEvents: []string{
+				"Normal NotTriggerScaleUp capacity buffer 1 fake pods didn't trigger scale-up: 1 max node group size reached, 1 not schedulable for testing",
+				"Normal NotTriggerScaleUp capacity buffer 1 fake pods didn't trigger scale-up: 1 max node group size reached, 1 not schedulable for testing",
+			},
+		},
+		"multiple fake pods for same buffer deduplicate identical reasons": {
+			buffersRegistry: fakepods.NewRegistry(map[types.UID]*v1beta1.CapacityBuffer{
+				"fake-pod-1": buffer1,
+				"fake-pod-2": buffer1,
+				"fake-pod-3": buffer1,
+			}),
+			state: &status.ScaleUpStatus{
+				Result:               status.ScaleUpNoOptionsAvailable,
+				ConsideredNodeGroups: consideredNodeGroups,
+				ScaleUpInfos:         []nodegroupset.ScaleUpInfo{},
+				PodsRemainUnschedulable: []status.NoScaleUpInfo{
+					{
+						Pod:                createPod("fake-pod-1", true),
+						RejectedNodeGroups: reasons,
+					},
+					{
+						Pod:                createPod("fake-pod-2", true),
+						RejectedNodeGroups: reasons,
+					},
+					{
+						Pod:                createPod("fake-pod-3", true),
+						RejectedNodeGroups: reasons,
+					},
+				},
+			},
+			expectedTriggeredScaleUp:    0,
+			expectedNotTriggeredScaleUp: 1,
+			expectedNotTriggerScaleUpEvents: []string{
+				"Normal NotTriggerScaleUp capacity buffer 3 fake pods didn't trigger scale-up: 1 max node group size reached, 1 not schedulable for testing",
+			},
+		},
+		"multiple fake pods for same buffer with empty reasons": {
+			buffersRegistry: fakepods.NewRegistry(map[types.UID]*v1beta1.CapacityBuffer{
+				"fake-pod-1": buffer1,
+				"fake-pod-2": buffer1,
+			}),
+			state: &status.ScaleUpStatus{
+				Result:               status.ScaleUpNoOptionsAvailable,
+				ConsideredNodeGroups: consideredNodeGroups,
+				ScaleUpInfos:         []nodegroupset.ScaleUpInfo{},
+				PodsRemainUnschedulable: []status.NoScaleUpInfo{
+					{
+						Pod: createPod("fake-pod-1", true),
+					},
+					{
+						Pod: createPod("fake-pod-2", true),
+					},
+				},
+			},
+			expectedTriggeredScaleUp:    0,
+			expectedNotTriggeredScaleUp: 1,
+			expectedNotTriggerScaleUpEvents: []string{
+				"Normal NotTriggerScaleUp capacity buffer 2 fake pods didn't trigger scale-up: no scale-up options available",
+			},
 		},
 	}
 
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			fakeRecorder := kube_record.NewFakeRecorder(5)
-			ctx := &context.AutoscalingContext{
-				AutoscalingKubeClients: context.AutoscalingKubeClients{
+			autoscalingCtx := &ca_context.AutoscalingContext{
+				AutoscalingKubeClients: ca_context.AutoscalingKubeClients{
 					Recorder: fakeRecorder,
 				},
 			}
 			p := NewFakePodsScaleUpStatusProcessor(tc.buffersRegistry)
-			p.Process(ctx, tc.state)
+			p.Process(context.Background(), autoscalingCtx, tc.state)
 
 			triggeredScaleUp := 0
 			notTriggerScaleUp := 0
+			var notTriggerScaleUpEvents []string
 			for eventsLeft := true; eventsLeft; {
 				select {
 				case event := <-fakeRecorder.Events:
@@ -299,6 +366,7 @@ func TestBuffersEvent(t *testing.T) {
 						triggeredScaleUp += 1
 					} else if strings.Contains(event, "NotTriggerScaleUp") {
 						notTriggerScaleUp += 1
+						notTriggerScaleUpEvents = append(notTriggerScaleUpEvents, event)
 					} else {
 						t.Fatalf("Test case '%v' failed. Unexpected event %v", name, event)
 					}
@@ -308,7 +376,7 @@ func TestBuffersEvent(t *testing.T) {
 			}
 			assert.Equal(t, tc.expectedTriggeredScaleUp, triggeredScaleUp)
 			assert.Equal(t, tc.expectedNotTriggeredScaleUp, notTriggerScaleUp)
-
+			assert.ElementsMatch(t, tc.expectedNotTriggerScaleUpEvents, notTriggerScaleUpEvents)
 		})
 	}
 }

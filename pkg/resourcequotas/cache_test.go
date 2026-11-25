@@ -17,11 +17,13 @@ limitations under the License.
 package resourcequotas
 
 import (
+	gocontext "context"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/mock"
 	apiv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	cptest "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/context"
@@ -39,17 +41,25 @@ type mockCustomResourcesProcessor struct {
 // Verify that mockCustomResourcesProcessor implements the CustomResourcesProcessor interface.
 var _ customresources.CustomResourcesProcessor = &mockCustomResourcesProcessor{}
 
-func (m *mockCustomResourcesProcessor) FilterOutNodesWithUnreadyResources(_ *context.AutoscalingContext, allNodes, readyNodes []*apiv1.Node, _ *drasnapshot.Snapshot, _ *csisnapshot.Snapshot) ([]*apiv1.Node, []*apiv1.Node) {
+func (m *mockCustomResourcesProcessor) FilterOutNodesWithUnreadyResources(ctx gocontext.Context, _ *context.AutoscalingContext, allNodes, readyNodes []*apiv1.Node, _ *drasnapshot.Snapshot, _ *csisnapshot.Snapshot) ([]*apiv1.Node, []*apiv1.Node) {
 	return allNodes, readyNodes
 }
 
-func (m *mockCustomResourcesProcessor) GetNodeResourceTargets(autoscalingCtx *context.AutoscalingContext, node *apiv1.Node, nodeGroup cloudprovider.NodeGroup) ([]customresources.CustomResourceTarget, errors.AutoscalerError) {
+func (m *mockCustomResourcesProcessor) GetNodeResourceTargets(ctx gocontext.Context, autoscalingCtx *context.AutoscalingContext, node *apiv1.Node, nodeGroup cloudprovider.NodeGroup) ([]customresources.CustomResourceTarget, errors.AutoscalerError) {
 	args := m.Called(autoscalingCtx, node, nodeGroup)
 	return args.Get(0).([]customresources.CustomResourceTarget), nil
 }
 
 func (m *mockCustomResourcesProcessor) CleanUp() {
 	return
+}
+
+// withCapacity sets the given resources in the node's capacity and returns the node.
+func withCapacity(node *apiv1.Node, capacity map[apiv1.ResourceName]int64) *apiv1.Node {
+	for name, value := range capacity {
+		node.Status.Capacity[name] = *resource.NewQuantity(value, resource.DecimalSI)
+	}
+	return node
 }
 
 func TestNodeResourcesCache(t *testing.T) {
@@ -60,7 +70,7 @@ func TestNodeResourcesCache(t *testing.T) {
 	resourceTargets := []customresources.CustomResourceTarget{
 		{ResourceType: "gpu", ResourceCount: 1},
 	}
-	wantResources := resourceList{"cpu": 1, "memory": 2000, "nodes": 1, "gpu": 1}
+	wantResources := resourceList{"cpu": 1, "memory": 2000, "pods": 100, "nodes": 1, "gpu": 1}
 
 	type nodeResourcesCall struct {
 		node      *apiv1.Node
@@ -110,7 +120,7 @@ func TestNodeResourcesCache(t *testing.T) {
 			tc.setupCRPExpectations(&mockCRP.Mock)
 			nc := newNodeResourcesCache(mockCRP)
 			for _, call := range tc.calls {
-				resources, err := nc.totalNodeResources(autoscalingCtx, call.node, call.nodeGroup)
+				resources, err := nc.totalNodeResources(gocontext.Background(), autoscalingCtx, call.node, call.nodeGroup)
 				if err != nil {
 					t.Fatalf("totalNodeResources unexpected error: %v", err)
 				}
@@ -136,6 +146,7 @@ func TestNodeResources(t *testing.T) {
 			wantDelta: resourceList{
 				"cpu":    1,
 				"memory": 2048,
+				"pods":   100,
 				"nodes":  1,
 			},
 		},
@@ -148,6 +159,39 @@ func TestNodeResources(t *testing.T) {
 			wantDelta: resourceList{
 				"cpu":    3,
 				"memory": 4096,
+				"pods":   100,
+				"nodes":  1,
+			},
+		},
+		{
+			name: "extended resources are counted from node capacity",
+			node: withCapacity(test.BuildTestNode("test", 1000, 2048), map[apiv1.ResourceName]int64{
+				"nvidia.com/gpu":       2,
+				"cloud.google.com/tpu": 4,
+				"ephemeral-storage":    100 * 1024 * 1024 * 1024,
+			}),
+			crp: &fakeCustomResourcesProcessor{},
+			wantDelta: resourceList{
+				"cpu":                  1,
+				"memory":               2048,
+				"pods":                 100,
+				"nvidia.com/gpu":       2,
+				"cloud.google.com/tpu": 4,
+				"ephemeral-storage":    100 * 1024 * 1024 * 1024,
+				"nodes":                1,
+			},
+		},
+		{
+			name: "zero and negative capacity values are skipped",
+			node: withCapacity(test.BuildTestNode("test", 1000, 2048), map[apiv1.ResourceName]int64{
+				"nvidia.com/gpu":  0,
+				"example.com/foo": -1,
+			}),
+			crp: &fakeCustomResourcesProcessor{},
+			wantDelta: resourceList{
+				"cpu":    1,
+				"memory": 2048,
+				"pods":   100,
 				"nodes":  1,
 			},
 		},
@@ -165,7 +209,48 @@ func TestNodeResources(t *testing.T) {
 			wantDelta: resourceList{
 				"cpu":    1,
 				"memory": 2048,
+				"pods":   100,
 				"gpu":    1,
+				"nodes":  1,
+			},
+		},
+		{
+			// Simulates a GPU node whose drivers are not installed yet: the GPU is
+			// missing from the capacity, but the processor knows about it from the
+			// node group template.
+			name: "custom resources take precedence over node capacity",
+			node: withCapacity(test.BuildTestNode("test", 1000, 2048), map[apiv1.ResourceName]int64{
+				"nvidia.com/gpu": 1,
+			}),
+			crp: &fakeCustomResourcesProcessor{NodeResourceTargets: func(node *apiv1.Node) []customresources.CustomResourceTarget {
+				return []customresources.CustomResourceTarget{
+					{ResourceType: "nvidia-tesla-t4", ResourceCount: 2},
+					{ResourceType: "nvidia.com/gpu", ResourceCount: 2},
+				}
+			}},
+			wantDelta: resourceList{
+				"cpu":             1,
+				"memory":          2048,
+				"pods":            100,
+				"nvidia-tesla-t4": 2,
+				"nvidia.com/gpu":  2,
+				"nodes":           1,
+			},
+		},
+		{
+			name: "empty and non-positive custom resources are ignored",
+			node: test.BuildTestNode("test", 1000, 2048),
+			crp: &fakeCustomResourcesProcessor{NodeResourceTargets: func(node *apiv1.Node) []customresources.CustomResourceTarget {
+				return []customresources.CustomResourceTarget{
+					{},
+					{ResourceType: "gpu", ResourceCount: 0},
+					{ResourceType: "cpu", ResourceCount: -5},
+				}
+			}},
+			wantDelta: resourceList{
+				"cpu":    1,
+				"memory": 2048,
+				"pods":   100,
 				"nodes":  1,
 			},
 		},
@@ -173,7 +258,7 @@ func TestNodeResources(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := &context.AutoscalingContext{}
-			delta, err := totalNodeResources(ctx, tc.crp, tc.node, nil)
+			delta, err := totalNodeResources(gocontext.Background(), ctx, tc.crp, tc.node, nil)
 			if err != nil {
 				t.Errorf("totalNodeResources: unexpected error: %v", err)
 			}

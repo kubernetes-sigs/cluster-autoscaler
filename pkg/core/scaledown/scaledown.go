@@ -17,9 +17,11 @@ limitations under the License.
 package scaledown
 
 import (
+	"context"
 	"time"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/status"
+	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/utilization"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
@@ -30,12 +32,12 @@ import (
 // Planner is responsible for selecting nodes that should be removed.
 type Planner interface {
 	// UpdateClusterState provides the Planner with information about the cluster.
-	UpdateClusterState(podDestinations, scaleDownCandidates []*apiv1.Node, as ActuationStatus, currentTime time.Time) errors.AutoscalerError
+	UpdateClusterState(ctx context.Context, podDestinations, scaleDownCandidates []*apiv1.Node, as ActuationStatus, currentTime time.Time) errors.AutoscalerError
 	// CleanUpUnneededNodes resets internal state of the Planner.
-	CleanUpUnneededNodes()
+	CleanUpUnneededNodes(context.Context)
 	// NodesToDelete returns a list of nodes that can be deleted right now,
 	// according to the Planner.
-	NodesToDelete(currentTime time.Time) (empty, needDrain []*apiv1.Node)
+	NodesToDelete(ctx context.Context, currentTime time.Time) (empty, needDrain []*apiv1.Node)
 	// UnneededNodes returns a list of nodes that either can be deleted
 	// right now or in a near future, assuming nothing will change in the
 	// cluster.
@@ -56,9 +58,9 @@ type Actuator interface {
 	// function are not guaranteed to be deleted, it is possible for the
 	// Actuator to ignore some of them e.g. if max configured level of
 	// parallelism is reached.
-	StartDeletion(empty, needDrain []*apiv1.Node) (status.ScaleDownResult, []*status.ScaleDownNode, errors.AutoscalerError)
+	StartDeletion(ctx context.Context, empty, needDrain []*apiv1.Node) (status.ScaleDownResult, []*status.ScaleDownNode, errors.AutoscalerError)
 	// StartForceDeletion triggers a new forced deletion process. It bypasses PDBs and forcefully deletes the pods and the nodes.
-	StartForceDeletion(empty, needDrain []*apiv1.Node) (status.ScaleDownResult, []*status.ScaleDownNode, errors.AutoscalerError)
+	StartForceDeletion(ctx context.Context, empty, needDrain []*apiv1.Node) (status.ScaleDownResult, []*status.ScaleDownNode, errors.AutoscalerError)
 	// CheckStatus returns an immutable snapshot of ongoing deletions.
 	CheckStatus() ActuationStatus
 	// ClearResultsNotNewerThan removes information about deletions finished
@@ -96,4 +98,7 @@ type UnneededNode struct {
 	// This value is derived from either --scale-down-unneeded-time or
 	// --scale-down-unready-time, depending on the node's readiness state.
 	RemovalThreshold time.Duration
+
+	// ScaleDownReason describes why the unneeded node is considered for removal (empty or underutilized).
+	ScaleDownReason metrics.NodeScaleDownReason
 }

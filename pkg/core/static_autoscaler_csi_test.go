@@ -40,6 +40,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	sdplanner "sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/planner"
+	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot/predicate"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot/store"
@@ -152,10 +153,24 @@ func TestStaticAutoscalerCSI(t *testing.T) {
 		"scale-down: single pod left with 6 volumes": {
 			nodeGroups: map[*testNodeGroupCSI]int{node1GroupCSI: 3},
 			pods: []*apiv1.Pod{
-				// Keep one node non-empty; the other two should be removable.
+				// The pod can move to an empty node, allowing its original node and one
+				// of the empty nodes to be removed.
 				buildCSITestPod("scheduled-0", podVolUse, node1GroupCSI.name+"-0"),
 			},
-			expectedScaleDowns: map[string][]string{node1GroupCSI.name: {node1GroupCSI.name + "-1", node1GroupCSI.name + "-2"}},
+			expectedScaleDowns: map[string][]string{node1GroupCSI.name: {node1GroupCSI.name + "-0", node1GroupCSI.name + "-1"}},
+		},
+		"scale-down: pods are rebalanced within CSI volume limits": {
+			nodeGroups: map[*testNodeGroupCSI]int{node1GroupCSI: 3},
+			pods: []*apiv1.Pod{
+				// The first two nodes cannot be removed because their 6-volume pods don't fit
+				// on either of the other nodes. The two 4-volume pods on the third node can be
+				// split between the first two nodes without exceeding the 10-volume limit.
+				buildCSITestPod("scheduled-0", 6, node1GroupCSI.name+"-0"),
+				buildCSITestPod("scheduled-1", 6, node1GroupCSI.name+"-1"),
+				buildCSITestPod("scheduled-2", 4, node1GroupCSI.name+"-2"),
+				buildCSITestPod("scheduled-3", 4, node1GroupCSI.name+"-2"),
+			},
+			expectedScaleDowns: map[string][]string{node1GroupCSI.name: {node1GroupCSI.name + "-2"}},
 		},
 	}
 
@@ -258,19 +273,29 @@ func TestStaticAutoscalerCSI(t *testing.T) {
 						ScaleDownUtilizationThreshold: 0.7,
 						MaxNodeProvisionTime:          time.Hour,
 					},
+					EstimatorName:                  estimator.BinpackingEstimatorName,
+					MaxBinpackingTime:              1 * time.Hour,
+					MaxNodeGroupBinpackingDuration: 1 * time.Hour,
+					ScaleDownSimulationTimeout:     1 * time.Hour,
+					OkTotalUnreadyCount:            9999999,
+					MaxTotalUnreadyPercentage:      1.0,
 					ScaleDownEnabled:               true,
+					MaxScaleDownParallelism:        10,
+					MaxDrainParallelism:            10,
+					MaxConcurrentNodesTainting:     5,
+					NodeDeletionBatcherInterval:    0 * time.Second,
+					NodeDeleteDelayAfterTaint:      1 * time.Millisecond,
 					MaxNodesTotal:                  1000,
 					MaxCoresTotal:                  1000,
 					MaxMemoryTotal:                 100000000,
 					ScaleUpFromZero:                true,
 					CSINodeAwareSchedulingEnabled:  true,
 					PredicateParallelism:           1,
-					MaxNodeGroupBinpackingDuration: 1 * time.Hour,
 				},
 				nodeGroups:             nodeGroups,
 				nodeStateUpdateTime:    now,
 				mocks:                  mocks,
-				optionsBlockDefaulting: false,
+				optionsBlockDefaulting: true,
 				// setupCloudProvider sends on this channel from the ScaleDown callback; it must be able to
 				// accommodate multiple deletions without blocking the test.
 				nodesDeleted: make(chan bool, allExpectedScaleDowns+1),
@@ -309,10 +334,10 @@ func TestStaticAutoscalerCSI(t *testing.T) {
 			// Run one autoscaler loop.
 			require.NoError(t, autoscaler.RunOnce(t.Context(), now.Add(2*time.Minute)))
 
-			// Scale-down is a multi-iteration process (mark unneeded -> taint -> delete after delay).
-			// Run one more loop to allow the actuator to call the cloud provider ScaleDown callbacks.
+			// The first loop marked the nodes as unneeded, and the second one, past ScaleDownUnneededTime,
+			// started deleting them asynchronously. Wait for the deletions instead of running another
+			// loop: the listers still return the deleted nodes, so a later loop could delete them again.
 			if len(tc.expectedScaleDowns) > 0 {
-				require.NoError(t, autoscaler.RunOnce(t.Context(), now.Add(4*time.Minute)))
 				for range allExpectedScaleDowns {
 					select {
 					case <-setupConfig.nodesDeleted:
@@ -390,7 +415,8 @@ func csiNodeTemplate(driver string, attachCount *int32) func(nodeName string) *s
 }
 
 func buildCSITestPod(name string, volumeCount int, nodeName string) *apiv1.Pod {
-	pod1 := BuildTestPod(name, 6, 100)
+	controllerName := name + "-controller"
+	pod1 := BuildTestPod(name, 6, 100, WithControllerOwnerRef(controllerName, "ReplicaSet", types.UID(controllerName)))
 	pod1.Namespace = "default"
 	pod1.UID = types.UID(name)
 	for i := 0; i < volumeCount; i++ {

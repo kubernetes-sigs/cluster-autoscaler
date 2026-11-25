@@ -17,6 +17,7 @@ limitations under the License.
 package nodegroupset
 
 import (
+	"context"
 	"fmt"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
@@ -43,12 +44,44 @@ func (s ScaleUpInfo) String() string {
 	return fmt.Sprintf("{%v %v->%v (max: %v)}", s.Group.Id(), s.CurrentSize, s.NewSize, s.MaxSize)
 }
 
+// ScaleUpInfos is a loggable list of ScaleUpInfo. Loggers don't look for
+// fmt.Stringer or logr.Marshaler on elements of a plain slice, so the slice has
+// to be wrapped to avoid reflecting into ScaleUpInfo.Group.
+type ScaleUpInfos []ScaleUpInfo
+
+// String implements fmt.Stringer, used by loggers preferring text output.
+func (s ScaleUpInfos) String() string {
+	return fmt.Sprintf("%v", []ScaleUpInfo(s))
+}
+
+// MarshalLog implements logr.Marshaler, used by loggers preferring structured output.
+func (s ScaleUpInfos) MarshalLog() interface{} {
+	infos := make([]scaleUpInfoLog, 0, len(s))
+	for _, info := range s {
+		infos = append(infos, scaleUpInfoLog{
+			NodeGroupID: info.Group.Id(),
+			CurrentSize: info.CurrentSize,
+			NewSize:     info.NewSize,
+			MaxSize:     info.MaxSize,
+		})
+	}
+	return infos
+}
+
+// scaleUpInfoLog is the structured logging representation of a single ScaleUpInfo.
+type scaleUpInfoLog struct {
+	NodeGroupID string `json:"nodeGroupId"`
+	CurrentSize int    `json:"currentSize"`
+	NewSize     int    `json:"newSize"`
+	MaxSize     int    `json:"maxSize"`
+}
+
 // NodeGroupSetProcessor finds nodegroups that are similar and allows balancing scale-up between them.
 type NodeGroupSetProcessor interface {
-	FindSimilarNodeGroups(autoscalingCtx *ca_context.AutoscalingContext, nodeGroup cloudprovider.NodeGroup,
+	FindSimilarNodeGroups(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, nodeGroup cloudprovider.NodeGroup,
 		nodeInfosForGroups map[string]*framework.NodeInfo) ([]cloudprovider.NodeGroup, errors.AutoscalerError)
 
-	BalanceScaleUpBetweenGroups(autoscalingCtx *ca_context.AutoscalingContext, groups []cloudprovider.NodeGroup, newNodes int) ([]ScaleUpInfo, errors.AutoscalerError)
+	BalanceScaleUpBetweenGroups(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, groups []cloudprovider.NodeGroup, newNodes int) ([]ScaleUpInfo, errors.AutoscalerError)
 	CleanUp()
 }
 
@@ -57,13 +90,13 @@ type NoOpNodeGroupSetProcessor struct {
 }
 
 // FindSimilarNodeGroups returns a list of NodeGroups similar to the one provided in parameter.
-func (n *NoOpNodeGroupSetProcessor) FindSimilarNodeGroups(autoscalingCtx *ca_context.AutoscalingContext, nodeGroup cloudprovider.NodeGroup,
+func (n *NoOpNodeGroupSetProcessor) FindSimilarNodeGroups(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, nodeGroup cloudprovider.NodeGroup,
 	nodeInfosForGroups map[string]*framework.NodeInfo) ([]cloudprovider.NodeGroup, errors.AutoscalerError) {
 	return []cloudprovider.NodeGroup{}, nil
 }
 
 // BalanceScaleUpBetweenGroups splits a scale-up between provided NodeGroups.
-func (n *NoOpNodeGroupSetProcessor) BalanceScaleUpBetweenGroups(autoscalingCtx *ca_context.AutoscalingContext, groups []cloudprovider.NodeGroup, newNodes int) ([]ScaleUpInfo, errors.AutoscalerError) {
+func (n *NoOpNodeGroupSetProcessor) BalanceScaleUpBetweenGroups(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, groups []cloudprovider.NodeGroup, newNodes int) ([]ScaleUpInfo, errors.AutoscalerError) {
 	return []ScaleUpInfo{}, nil
 }
 

@@ -18,23 +18,24 @@ package synctest
 
 import (
 	"context"
-	"github.com/stretchr/testify/assert"
-	"sigs.k8s.io/cluster-autoscaler/pkg/core"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"sigs.k8s.io/cluster-autoscaler/pkg/core"
 )
 
 // RunOnceAfter advances the virtual clock by the specified duration and then
 // executes a single Cluster Autoscaler cycle.
-func RunOnceAfter(t *testing.T, autoscaler core.Autoscaler, d time.Duration) error {
+func RunOnceAfter(ctx context.Context, t *testing.T, autoscaler core.Autoscaler, d time.Duration) error {
 	t.Helper()
 
 	// Ensure any pending work is done before changing the time.
 	synctest.Wait()
 
 	time.Sleep(d)
-	err := autoscaler.RunOnce(t.Context(), time.Now())
+	err := autoscaler.RunOnce(ctx, time.Now())
 
 	// Let side-effects of the RunOnce finish.
 	synctest.Wait()
@@ -44,9 +45,9 @@ func RunOnceAfter(t *testing.T, autoscaler core.Autoscaler, d time.Duration) err
 // MustRunOnceAfter is a helper that calls RunOnceAfter and
 // immediately fails the test if an error occurs.
 // Use this for "happy path" simulation steps.
-func MustRunOnceAfter(t *testing.T, autoscaler core.Autoscaler, d time.Duration) {
+func MustRunOnceAfter(ctx context.Context, t *testing.T, autoscaler core.Autoscaler, d time.Duration) {
 	t.Helper()
-	err := RunOnceAfter(t, autoscaler, d)
+	err := RunOnceAfter(ctx, t, autoscaler, d)
 	assert.NoError(t, err)
 }
 

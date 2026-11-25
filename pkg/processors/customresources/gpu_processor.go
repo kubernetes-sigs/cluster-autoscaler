@@ -17,6 +17,8 @@ limitations under the License.
 package customresources
 
 import (
+	"context"
+
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
@@ -38,21 +40,21 @@ type GpuCustomResourcesProcessor struct {
 // it in allocatable from ready nodes list and updates their status to unready on all nodes list.
 // This is a hack/workaround for nodes with GPU coming up without installed drivers, resulting
 // in GPU missing from their allocatable and capacity.
-func (p *GpuCustomResourcesProcessor) FilterOutNodesWithUnreadyResources(autoscalingCtx *ca_context.AutoscalingContext, allNodes, readyNodes []*apiv1.Node, _ *drasnapshot.Snapshot, _ *csisnapshot.Snapshot) ([]*apiv1.Node, []*apiv1.Node) {
+func (p *GpuCustomResourcesProcessor) FilterOutNodesWithUnreadyResources(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, allNodes, readyNodes []*apiv1.Node, _ *drasnapshot.Snapshot, _ *csisnapshot.Snapshot) ([]*apiv1.Node, []*apiv1.Node) {
+	logger := klog.FromContext(ctx)
 	newAllNodes := make([]*apiv1.Node, 0)
 	newReadyNodes := make([]*apiv1.Node, 0)
 	nodesWithUnreadyGpu := make(map[string]*apiv1.Node)
 	for _, node := range readyNodes {
-		if gpuExposedViaDra(autoscalingCtx, node) {
+		if gpuExposedViaDra(ctx, autoscalingCtx, node) {
 			newReadyNodes = append(newReadyNodes, node)
 			continue
 		}
 
-		_, hasGpuLabel := node.Labels[autoscalingCtx.CloudProvider.GPULabel()]
-		_, hasAnyGpuAllocatable := gpu.NodeHasGpuAllocatable(node)
+		_, hasGpuLabel := node.Labels[autoscalingCtx.CloudProvider.GPULabel(ctx)]
+		hasAnyGpuAllocatable := gpu.NodeHasGpuResourceAllocatable(node)
 		if hasGpuLabel && !hasAnyGpuAllocatable {
-			klog.V(3).Infof("Overriding status of node %v, which seems to have unready GPU",
-				node.Name)
+			logger.V(3).Info("Overriding status of node that seems to have unready GPU", "node", klog.KObj(node))
 			nodesWithUnreadyGpu[node.Name] = kubernetes.GetUnreadyNodeCopy(node, kubernetes.ResourceUnready)
 		} else {
 			newReadyNodes = append(newReadyNodes, node)
@@ -71,20 +73,22 @@ func (p *GpuCustomResourcesProcessor) FilterOutNodesWithUnreadyResources(autosca
 
 // GetNodeResourceTargets returns mapping of resource names to their targets.
 // This includes resources which are not yet ready to use and visible in kubernetes.
-func (p *GpuCustomResourcesProcessor) GetNodeResourceTargets(autoscalingCtx *ca_context.AutoscalingContext, node *apiv1.Node, nodeGroup cloudprovider.NodeGroup) ([]CustomResourceTarget, errors.AutoscalerError) {
-	gpuTarget, err := p.GetNodeGpuTarget(autoscalingCtx, node, nodeGroup)
+func (p *GpuCustomResourcesProcessor) GetNodeResourceTargets(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, node *apiv1.Node, nodeGroup cloudprovider.NodeGroup) ([]CustomResourceTarget, errors.AutoscalerError) {
+	gpuTarget, err := p.GetNodeGpuTarget(ctx, autoscalingCtx, node, nodeGroup)
 	return []CustomResourceTarget{gpuTarget}, err
 }
 
-// GetNodeGpuTarget returns the gpu target of a given node. This includes gpus
-// that are not ready to use and visible in kubernetes.
-func (p *GpuCustomResourcesProcessor) GetNodeGpuTarget(autoscalingCtx *ca_context.AutoscalingContext, node *apiv1.Node, nodeGroup cloudprovider.NodeGroup) (CustomResourceTarget, errors.AutoscalerError) {
-	gpuLabel, found := node.Labels[autoscalingCtx.CloudProvider.GPULabel()]
+// GetNodeGpuTarget returns the physical GPU quota target for a node, including
+// GPUs expected from the node group template but not visible as whole-GPU
+// allocatable resources on the node.
+func (p *GpuCustomResourcesProcessor) GetNodeGpuTarget(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, node *apiv1.Node, nodeGroup cloudprovider.NodeGroup) (CustomResourceTarget, errors.AutoscalerError) {
+	logger := klog.FromContext(ctx)
+	gpuLabel, found := node.Labels[autoscalingCtx.CloudProvider.GPULabel(ctx)]
 	if !found {
 		return CustomResourceTarget{}, nil
 	}
 
-	if gpuExposedViaDra(autoscalingCtx, node) {
+	if gpuExposedViaDra(ctx, autoscalingCtx, node) {
 		return CustomResourceTarget{}, nil
 	}
 
@@ -92,26 +96,25 @@ func (p *GpuCustomResourcesProcessor) GetNodeGpuTarget(autoscalingCtx *ca_contex
 		return CustomResourceTarget{gpuLabel, gpuAllocatableValue}, nil
 	}
 
-	// A node is supposed to have GPUs (based on label), but they're not available yet
-	// (driver haven't installed yet?).
-	// Unfortunately we can't deduce how many GPUs it will actually have from labels (just
-	// that it will have some).
-	// Ready for some evil hacks? Well, you won't be disappointed - let's pretend we haven't
-	// seen the node and just use the template we use for scale from 0. It'll be our little
-	// secret.
+	// A node is supposed to have GPUs based on its label, but its allocatable
+	// resources don't expose a physical GPU count. This can happen while GPU
+	// resources are still becoming available, or when the node exposes only MIG
+	// or time-sliced resources whose quantities represent slices or replicas.
+	// GPU labels identify the GPU type, but don't provide the physical GPU count,
+	// so use the node group template as the source of that count.
 
 	if nodeGroup == nil {
-		// We expect this code path to be triggered by situation when we are looking at a node which is expected to have gpus (has gpu label)
-		// But those are not yet visible in node's resource (e.g. gpu drivers are still being installed).
-		// In case of node coming from autoscaled node group we would look and node group template here.
-		// But for nodes coming from non-autoscaled groups we have no such possibility.
-		// Let's hope it is a transient error. As long as it exists we will not scale nodes groups with gpus.
-		return CustomResourceTarget{}, errors.NewAutoscalerError(errors.InternalError, "node without with gpu label, without capacity not belonging to autoscaled node group")
+		// Unmanaged nodes have no template from which to recover the physical GPU
+		// count. Exclude the node from GPU quota usage rather than blocking
+		// cluster-wide scale-ups. This can temporarily undercount GPU usage and
+		// allow overprovisioning.
+		klog.Warningf("Unable to determine physical GPU capacity for unmanaged node %q; excluding it from GPU quota usage", node.Name)
+		return CustomResourceTarget{}, nil
 	}
 
-	template, err := nodeGroup.TemplateNodeInfo()
+	template, err := nodeGroup.TemplateNodeInfo(ctx)
 	if err != nil {
-		klog.Errorf("Failed to build template for getting GPU estimation for node %v: %v", node.Name, err)
+		logger.Error(err, "Failed to build template for getting GPU estimation for node", "node", klog.KObj(node))
 		return CustomResourceTarget{}, errors.ToAutoscalerError(errors.CloudProviderError, err)
 	}
 	for _, gpuVendorResourceName := range gpu.GPUVendorResourceNames {
@@ -119,9 +122,8 @@ func (p *GpuCustomResourcesProcessor) GetNodeGpuTarget(autoscalingCtx *ca_contex
 			return CustomResourceTarget{gpuLabel, gpuCapacity.Value()}, nil
 		}
 	}
-
-	// if template does not define gpus we assume node will not have any even if ith has gpu label
-	klog.Warningf("Template does not define gpus even though node from its node group does; node=%v", node.Name)
+	// If the template doesn't define physical GPU capacity, omit it from quota usage.
+	logger.Info("Template does not define physical GPU capacity even though node has a GPU label", "node", klog.KObj(node))
 	return CustomResourceTarget{}, nil
 }
 
@@ -129,8 +131,8 @@ func (p *GpuCustomResourcesProcessor) GetNodeGpuTarget(autoscalingCtx *ca_contex
 func (p *GpuCustomResourcesProcessor) CleanUp() {
 }
 
-func gpuExposedViaDra(autoscalingCtx *ca_context.AutoscalingContext, node *apiv1.Node) bool {
-	gpuConfig := autoscalingCtx.CloudProvider.GetNodeGpuConfig(node)
+func gpuExposedViaDra(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, node *apiv1.Node) bool {
+	gpuConfig := autoscalingCtx.CloudProvider.GetNodeGpuConfig(ctx, node)
 	if gpuConfig == nil {
 		return false
 	}

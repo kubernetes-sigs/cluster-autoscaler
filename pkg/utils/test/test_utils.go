@@ -17,10 +17,13 @@ limitations under the License.
 package test
 
 import (
+	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -31,6 +34,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
+	"k8s.io/klog/v2/ktesting"
 	kube_types "k8s.io/kubernetes/pkg/kubelet/types"
 )
 
@@ -113,6 +118,18 @@ func WithResourceClaim(refName, claimName, templateName string) func(*apiv1.Pod)
 	}
 }
 
+// WithPVCVolume adds a volume backed by the given PersistentVolumeClaim to a pod.
+func WithPVCVolume(volumeName, claimName string) func(*apiv1.Pod) {
+	return func(pod *apiv1.Pod) {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, apiv1.Volume{
+			Name: volumeName,
+			VolumeSource: apiv1.VolumeSource{
+				PersistentVolumeClaim: &apiv1.PersistentVolumeClaimVolumeSource{ClaimName: claimName},
+			},
+		})
+	}
+}
+
 // WithControllerOwnerRef sets an owner reference to the pod.
 func WithControllerOwnerRef(name, kind string, uid types.UID) func(*apiv1.Pod) {
 	return func(pod *apiv1.Pod) {
@@ -144,7 +161,7 @@ func WithNamespace(namespace string) func(*apiv1.Pod) {
 // WithLabels sets a Labels to the pod.
 func WithLabels(labels map[string]string) func(*apiv1.Pod) {
 	return func(pod *apiv1.Pod) {
-		pod.ObjectMeta.Labels = labels
+		pod.ObjectMeta.Labels = maps.Clone(labels)
 	}
 }
 
@@ -221,6 +238,11 @@ func WithNodeNamesAffinity(nodeNames ...string) func(*apiv1.Pod) {
 
 // WithPodHostnameAntiAffinity sets pod's anti-affinity for pods matching the given labels at hostname topology level.
 func WithPodHostnameAntiAffinity(labels map[string]string) func(*apiv1.Pod) {
+	return WithPodAntiAffinity(labels, "kubernetes.io/hostname")
+}
+
+// WithPodAntiAffinity sets pod's required anti-affinity for pods matching the given labels at the given topology level.
+func WithPodAntiAffinity(labels map[string]string, topologyKey string) func(*apiv1.Pod) {
 	return func(pod *apiv1.Pod) {
 		if pod.Spec.Affinity == nil {
 			pod.Spec.Affinity = &apiv1.Affinity{}
@@ -229,12 +251,45 @@ func WithPodHostnameAntiAffinity(labels map[string]string) func(*apiv1.Pod) {
 			RequiredDuringSchedulingIgnoredDuringExecution: []apiv1.PodAffinityTerm{
 				{
 					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: labels,
+						MatchLabels: maps.Clone(labels),
 					},
-					TopologyKey: "kubernetes.io/hostname",
+					TopologyKey: topologyKey,
 				},
 			},
 		}
+	}
+}
+
+// WithPodAffinity sets pod's required affinity for pods matching the given labels at the given topology level.
+func WithPodAffinity(labels map[string]string, topologyKey string) func(*apiv1.Pod) {
+	return func(pod *apiv1.Pod) {
+		if pod.Spec.Affinity == nil {
+			pod.Spec.Affinity = &apiv1.Affinity{}
+		}
+		pod.Spec.Affinity.PodAffinity = &apiv1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []apiv1.PodAffinityTerm{
+				{
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: labels,
+					},
+					TopologyKey: topologyKey,
+				},
+			},
+		}
+	}
+}
+
+// WithPVC adds a volume backed by the given PersistentVolumeClaim (in the pod's namespace) to the pod.
+func WithPVC(claimName string) func(*apiv1.Pod) {
+	return func(pod *apiv1.Pod) {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, apiv1.Volume{
+			Name: fmt.Sprintf("pvc-%s", claimName),
+			VolumeSource: apiv1.VolumeSource{
+				PersistentVolumeClaim: &apiv1.PersistentVolumeClaimVolumeSource{
+					ClaimName: claimName,
+				},
+			},
+		})
 	}
 }
 
@@ -657,4 +712,29 @@ func IgnoreObjectOrder[T interface{ GetName() string }]() cmp.Option {
 	return cmpopts.SortSlices(func(c1, c2 T) bool {
 		return c1.GetName() < c2.GetName()
 	})
+}
+
+// DefaultLoggingConfig is the default logging configuration for tests.
+var DefaultLoggingConfig = ktesting.NewConfig(ktesting.Verbosity(4))
+
+// GetTestContext returns a context with a logger attached, suitable for use in tests.
+// The logger routes logs through t.Log() instead of os.Stderr:
+//   - go test (without -v) suppresses t.Log output for passing tests and only prints logs for failing tests.
+//   - For parallel tests (t.Parallel()), t.Log buffers output per test and groups it under that test's --- FAIL / === RUN block.
+//
+// testing.T does not support logging after the test that
+// it was created for has completed. If a test leaks goroutines
+// and those goroutines log something after test completion,
+// that output will be printed via the global klog logger with
+// `<test name> leaked goroutine` as prefix.
+func GetTestContext(t testing.TB) context.Context {
+	t.Helper()
+	logger := ktesting.NewLogger(t, DefaultLoggingConfig).WithValues("test", t.Name())
+	return klog.NewContext(t.Context(), logger)
+}
+
+// GetTestContextWithCancel returns a cancellable context with a logger attached, suitable for use in tests, and the cancellation function.
+func GetTestContextWithCancel(t testing.TB) (context.Context, context.CancelFunc) {
+	t.Helper()
+	return context.WithCancel(GetTestContext(t))
 }

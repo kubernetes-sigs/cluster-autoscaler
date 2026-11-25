@@ -22,34 +22,32 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	autoscalingapi "k8s.io/api/autoscaling/v1"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	capacitybuffer "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/clientset/versioned"
 	"k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/informers/externalversions"
 	bufferslisters "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/listers/autoscaling.x-k8s.io/v1beta1"
 	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/informers"
 	kubernetes "k8s.io/client-go/kubernetes"
 	appsv1listers "k8s.io/client-go/listers/apps/v1"
 	batchv1lister "k8s.io/client-go/listers/batch/v1"
 	corev1listers "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/rest"
 	scaleclient "k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/cache"
-
-	appsv1 "k8s.io/api/apps/v1"
-	autoscalingapi "k8s.io/api/autoscaling/v1"
-	batchv1 "k8s.io/api/batch/v1"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/discovery/cached/memory"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/restmapper"
 	klog "k8s.io/klog/v2"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 // PodTemplateRefIndex is the name of the index for buffers referencing a pod template
@@ -104,11 +102,12 @@ func NewCapacityBufferClient(buffersClient capacitybuffer.Interface, kubernetesC
 	}, nil
 }
 
-// NewCapacityBufferClientFromConfig configures and returns a CapacityBufferClient.
-func NewCapacityBufferClientFromConfig(kubeConfig *rest.Config) (*CapacityBufferClient, error) {
+// NewCapacityBufferClientFromManager configures and returns a CapacityBufferClient.
+func NewCapacityBufferClientFromManager(mgr ctrl.Manager) (*CapacityBufferClient, error) {
 	// Use a static JSON content type config for CapacityBuffer CRD data exchange
 	// to adhere to CRD requirements. The kubernetes and scale clients below continue
 	// to use the caller-provided content type since they use built-in types.
+	kubeConfig := mgr.GetConfig()
 	buffersConfig := rest.CopyConfig(kubeConfig)
 	buffersConfig.ContentType = "application/json"
 	buffersClient, err := capacitybuffer.NewForConfig(buffersConfig)
@@ -119,25 +118,32 @@ func NewCapacityBufferClientFromConfig(kubeConfig *rest.Config) (*CapacityBuffer
 	if err != nil {
 		return nil, fmt.Errorf("Failed to create kubernetes client for capacity buffer: %v", err)
 	}
-	scaleGetter, scaleMapper, err := createScaleSubresourceClientGetter(kubeConfig)
+	// We want to use RESTMapper of the c-r Manager. By default, it uses a DynamicRESTMapper,
+	// which retries the GVK discovery if no match has been found. That allows the dynamic watcher
+	// self-heal when a scalable CRD didn't exist at the time of discovery and has been added
+	// later. DeferredDiscoveryRESTMapper used before does not reattempt to discover
+	// a Kind that was missing before. In such case, a scalable CRD added after the RESTMapper
+	// tried to resolve it for the first time and failed, will remain missing from the
+	// RESTMapper point of view. In such case, the dynamic watch won't be established until
+	// the CA restarts.
+	scaleGetter, scaleMapper, err := createScaleSubresourceClientGetter(kubeConfig, mgr.GetRESTMapper())
 	if err != nil {
 		return nil, fmt.Errorf("Failed to create scale getter for capacity buffer: %v", err)
 	}
 	return NewCapacityBufferClientFromClients(buffersClient, kubernetesClient, scaleGetter, scaleMapper)
 }
 
-func createScaleSubresourceClientGetter(kubeConfig *rest.Config) (scaleclient.ScalesGetter, meta.RESTMapper, error) {
+func createScaleSubresourceClientGetter(kubeConfig *rest.Config, mapper meta.RESTMapper) (scaleclient.ScalesGetter, meta.RESTMapper, error) {
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(kubeConfig)
 	if err != nil {
 		return nil, nil, err
 	}
-	scaleMapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(discoveryClient))
 	scaleKindResolver := scaleclient.NewDiscoveryScaleKindResolver(discoveryClient)
-	client, err := scaleclient.NewForConfig(kubeConfig, scaleMapper, dynamic.LegacyAPIPathResolverFunc, scaleKindResolver)
+	client, err := scaleclient.NewForConfig(kubeConfig, mapper, dynamic.LegacyAPIPathResolverFunc, scaleKindResolver)
 	if err != nil {
 		return nil, nil, err
 	}
-	return client, scaleMapper, nil
+	return client, mapper, nil
 }
 
 // NewCapacityBufferClientFromClients returns a CapacityBufferClient based on the passed clients
@@ -160,10 +166,14 @@ func NewCapacityBufferClientFromClients(buffersClient capacitybuffer.Interface, 
 			if !ok {
 				return []string{}, nil
 			}
+			var refs []string
 			if buffer.Spec.PodTemplateRef != nil {
-				return []string{buffer.Spec.PodTemplateRef.Name}, nil
+				refs = append(refs, buffer.Spec.PodTemplateRef.Name)
 			}
-			return []string{}, nil
+			if buffer.Status.PodTemplateRef != nil {
+				refs = append(refs, buffer.Status.PodTemplateRef.Name)
+			}
+			return refs, nil
 		},
 		ScalableRefIndex: func(obj interface{}) ([]string, error) {
 			buffer, ok := obj.(*v1.CapacityBuffer)
@@ -286,6 +296,19 @@ func (c *CapacityBufferClient) ListCapacityBuffers(namespace string) ([]*v1.Capa
 	return buffersCopy, nil
 }
 
+// GetCapacityBuffer fetches the cached object using a lister object in the client.
+func (c *CapacityBufferClient) GetCapacityBuffer(namespace, name string) (*v1.CapacityBuffer, error) {
+	if c.buffersLister == nil {
+		return nil, fmt.Errorf("Capacity buffer client is not configured to get capacity buffers")
+	}
+
+	buffer, err := c.buffersLister.CapacityBuffers(namespace).Get(name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get CapacityBuffer: %w", err)
+	}
+	return buffer.DeepCopy(), nil
+}
+
 // ListResourceQuotas lists all resource quotas in the passed namespace
 func (c *CapacityBufferClient) ListResourceQuotas(namespace string) ([]*corev1.ResourceQuota, error) {
 	if c.rqLister != nil {
@@ -374,7 +397,8 @@ func (c *CapacityBufferClient) EnsurePodTemplate(ctx context.Context, podTemplat
 		}
 		return nil, err
 	}
-	if equality.Semantic.DeepEqual(existing.Template, podTemplate.Template) {
+	if equality.Semantic.DeepEqual(existing.Template, podTemplate.Template) &&
+		equality.Semantic.DeepEqual(existing.OwnerReferences, podTemplate.OwnerReferences) {
 		return existing, nil
 	}
 	existing.OwnerReferences = podTemplate.OwnerReferences

@@ -17,6 +17,7 @@ limitations under the License.
 package utilization
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -83,7 +84,7 @@ func TestCalculate(t *testing.T) {
 	nodeInfo := framework.NewTestNodeInfo(node, pod, pod, pod2)
 
 	gpuConfig := getGpuConfigFromNode(nodeInfo.Node(), false)
-	utilInfo, err := Calculate(nodeInfo, false, false, false, gpuConfig, testTime)
+	utilInfo, err := Calculate(context.Background(), nodeInfo, false, false, false, gpuConfig, testTime)
 	assert.NoError(t, err)
 	assert.InEpsilon(t, 2.0/10, utilInfo.Utilization, 0.01)
 	assert.Equal(t, 0.1, utilInfo.CpuUtil)
@@ -92,7 +93,7 @@ func TestCalculate(t *testing.T) {
 	nodeInfo = framework.NewTestNodeInfo(node2, pod, pod, pod2)
 
 	gpuConfig = getGpuConfigFromNode(nodeInfo.Node(), false)
-	_, err = Calculate(nodeInfo, false, false, false, gpuConfig, testTime)
+	_, err = Calculate(context.Background(), nodeInfo, false, false, false, gpuConfig, testTime)
 	assert.Error(t, err)
 
 	node3 := BuildTestNode("node3", 2000, 2000000)
@@ -100,7 +101,7 @@ func TestCalculate(t *testing.T) {
 	nodeInfo = framework.NewTestNodeInfo(node3, pod, podWithInitContainers, podWithLargeNonRestartableInitContainers)
 
 	gpuConfig = getGpuConfigFromNode(nodeInfo.Node(), false)
-	utilInfo, err = Calculate(nodeInfo, false, false, false, gpuConfig, testTime)
+	utilInfo, err = Calculate(context.Background(), nodeInfo, false, false, false, gpuConfig, testTime)
 	assert.NoError(t, err)
 	assert.InEpsilon(t, 50.25, utilInfo.Utilization, 0.01)
 	assert.InEpsilon(t, 25.125, utilInfo.CpuUtil, 0.005)
@@ -114,13 +115,13 @@ func TestCalculate(t *testing.T) {
 
 	nodeInfo = framework.NewTestNodeInfo(node, pod, pod, pod2, daemonSetPod3, daemonSetPod4)
 	gpuConfig = getGpuConfigFromNode(nodeInfo.Node(), false)
-	utilInfo, err = Calculate(nodeInfo, true, false, false, gpuConfig, testTime)
+	utilInfo, err = Calculate(context.Background(), nodeInfo, true, false, false, gpuConfig, testTime)
 	assert.NoError(t, err)
 	assert.InEpsilon(t, 2.5/10, utilInfo.Utilization, 0.01)
 
 	nodeInfo = framework.NewTestNodeInfo(node, pod, pod2, daemonSetPod3)
 	gpuConfig = getGpuConfigFromNode(nodeInfo.Node(), false)
-	utilInfo, err = Calculate(nodeInfo, false, false, false, gpuConfig, testTime)
+	utilInfo, err = Calculate(context.Background(), nodeInfo, false, false, false, gpuConfig, testTime)
 	assert.NoError(t, err)
 	assert.InEpsilon(t, 2.0/10, utilInfo.Utilization, 0.01)
 
@@ -128,7 +129,7 @@ func TestCalculate(t *testing.T) {
 	terminatedPod.DeletionTimestamp = &metav1.Time{Time: testTime.Add(-10 * time.Minute)}
 	nodeInfo = framework.NewTestNodeInfo(node, pod, pod, pod2, terminatedPod)
 	gpuConfig = getGpuConfigFromNode(nodeInfo.Node(), false)
-	utilInfo, err = Calculate(nodeInfo, false, false, false, gpuConfig, testTime)
+	utilInfo, err = Calculate(context.Background(), nodeInfo, false, false, false, gpuConfig, testTime)
 	assert.NoError(t, err)
 	assert.InEpsilon(t, 2.0/10, utilInfo.Utilization, 0.01)
 
@@ -139,19 +140,19 @@ func TestCalculate(t *testing.T) {
 
 	nodeInfo = framework.NewTestNodeInfo(node, pod, pod, pod2, mirrorPod)
 	gpuConfig = getGpuConfigFromNode(nodeInfo.Node(), false)
-	utilInfo, err = Calculate(nodeInfo, false, true, false, gpuConfig, testTime)
+	utilInfo, err = Calculate(context.Background(), nodeInfo, false, true, false, gpuConfig, testTime)
 	assert.NoError(t, err)
 	assert.InEpsilon(t, 2.0/9.0, utilInfo.Utilization, 0.01)
 
 	nodeInfo = framework.NewTestNodeInfo(node, pod, pod2, mirrorPod)
 	gpuConfig = getGpuConfigFromNode(nodeInfo.Node(), false)
-	utilInfo, err = Calculate(nodeInfo, false, false, false, gpuConfig, testTime)
+	utilInfo, err = Calculate(context.Background(), nodeInfo, false, false, false, gpuConfig, testTime)
 	assert.NoError(t, err)
 	assert.InEpsilon(t, 2.0/10, utilInfo.Utilization, 0.01)
 
 	nodeInfo = framework.NewTestNodeInfo(node, pod, mirrorPod, daemonSetPod3)
 	gpuConfig = getGpuConfigFromNode(nodeInfo.Node(), false)
-	utilInfo, err = Calculate(nodeInfo, true, true, false, gpuConfig, testTime)
+	utilInfo, err = Calculate(context.Background(), nodeInfo, true, true, false, gpuConfig, testTime)
 	assert.NoError(t, err)
 	assert.InEpsilon(t, 1.0/8.0, utilInfo.Utilization, 0.01)
 
@@ -162,7 +163,7 @@ func TestCalculate(t *testing.T) {
 	TolerateGpuForPod(gpuPod)
 	nodeInfo = framework.NewTestNodeInfo(gpuNode, pod, pod, gpuPod)
 	gpuConfig = getGpuConfigFromNode(nodeInfo.Node(), false)
-	utilInfo, err = Calculate(nodeInfo, false, false, false, gpuConfig, testTime)
+	utilInfo, err = Calculate(context.Background(), nodeInfo, false, false, false, gpuConfig, testTime)
 	assert.NoError(t, err)
 	assert.InEpsilon(t, 1/1, utilInfo.Utilization, 0.01)
 
@@ -171,9 +172,142 @@ func TestCalculate(t *testing.T) {
 	AddGpuLabelToNode(gpuNode)
 	nodeInfo = framework.NewTestNodeInfo(gpuNode, pod, pod)
 	gpuConfig = getGpuConfigFromNode(nodeInfo.Node(), false)
-	utilInfo, err = Calculate(nodeInfo, false, false, false, gpuConfig, testTime)
+	utilInfo, err = Calculate(context.Background(), nodeInfo, false, false, false, gpuConfig, testTime)
 	assert.NoError(t, err)
 	assert.Zero(t, utilInfo.Utilization)
+}
+
+func TestCalculateWithMultipleGpuResources(t *testing.T) {
+	for _, tc := range []struct {
+		testName        string
+		allocatable     apiv1.ResourceList
+		requests        apiv1.ResourceList
+		gpuResourceName apiv1.ResourceName
+		wantUtilInfo    Info
+	}{
+		{
+			testName: "busy MIG profile is not hidden by an idle profile",
+			allocatable: apiv1.ResourceList{
+				"nvidia.com/mig-1g.5gb":  resource.MustParse("2"),
+				"nvidia.com/mig-2g.10gb": resource.MustParse("1"),
+			},
+			requests: apiv1.ResourceList{
+				"nvidia.com/mig-2g.10gb": resource.MustParse("1"),
+			},
+			gpuResourceName: "nvidia.com/mig-1g.5gb",
+			wantUtilInfo:    Info{GpuUtil: 1, Utilization: 1, ResourceName: "nvidia.com/mig-2g.10gb"},
+		},
+		{
+			testName: "time-sliced MIG profiles use their own allocatable quantities",
+			allocatable: apiv1.ResourceList{
+				"nvidia.com/mig-1g.5gb.shared":  resource.MustParse("16"),
+				"nvidia.com/mig-2g.10gb.shared": resource.MustParse("8"),
+			},
+			requests: apiv1.ResourceList{
+				"nvidia.com/mig-1g.5gb.shared":  resource.MustParse("4"),
+				"nvidia.com/mig-2g.10gb.shared": resource.MustParse("6"),
+			},
+			gpuResourceName: "nvidia.com/mig-1g.5gb.shared",
+			wantUtilInfo:    Info{GpuUtil: 0.75, Utilization: 0.75, ResourceName: "nvidia.com/mig-2g.10gb.shared"},
+		},
+		{
+			testName: "whole GPUs do not hide a busy MIG profile",
+			allocatable: apiv1.ResourceList{
+				gpu.ResourceNvidiaGPU:    resource.MustParse("1"),
+				"nvidia.com/mig-2g.10gb": resource.MustParse("1"),
+			},
+			requests: apiv1.ResourceList{
+				"nvidia.com/mig-2g.10gb": resource.MustParse("1"),
+			},
+			gpuResourceName: gpu.ResourceNvidiaGPU,
+			wantUtilInfo:    Info{GpuUtil: 1, Utilization: 1, ResourceName: "nvidia.com/mig-2g.10gb"},
+		},
+		{
+			testName: "busy AMD GPU does not affect selected NVIDIA GPU",
+			allocatable: apiv1.ResourceList{
+				gpu.ResourceNvidiaGPU: resource.MustParse("1"),
+				gpu.ResourceAMDGPU:    resource.MustParse("1"),
+			},
+			requests: apiv1.ResourceList{
+				gpu.ResourceAMDGPU: resource.MustParse("1"),
+			},
+			gpuResourceName: gpu.ResourceNvidiaGPU,
+			wantUtilInfo:    Info{ResourceName: gpu.ResourceNvidiaGPU},
+		},
+		{
+			testName: "busy NVIDIA GPU does not affect selected AMD GPU",
+			allocatable: apiv1.ResourceList{
+				gpu.ResourceAMDGPU:    resource.MustParse("1"),
+				gpu.ResourceNvidiaGPU: resource.MustParse("1"),
+			},
+			requests: apiv1.ResourceList{
+				gpu.ResourceNvidiaGPU: resource.MustParse("1"),
+			},
+			gpuResourceName: gpu.ResourceAMDGPU,
+			wantUtilInfo:    Info{ResourceName: gpu.ResourceAMDGPU},
+		},
+		{
+			testName: "MIG selection includes busy whole NVIDIA GPU",
+			allocatable: apiv1.ResourceList{
+				"nvidia.com/mig-1g.5gb": resource.MustParse("2"),
+				gpu.ResourceNvidiaGPU:   resource.MustParse("1"),
+			},
+			requests: apiv1.ResourceList{
+				gpu.ResourceNvidiaGPU: resource.MustParse("1"),
+			},
+			gpuResourceName: "nvidia.com/mig-1g.5gb",
+			wantUtilInfo:    Info{GpuUtil: 1, Utilization: 1, ResourceName: gpu.ResourceNvidiaGPU},
+		},
+		{
+			testName: "unready configured GPU does not hide a busy MIG profile",
+			allocatable: apiv1.ResourceList{
+				gpu.ResourceNvidiaGPU:    resource.MustParse("0"),
+				"nvidia.com/mig-2g.10gb": resource.MustParse("1"),
+			},
+			requests: apiv1.ResourceList{
+				"nvidia.com/mig-2g.10gb": resource.MustParse("1"),
+			},
+			gpuResourceName: gpu.ResourceNvidiaGPU,
+			wantUtilInfo:    Info{GpuUtil: 1, Utilization: 1, ResourceName: "nvidia.com/mig-2g.10gb"},
+		},
+		{
+			testName: "provider-specific GPU ignores other vendor and non-GPU resources",
+			allocatable: apiv1.ResourceList{
+				"example.com/accelerator": resource.MustParse("4"),
+				"nvidia.com/mig-1g.5gb":   resource.MustParse("2"),
+				gpu.ResourceAMDGPU:        resource.MustParse("1"),
+				"nvidia.com/hostdev":      resource.MustParse("1"),
+			},
+			requests: apiv1.ResourceList{
+				"example.com/accelerator": resource.MustParse("3"),
+				"nvidia.com/mig-1g.5gb":   resource.MustParse("2"),
+				gpu.ResourceAMDGPU:        resource.MustParse("1"),
+				"nvidia.com/hostdev":      resource.MustParse("1"),
+			},
+			gpuResourceName: "example.com/accelerator",
+			wantUtilInfo:    Info{GpuUtil: 0.75, Utilization: 0.75, ResourceName: "example.com/accelerator"},
+		},
+	} {
+		t.Run(tc.testName, func(t *testing.T) {
+			node := BuildTestNode("gpu-node", 2000, 2000000)
+			for resourceName, quantity := range tc.allocatable {
+				node.Status.Capacity[resourceName] = quantity
+				node.Status.Allocatable[resourceName] = quantity
+			}
+			pod := BuildTestPod("gpu-pod", 900, 900)
+			for resourceName, quantity := range tc.requests {
+				pod.Spec.Containers[0].Resources.Requests[resourceName] = quantity
+			}
+			nodeInfo := framework.NewTestNodeInfo(node, pod)
+			gpuConfig := &cloudprovider.GpuConfig{ExtendedResourceName: tc.gpuResourceName}
+
+			utilInfo, err := Calculate(context.Background(), nodeInfo, false, false, false, gpuConfig, time.Now())
+			assert.NoError(t, err)
+			if diff := cmp.Diff(tc.wantUtilInfo, utilInfo); diff != "" {
+				t.Errorf("Calculate(): unexpected output (-want +got): %s", diff)
+			}
+		})
+	}
 }
 
 func TestCalculateWithDynamicResources(t *testing.T) {
@@ -362,7 +496,7 @@ func TestCalculateWithDynamicResources(t *testing.T) {
 		},
 	} {
 		t.Run(tc.testName, func(t *testing.T) {
-			utilInfo, err := Calculate(tc.nodeInfo, false, false, tc.draEnabled, tc.gpuConfig, now)
+			utilInfo, err := Calculate(context.Background(), tc.nodeInfo, false, false, tc.draEnabled, tc.gpuConfig, now)
 			if diff := cmp.Diff(tc.wantErr, err, cmpopts.EquateErrors()); diff != "" {
 				t.Errorf("Calculate(): unexpected error (-want +got): %s", diff)
 			}

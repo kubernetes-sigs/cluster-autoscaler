@@ -24,19 +24,27 @@ import (
 )
 
 // Registry tracks the relationship between fake pods (created for capacity buffers)
-// and their originating CapacityBuffer objects.
+// and their originating CapacityBuffer objects. It also tracks the set of buffers
+// processed in the current autoscaling loop, including those for which no fake pods
+// were created.
 type Registry struct {
 	fakePodsUIDToBuffer map[types.UID]*v1beta1.CapacityBuffer
+	processedBuffers    map[types.UID]*v1beta1.CapacityBuffer
 	mutex               sync.RWMutex
 }
 
 // NewRegistry returns a new instance of Registry.
 // If fakePodsToBuffers is nil, it initializes an empty registry.
+// All buffers from fakePodsToBuffers are marked as processed.
 func NewRegistry(fakePodsToBuffers map[types.UID]*v1beta1.CapacityBuffer) *Registry {
 	if fakePodsToBuffers == nil {
 		fakePodsToBuffers = make(map[types.UID]*v1beta1.CapacityBuffer)
 	}
-	return &Registry{fakePodsUIDToBuffer: fakePodsToBuffers}
+	processedBuffers := make(map[types.UID]*v1beta1.CapacityBuffer)
+	for _, buffer := range fakePodsToBuffers {
+		processedBuffers[buffer.UID] = buffer
+	}
+	return &Registry{fakePodsUIDToBuffer: fakePodsToBuffers, processedBuffers: processedBuffers}
 }
 
 // GetCapacityBuffer returns the CapacityBuffer associated with the given fake pod UID.
@@ -48,22 +56,45 @@ func (r *Registry) GetCapacityBuffer(fakePodUID types.UID) *v1beta1.CapacityBuff
 }
 
 // SetCapacityBuffer registers a mapping between a fake pod's UID and the CapacityBuffer it was created from.
+// The buffer is also marked as processed.
 func (r *Registry) SetCapacityBuffer(fakePodUID types.UID, buffer *v1beta1.CapacityBuffer) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.fakePodsUIDToBuffer[fakePodUID] = buffer
+	r.processedBuffers[buffer.UID] = buffer
 }
 
 // UnsetCapacityBuffer removes the mapping for the specified fake pod UID.
+// It doesn't unmark the buffer as processed.
 func (r *Registry) UnsetCapacityBuffer(fakePodUID types.UID) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	delete(r.fakePodsUIDToBuffer, fakePodUID)
 }
 
-// Clear removes all mappings from the registry, effectively resetting it.
+// MarkProcessed marks the buffer as processed in the current autoscaling loop,
+// regardless of whether any fake pods were created for it.
+func (r *Registry) MarkProcessed(buffer *v1beta1.CapacityBuffer) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.processedBuffers[buffer.UID] = buffer
+}
+
+// ProcessedBuffers returns all buffers marked as processed.
+func (r *Registry) ProcessedBuffers() []*v1beta1.CapacityBuffer {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	buffers := make([]*v1beta1.CapacityBuffer, 0, len(r.processedBuffers))
+	for _, buffer := range r.processedBuffers {
+		buffers = append(buffers, buffer)
+	}
+	return buffers
+}
+
+// Clear removes all mappings and processed buffers from the registry, effectively resetting it.
 func (r *Registry) Clear() {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	clear(r.fakePodsUIDToBuffer)
+	clear(r.processedBuffers)
 }

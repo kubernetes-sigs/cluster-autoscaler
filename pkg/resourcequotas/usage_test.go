@@ -17,6 +17,7 @@ limitations under the License.
 package resourcequotas
 
 import (
+	gocontext "context"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -53,6 +54,7 @@ func TestCalculateUsages(t *testing.T) {
 				"cluster-wide": {
 					"cpu":    6,
 					"memory": 14000,
+					"pods":   300,
 					"nodes":  3,
 				},
 			},
@@ -78,11 +80,13 @@ func TestCalculateUsages(t *testing.T) {
 				"pool-a": {
 					"cpu":    4,
 					"memory": 10000,
+					"pods":   200,
 					"nodes":  2,
 				},
 				"pool-b": {
 					"cpu":    2,
 					"memory": 4000,
+					"pods":   100,
 					"nodes":  1,
 				},
 			},
@@ -105,6 +109,7 @@ func TestCalculateUsages(t *testing.T) {
 				"cluster-wide": {
 					"cpu":    4,
 					"memory": 10000,
+					"pods":   200,
 					"nodes":  2,
 				},
 			},
@@ -145,6 +150,7 @@ func TestCalculateUsages(t *testing.T) {
 				"cluster-wide": {
 					"cpu":    3,
 					"memory": 6000,
+					"pods":   200,
 					"gpu":    2,
 					"nodes":  2,
 				},
@@ -172,11 +178,13 @@ func TestCalculateUsages(t *testing.T) {
 				"pool-a": {
 					"cpu":    1,
 					"memory": 2000,
+					"pods":   100,
 					"nodes":  1,
 				},
 				"pool-b": {
 					"cpu":    2,
 					"memory": 4000,
+					"pods":   100,
 					"nodes":  1,
 				},
 			},
@@ -199,7 +207,7 @@ func TestCalculateUsages(t *testing.T) {
 				nf = &fakeNodeFilter{NodeFilterFn: tc.nodeFilter}
 			}
 			calculator := newUsageCalculator(nf, newNodeResourcesCache(crp))
-			usages, err := calculator.calculateUsages(ctx, tc.nodes, tc.quotas)
+			usages, err := calculator.calculateUsages(gocontext.Background(), ctx, tc.nodes, tc.quotas)
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
