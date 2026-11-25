@@ -258,8 +258,8 @@ func ObserveBinpackingHeterogeneity(instanceType, cpuCount, namespaceCount strin
 
 // UpdateScaleDownNodeRemovalLatency records the time after which node was deleted/needed
 // again after being marked unneeded
-func UpdateScaleDownNodeRemovalLatency(deleted bool, delayReason string, duration time.Duration) {
-	DefaultMetrics.UpdateScaleDownNodeRemovalLatency(deleted, delayReason, duration)
+func UpdateScaleDownNodeRemovalLatency(deleted bool, delayReason string, scaleDownReason NodeScaleDownReason, duration time.Duration) {
+	DefaultMetrics.UpdateScaleDownNodeRemovalLatency(deleted, delayReason, scaleDownReason, duration)
 }
 
 // ObserveMaxNodeSkipEvalDurationSeconds records the longest time during which node was skipped during ScaleDown.
@@ -271,4 +271,9 @@ func ObserveMaxNodeSkipEvalDurationSeconds(duration time.Duration) {
 // UpdateSkippedPodsCount records the number of pods skipped when doing scheduling simulations.
 func UpdateSkippedPodsCount(podsCount int, label string) {
 	DefaultMetrics.UpdateSkippedPodsCount(podsCount, label)
+}
+
+// UpdateNodesCountPerNodeGroup records the number of nodes per node group ID in cluster.
+func UpdateNodesCountPerNodeGroup(ready, unready, starting, suspended, longUnregistered, unregistered int, nodeGroupID string) {
+	DefaultMetrics.UpdateNodesCountPerNodeGroup(ready, unready, starting, suspended, longUnregistered, unregistered, nodeGroupID)
 }

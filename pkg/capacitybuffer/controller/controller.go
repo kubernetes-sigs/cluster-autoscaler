@@ -206,7 +206,8 @@ func (c *bufferController) configureEventHandlers() {
 				klog.Errorf("CapacityBuffer controller: failed to get meta for object, err: %v", err)
 				return
 			}
-			if oldMeta.GetGeneration() == newMeta.GetGeneration() {
+			if oldMeta.GetGeneration() == newMeta.GetGeneration() &&
+				equality.Semantic.DeepEqual(oldMeta.GetOwnerReferences(), newMeta.GetOwnerReferences()) {
 				return
 			}
 			c.enqueueBuffersReferencingPodTemplate(newObj)

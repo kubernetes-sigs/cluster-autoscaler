@@ -19,6 +19,7 @@ package test
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -160,7 +161,7 @@ func WithNamespace(namespace string) func(*apiv1.Pod) {
 // WithLabels sets a Labels to the pod.
 func WithLabels(labels map[string]string) func(*apiv1.Pod) {
 	return func(pod *apiv1.Pod) {
-		pod.ObjectMeta.Labels = labels
+		pod.ObjectMeta.Labels = maps.Clone(labels)
 	}
 }
 
@@ -250,12 +251,45 @@ func WithPodAntiAffinity(labels map[string]string, topologyKey string) func(*api
 			RequiredDuringSchedulingIgnoredDuringExecution: []apiv1.PodAffinityTerm{
 				{
 					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: maps.Clone(labels),
+					},
+					TopologyKey: topologyKey,
+				},
+			},
+		}
+	}
+}
+
+// WithPodAffinity sets pod's required affinity for pods matching the given labels at the given topology level.
+func WithPodAffinity(labels map[string]string, topologyKey string) func(*apiv1.Pod) {
+	return func(pod *apiv1.Pod) {
+		if pod.Spec.Affinity == nil {
+			pod.Spec.Affinity = &apiv1.Affinity{}
+		}
+		pod.Spec.Affinity.PodAffinity = &apiv1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []apiv1.PodAffinityTerm{
+				{
+					LabelSelector: &metav1.LabelSelector{
 						MatchLabels: labels,
 					},
 					TopologyKey: topologyKey,
 				},
 			},
 		}
+	}
+}
+
+// WithPVC adds a volume backed by the given PersistentVolumeClaim (in the pod's namespace) to the pod.
+func WithPVC(claimName string) func(*apiv1.Pod) {
+	return func(pod *apiv1.Pod) {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, apiv1.Volume{
+			Name: fmt.Sprintf("pvc-%s", claimName),
+			VolumeSource: apiv1.VolumeSource{
+				PersistentVolumeClaim: &apiv1.PersistentVolumeClaimVolumeSource{
+					ClaimName: claimName,
+				},
+			},
+		})
 	}
 }
 

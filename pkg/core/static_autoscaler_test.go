@@ -24,6 +24,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,6 +51,7 @@ import (
 	mockprovider "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/mocks"
 	testprovider "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate"
+	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/scaleupfailures"
 	clusterstate_utils "sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/utils"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
@@ -62,11 +64,14 @@ import (
 	. "sigs.k8s.io/cluster-autoscaler/pkg/core/test"
 	core_utils "sigs.k8s.io/cluster-autoscaler/pkg/core/utils"
 	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
+	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
 	"sigs.k8s.io/cluster-autoscaler/pkg/observers/loopstart"
+	"sigs.k8s.io/cluster-autoscaler/pkg/observers/nodegroupchange"
 	ca_processors "sigs.k8s.io/cluster-autoscaler/pkg/processors"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupconfig"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroups/asyncnodegroups"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/scaledowncandidates"
+	scaleupstatus "sigs.k8s.io/cluster-autoscaler/pkg/processors/status"
 	processorstest "sigs.k8s.io/cluster-autoscaler/pkg/processors/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
@@ -199,6 +204,56 @@ func (p *scaleDownStatusProcessorMock) Process(ctx context.Context, _ *ca_contex
 }
 
 func (p *scaleDownStatusProcessorMock) CleanUp() {
+}
+
+type scaleUpOrchestratorMock struct {
+	scaleUpStatus        *scaleupstatus.ScaleUpStatus
+	scaleUpErr           errors.AutoscalerError
+	minSizeScaleUpStatus *scaleupstatus.ScaleUpStatus
+	minSizeScaleUpErr    errors.AutoscalerError
+	scaleUpCalls         int
+	minSizeScaleUpCalls  int
+}
+
+func (o *scaleUpOrchestratorMock) Initialize(*ca_context.AutoscalingContext, *ca_processors.AutoscalingProcessors, *clusterstate.ClusterStateRegistry, estimator.EstimatorBuilder, taints.TaintConfig, *resourcequotas.TrackerFactory) {
+}
+
+func (o *scaleUpOrchestratorMock) ScaleUp(context.Context, []*apiv1.Pod, []*apiv1.Node, []*appsv1.DaemonSet, map[string]*framework.NodeInfo, bool) (*scaleupstatus.ScaleUpStatus, errors.AutoscalerError) {
+	o.scaleUpCalls++
+	return o.scaleUpStatus, o.scaleUpErr
+}
+
+func (o *scaleUpOrchestratorMock) ScaleUpToNodeGroupMinSize(context.Context, []*apiv1.Node, map[string]*framework.NodeInfo) (*scaleupstatus.ScaleUpStatus, errors.AutoscalerError) {
+	o.minSizeScaleUpCalls++
+	return o.minSizeScaleUpStatus, o.minSizeScaleUpErr
+}
+
+type scaleDownPlannerMock struct {
+	updateErr   errors.AutoscalerError
+	updateCalls int
+}
+
+func (p *scaleDownPlannerMock) UpdateClusterState(context.Context, []*apiv1.Node, []*apiv1.Node, scaledown.ActuationStatus, time.Time) errors.AutoscalerError {
+	p.updateCalls++
+	return p.updateErr
+}
+
+func (p *scaleDownPlannerMock) CleanUpUnneededNodes(context.Context) {}
+
+func (p *scaleDownPlannerMock) NodesToDelete(context.Context, time.Time) ([]*apiv1.Node, []*apiv1.Node) {
+	return nil, nil
+}
+
+func (p *scaleDownPlannerMock) UnneededNodes() []*scaledown.UnneededNode {
+	return nil
+}
+
+func (p *scaleDownPlannerMock) UnremovableNodes() []*simulator.UnremovableNode {
+	return nil
+}
+
+func (p *scaleDownPlannerMock) NodeUtilizationMap() map[string]utilization.Info {
+	return nil
 }
 
 type fakeAllObjectsLister[T any] struct {
@@ -362,6 +417,102 @@ func setupAutoscaler(config *autoscalerSetupConfig) (*StaticAutoscaler, error) {
 	}
 
 	return autoscaler, nil
+}
+
+func TestStaticAutoscalerRunOnceContinuesScalingAfterError(t *testing.T) {
+	scaleUpErr := errors.NewAutoscalerError(errors.InternalError, "scale up failed")
+	scaleDownErr := errors.NewAutoscalerError(errors.ApiCallError, "scale down failed")
+
+	testCases := []struct {
+		name                string
+		scaleUpStatus       *scaleupstatus.ScaleUpStatus
+		scaleUpErr          errors.AutoscalerError
+		scaleDownErr        errors.AutoscalerError
+		expectedReturnedErr errors.AutoscalerError
+	}{
+		{
+			name:                "scale up failure does not block scale down",
+			scaleUpStatus:       &scaleupstatus.ScaleUpStatus{Result: scaleupstatus.ScaleUpError},
+			scaleUpErr:          scaleUpErr,
+			expectedReturnedErr: scaleUpErr,
+		},
+		{
+			name:                "scale down failure does not block min size enforcement",
+			scaleUpStatus:       &scaleupstatus.ScaleUpStatus{Result: scaleupstatus.ScaleUpSuccessful},
+			scaleDownErr:        scaleDownErr,
+			expectedReturnedErr: scaleDownErr,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			node := BuildTestNode("n1", 1000, 1000)
+			SetNodeReadyState(node, true, now)
+			unschedulablePod := BuildTestPod("p1", 2000, 100, MarkUnschedulable())
+			unschedulablePod.CreationTimestamp = metav1.NewTime(now.Add(-time.Hour))
+
+			mocks := newCommonMocks()
+			mocks.readyNodeLister.SetNodes([]*apiv1.Node{node})
+			mocks.allNodeLister.SetNodes([]*apiv1.Node{node})
+			mocks.allPodLister.On("List").Return([]*apiv1.Pod{unschedulablePod}, nil).Once()
+			mocks.daemonSetLister.On("List", labels.Everything()).Return([]*appsv1.DaemonSet{}, nil).Once()
+			mocks.podDisruptionBudgetLister.On("List").Return([]*policyv1.PodDisruptionBudget{}, nil).Once()
+
+			setupConfig := &autoscalerSetupConfig{
+				nodeGroups: []*nodeGroup{{
+					name:     "ng1",
+					nodes:    []*apiv1.Node{node},
+					template: framework.NewTestNodeInfo(BuildTestNode("template", 1000, 1000)),
+					min:      1,
+					max:      10,
+				}},
+				nodeStateUpdateTime: now,
+				autoscalingOptions: config.AutoscalingOptions{
+					NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+						ScaleDownUnneededTime:         time.Minute,
+						ScaleDownUnreadyTime:          time.Minute,
+						ScaleDownUtilizationThreshold: 0.5,
+						MaxNodeProvisionTime:          10 * time.Second,
+					},
+					EstimatorName:                  estimator.BinpackingEstimatorName,
+					EnforceNodeGroupMinSize:        true,
+					ScaleDownEnabled:               true,
+					MaxNodesTotal:                  10,
+					MaxCoresTotal:                  10,
+					MaxMemoryTotal:                 100000,
+					MaxNodeGroupBinpackingDuration: time.Second,
+				},
+				clusterStateConfig: clusterstate.ClusterStateRegistryConfig{OkTotalUnreadyCount: 1},
+				mocks:              mocks,
+				nodesDeleted:       make(chan bool, 1),
+			}
+
+			autoscaler, err := setupAutoscaler(setupConfig)
+			if !assert.NoError(t, err) {
+				return
+			}
+			autoscaler.initialized = true
+
+			scaleUpOrchestrator := &scaleUpOrchestratorMock{
+				scaleUpStatus:        tc.scaleUpStatus,
+				scaleUpErr:           tc.scaleUpErr,
+				minSizeScaleUpStatus: &scaleupstatus.ScaleUpStatus{Result: scaleupstatus.ScaleUpNotNeeded},
+			}
+			scaleDownPlanner := &scaleDownPlannerMock{updateErr: tc.scaleDownErr}
+			autoscaler.scaleUpOrchestrator = scaleUpOrchestrator
+			autoscaler.scaleDownPlanner = scaleDownPlanner
+			autoscaler.processorCallbacks.scaleDownPlanner = scaleDownPlanner
+
+			err = autoscaler.RunOnce(t.Context(), now)
+
+			assert.Equal(t, tc.expectedReturnedErr, err)
+			assert.Equal(t, 1, scaleUpOrchestrator.scaleUpCalls)
+			assert.Equal(t, 1, scaleDownPlanner.updateCalls)
+			assert.Equal(t, 1, scaleUpOrchestrator.minSizeScaleUpCalls)
+			mock.AssertExpectationsForObjects(t, mocks.allPodLister, mocks.daemonSetLister, mocks.podDisruptionBudgetLister)
+		})
+	}
 }
 
 // TODO: Refactor tests to use setupAutoscaler
@@ -2439,114 +2590,136 @@ func assertNodesInSnapshot(t *testing.T, snapshot clustersnapshot.ClusterSnapsho
 }
 
 func TestStaticAutoscalerUpcomingScaleDownCandidates(t *testing.T) {
-	startTime := time.Time{}
-
-	// Generate a number of ready and unready nodes created at startTime, spread across multiple node groups.
-	provider := testprovider.NewTestCloudProviderBuilder().Build()
-	allNodeNames := map[string]bool{}
-	readyNodeNames := map[string]bool{}
-	notReadyNodeNames := map[string]bool{}
-	var allNodes []*apiv1.Node
-	var readyNodes []*apiv1.Node
-
-	readyNodesCount := 4
-	unreadyNodesCount := 2
-	nodeGroupCount := 2
-	for ngNum := 0; ngNum < nodeGroupCount; ngNum++ {
-		ngName := fmt.Sprintf("ng-%d", ngNum)
-		provider.AddNodeGroup(ngName, 0, 1000, readyNodesCount+unreadyNodesCount)
-
-		for i := 0; i < readyNodesCount; i++ {
-			node := BuildTestNode(fmt.Sprintf("%s-ready-node-%d", ngName, i), 2000, 1000)
-			node.CreationTimestamp = metav1.NewTime(startTime)
-			SetNodeReadyState(node, true, startTime)
-			provider.AddNode(ngName, node)
-
-			allNodes = append(allNodes, node)
-			allNodeNames[node.Name] = true
-
-			readyNodes = append(readyNodes, node)
-			readyNodeNames[node.Name] = true
-		}
-		for i := 0; i < unreadyNodesCount; i++ {
-			node := BuildTestNode(fmt.Sprintf("%s-unready-node-%d", ngName, i), 2000, 1000)
-			node.CreationTimestamp = metav1.NewTime(startTime)
-			SetNodeReadyState(node, false, startTime)
-			provider.AddNode(ngName, node)
-
-			allNodes = append(allNodes, node)
-			allNodeNames[node.Name] = true
-
-			notReadyNodeNames[node.Name] = true
-		}
+	testCases := []struct {
+		name             string
+		registerScaleUps bool
+	}{
+		{
+			name:             "with active scale-up requests",
+			registerScaleUps: true,
+		},
+		// Scale-up requests are kept in memory only, so they're lost on CA restart/failover. NotStarted nodes should still be
+		// treated as upcoming, and not passed as scale-down candidates.
+		{
+			name:             "without scale-up requests (CA restart)",
+			registerScaleUps: false,
+		},
 	}
 
-	// Create fake listers for the generated nodes, nothing returned by the rest (but the ones used in the tested path have to be defined).
-	allNodeLister := kubernetes.NewTestNodeLister(allNodes)
-	readyNodeLister := kubernetes.NewTestNodeLister(readyNodes)
-	daemonSetLister, err := kubernetes.NewTestDaemonSetLister(nil)
-	assert.NoError(t, err)
-	listerRegistry := kube_util.NewListerRegistry(allNodeLister, readyNodeLister,
-		kubernetes.NewTestPodLister(nil),
-		kubernetes.NewTestPodDisruptionBudgetLister(nil), daemonSetLister, nil, nil, nil, nil)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			startTime := time.Time{}
 
-	// Create context with minimal autoscalingOptions that guarantee we reach the tested logic.
-	// We're only testing the input to UpdateClusterState which should be called whenever scale-down is enabled, other autoscalingOptions shouldn't matter.
-	autoscalingOptions := config.AutoscalingOptions{ScaleDownEnabled: true}
-	processorCallbacks := newStaticAutoscalerProcessorCallbacks()
-	processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(autoscalingOptions)
-	autoscalingCtx, err := NewScaleTestAutoscalingContext(autoscalingOptions, &fake.Clientset{}, listerRegistry, provider, processorCallbacks, nil, templateNodeInfoRegistry)
-	assert.NoError(t, err)
+			// Generate a number of ready and unready nodes created at startTime, spread across multiple node groups.
+			provider := testprovider.NewTestCloudProviderBuilder().Build()
+			allNodeNames := map[string]bool{}
+			readyNodeNames := map[string]bool{}
+			notReadyNodeNames := map[string]bool{}
+			var allNodes []*apiv1.Node
+			var readyNodes []*apiv1.Node
 
-	// Create CSR with unhealthy cluster protection effectively disabled, to guarantee we reach the tested logic.
-	csrConfig := clusterstate.ClusterStateRegistryConfig{OkTotalUnreadyCount: nodeGroupCount * unreadyNodesCount}
-	csr := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute, MaxNodeStartupTime: 15 * time.Minute}), templateNodeInfoRegistry, clusterstate.WithConfig(csrConfig))
-	for ngNum := 0; ngNum < nodeGroupCount; ngNum++ {
-		csr.RegisterScaleUp(context.Background(), provider.GetNodeGroup(fmt.Sprintf("ng-%d", ngNum)), unreadyNodesCount, startTime)
+			readyNodesCount := 4
+			unreadyNodesCount := 2
+			nodeGroupCount := 2
+			for ngNum := 0; ngNum < nodeGroupCount; ngNum++ {
+				ngName := fmt.Sprintf("ng-%d", ngNum)
+				provider.AddNodeGroup(ngName, 0, 1000, readyNodesCount+unreadyNodesCount)
+
+				for i := 0; i < readyNodesCount; i++ {
+					node := BuildTestNode(fmt.Sprintf("%s-ready-node-%d", ngName, i), 2000, 1000)
+					node.CreationTimestamp = metav1.NewTime(startTime)
+					SetNodeReadyState(node, true, startTime)
+					provider.AddNode(ngName, node)
+
+					allNodes = append(allNodes, node)
+					allNodeNames[node.Name] = true
+
+					readyNodes = append(readyNodes, node)
+					readyNodeNames[node.Name] = true
+				}
+				for i := 0; i < unreadyNodesCount; i++ {
+					node := BuildTestNode(fmt.Sprintf("%s-unready-node-%d", ngName, i), 2000, 1000)
+					node.CreationTimestamp = metav1.NewTime(startTime)
+					SetNodeReadyState(node, false, startTime)
+					provider.AddNode(ngName, node)
+
+					allNodes = append(allNodes, node)
+					allNodeNames[node.Name] = true
+
+					notReadyNodeNames[node.Name] = true
+				}
+			}
+
+			// Create fake listers for the generated nodes, nothing returned by the rest (but the ones used in the tested path have to be defined).
+			allNodeLister := kubernetes.NewTestNodeLister(allNodes)
+			readyNodeLister := kubernetes.NewTestNodeLister(readyNodes)
+			daemonSetLister, err := kubernetes.NewTestDaemonSetLister(nil)
+			assert.NoError(t, err)
+			listerRegistry := kube_util.NewListerRegistry(allNodeLister, readyNodeLister,
+				kubernetes.NewTestPodLister(nil),
+				kubernetes.NewTestPodDisruptionBudgetLister(nil), daemonSetLister, nil, nil, nil, nil)
+
+			// Create context with minimal autoscalingOptions that guarantee we reach the tested logic.
+			// We're only testing the input to UpdateClusterState which should be called whenever scale-down is enabled, other autoscalingOptions shouldn't matter.
+			autoscalingOptions := config.AutoscalingOptions{ScaleDownEnabled: true}
+			processorCallbacks := newStaticAutoscalerProcessorCallbacks()
+			processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(autoscalingOptions)
+			autoscalingCtx, err := NewScaleTestAutoscalingContext(autoscalingOptions, &fake.Clientset{}, listerRegistry, provider, processorCallbacks, nil, templateNodeInfoRegistry)
+			assert.NoError(t, err)
+
+			// Create CSR with unhealthy cluster protection effectively disabled, to guarantee we reach the tested logic.
+			csrConfig := clusterstate.ClusterStateRegistryConfig{OkTotalUnreadyCount: nodeGroupCount * unreadyNodesCount}
+			csr := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute, MaxNodeStartupTime: 15 * time.Minute}), templateNodeInfoRegistry, clusterstate.WithConfig(csrConfig))
+			if tc.registerScaleUps {
+				for ngNum := 0; ngNum < nodeGroupCount; ngNum++ {
+					csr.RegisterScaleUp(t.Context(), provider.GetNodeGroup(fmt.Sprintf("ng-%d", ngNum)), unreadyNodesCount, startTime)
+				}
+			}
+
+			// Setting the Actuator is necessary for testing any scale-down logic, it shouldn't have anything to do in this test.
+			actuator := actuation.NewActuator(&autoscalingCtx, csr, deletiontracker.NewNodeDeletionTracker(0*time.Second), options.NodeDeleteOptions{}, nil, processors.NodeGroupConfigProcessor)
+			autoscalingCtx.ScaleDownActuator = actuator
+
+			// Fake planner that keeps track of the scale-down candidates passed to UpdateClusterState.
+			planner := &candidateTrackingFakePlanner{}
+
+			autoscaler := &StaticAutoscaler{
+				AutoscalingContext:   &autoscalingCtx,
+				clusterStateRegistry: csr,
+				scaleDownActuator:    actuator,
+				scaleDownPlanner:     planner,
+				processors:           processors,
+				loopStartNotifier:    loopstart.NewObserversList(nil),
+				processorCallbacks:   processorCallbacks,
+			}
+
+			// RunOnce run right when the nodes are created. Ready nodes should be passed as scale-down candidates, unready nodes should be classified as
+			// NotStarted and not passed as scale-down candidates (or inserted into the cluster snapshot). The fake upcoming nodes also shouldn't be passed,
+			// but they should be inserted into the snapshot.
+			err = autoscaler.RunOnce(t.Context(), startTime)
+			assert.NoError(t, err)
+			assert.Equal(t, readyNodeNames, planner.lastCandidateNodes)
+			assertNodesInSnapshot(t, autoscaler.ClusterSnapshot, readyNodeNames)
+			assertNodesNotInSnapshot(t, autoscaler.ClusterSnapshot, notReadyNodeNames)
+			assertSnapshotNodeCount(t, autoscaler.ClusterSnapshot, len(allNodeNames)) // Ready nodes + fake upcoming copies for unready nodes.
+
+			// RunOnce run in the last moment when unready nodes are still classified as NotStarted - assertions the same as above.
+			err = autoscaler.RunOnce(t.Context(), startTime.Add(clusterstate.MaxNodeStartupTime).Add(-time.Second))
+			assert.NoError(t, err)
+			assert.Equal(t, readyNodeNames, planner.lastCandidateNodes)
+			assertNodesInSnapshot(t, autoscaler.ClusterSnapshot, readyNodeNames)
+			assertNodesNotInSnapshot(t, autoscaler.ClusterSnapshot, notReadyNodeNames)
+			assertSnapshotNodeCount(t, autoscaler.ClusterSnapshot, len(allNodeNames)) // Ready nodes + fake upcoming copies for unready nodes.
+
+			// RunOnce run in the first moment when unready nodes exceed the startup threshold, stop being classified as NotStarted, and start being classified
+			// Unready instead. The unready nodes should be passed as scale-down candidates at this point, and inserted into the snapshot. Fake upcoming
+			// nodes should no longer be inserted.
+			err = autoscaler.RunOnce(t.Context(), startTime.Add(clusterstate.MaxNodeStartupTime).Add(time.Second))
+			assert.Equal(t, allNodeNames, planner.lastCandidateNodes)
+			assertNodesInSnapshot(t, autoscaler.ClusterSnapshot, allNodeNames)
+			assertSnapshotNodeCount(t, autoscaler.ClusterSnapshot, len(allNodeNames)) // Ready nodes + actual unready nodes.
+		})
 	}
-
-	// Setting the Actuator is necessary for testing any scale-down logic, it shouldn't have anything to do in this test.
-	actuator := actuation.NewActuator(&autoscalingCtx, csr, deletiontracker.NewNodeDeletionTracker(0*time.Second), options.NodeDeleteOptions{}, nil, processors.NodeGroupConfigProcessor)
-	autoscalingCtx.ScaleDownActuator = actuator
-
-	// Fake planner that keeps track of the scale-down candidates passed to UpdateClusterState.
-	planner := &candidateTrackingFakePlanner{}
-
-	autoscaler := &StaticAutoscaler{
-		AutoscalingContext:   &autoscalingCtx,
-		clusterStateRegistry: csr,
-		scaleDownActuator:    actuator,
-		scaleDownPlanner:     planner,
-		processors:           processors,
-		loopStartNotifier:    loopstart.NewObserversList(nil),
-		processorCallbacks:   processorCallbacks,
-	}
-
-	// RunOnce run right when the nodes are created. Ready nodes should be passed as scale-down candidates, unready nodes should be classified as
-	// NotStarted and not passed as scale-down candidates (or inserted into the cluster snapshot). The fake upcoming nodes also shouldn't be passed,
-	// but they should be inserted into the snapshot.
-	err = autoscaler.RunOnce(t.Context(), startTime)
-	assert.NoError(t, err)
-	assert.Equal(t, readyNodeNames, planner.lastCandidateNodes)
-	assertNodesInSnapshot(t, autoscaler.ClusterSnapshot, readyNodeNames)
-	assertNodesNotInSnapshot(t, autoscaler.ClusterSnapshot, notReadyNodeNames)
-	assertSnapshotNodeCount(t, autoscaler.ClusterSnapshot, len(allNodeNames)) // Ready nodes + fake upcoming copies for unready nodes.
-
-	// RunOnce run in the last moment when unready nodes are still classified as NotStarted - assertions the same as above.
-	err = autoscaler.RunOnce(t.Context(), startTime.Add(clusterstate.MaxNodeStartupTime).Add(-time.Second))
-	assert.NoError(t, err)
-	assert.Equal(t, readyNodeNames, planner.lastCandidateNodes)
-	assertNodesInSnapshot(t, autoscaler.ClusterSnapshot, readyNodeNames)
-	assertNodesNotInSnapshot(t, autoscaler.ClusterSnapshot, notReadyNodeNames)
-	assertSnapshotNodeCount(t, autoscaler.ClusterSnapshot, len(allNodeNames)) // Ready nodes + fake upcoming copies for unready nodes.
-
-	// RunOnce run in the first moment when unready nodes exceed the startup threshold, stop being classified as NotStarted, and start being classified
-	// Unready instead. The unready nodes should be passed as scale-down candidates at this point, and inserted into the snapshot. Fake upcoming
-	// nodes should no longer be inserted.
-	err = autoscaler.RunOnce(t.Context(), startTime.Add(clusterstate.MaxNodeStartupTime).Add(time.Second))
-	assert.Equal(t, allNodeNames, planner.lastCandidateNodes)
-	assertNodesInSnapshot(t, autoscaler.ClusterSnapshot, allNodeNames)
-	assertSnapshotNodeCount(t, autoscaler.ClusterSnapshot, len(allNodeNames)) // Ready nodes + actual unready nodes.
 }
 
 func TestStaticAutoscalerProcessorCallbacks(t *testing.T) {
@@ -2672,6 +2845,67 @@ func TestRemoveOldUnregisteredNodes(t *testing.T) {
 	assert.True(t, removed)
 	deletedNode := core_utils.GetStringFromChan(deletedNodes)
 	assert.Equal(t, "ng1/ng1-2", deletedNode)
+}
+
+// TestRemoveOldUnregisteredNodesRegistersFailedScaleUp verifies that removing nodes that failed to register within
+// maxNodeProvisionTime is registered as a failed scale-up, so that the node group gets backed off even if its
+// scale-up request looks fulfilled after the removal.
+func TestRemoveOldUnregisteredNodesRegistersFailedScaleUp(t *testing.T) {
+	deletedNodes := make(chan string, 10)
+
+	now := time.Now()
+
+	ng1_1 := BuildTestNode("ng1-1", 1000, 1000)
+	ng1_1.Spec.ProviderID = "ng1-1"
+	ng1_2 := BuildTestNode("ng1-2", 1000, 1000)
+	ng1_2.Spec.ProviderID = "ng1-2"
+	provider := testprovider.NewTestCloudProviderBuilder().WithOnScaleDown(func(nodegroup string, node string) error {
+		deletedNodes <- fmt.Sprintf("%s/%s", nodegroup, node)
+		return nil
+	}).Build()
+	provider.AddNodeGroup("ng1", 1, 10, 2)
+	provider.AddNode("ng1", ng1_1)
+	provider.AddNode("ng1", ng1_2)
+	ng1 := provider.GetNodeGroup("ng1")
+
+	fakeClient := &fake.Clientset{}
+	fakeLogRecorder, _ := clusterstate_utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
+
+	autoscalingCtx := &ca_context.AutoscalingContext{
+		AutoscalingOptions: config.AutoscalingOptions{
+			NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+				MaxNodeProvisionTime: 45 * time.Minute,
+			},
+		},
+		CloudProvider: provider,
+	}
+	scaleStateNotifier := nodegroupchange.NewNodeGroupChangeObserversList()
+	scaleUpFailuresRegistry := scaleupfailures.NewRegistry()
+	scaleStateNotifier.Register(scaleUpFailuresRegistry)
+	clusterState := clusterstate.NewClusterStateRegistry(provider, fakeLogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(autoscalingCtx.AutoscalingOptions.NodeGroupDefaults), nil,
+		clusterstate.WithScaleStateNotifier(scaleStateNotifier), clusterstate.WithScaleUpFailuresRegistry(scaleUpFailuresRegistry))
+	clusterState.RegisterScaleUp(context.Background(), ng1, 1, now.Add(-time.Hour))
+	err := clusterState.UpdateNodes(context.Background(), []*apiv1.Node{ng1_1}, now.Add(-time.Hour))
+	assert.NoError(t, err)
+	unregisteredNodes := clusterState.GetUnregisteredNodes()
+	assert.Equal(t, 1, len(unregisteredNodes))
+
+	autoscaler := &StaticAutoscaler{
+		AutoscalingContext:   autoscalingCtx,
+		clusterStateRegistry: clusterState,
+	}
+	removed, err := autoscaler.removeOldUnregisteredNodes(context.Background(), unregisteredNodes, clusterState, now, fakeLogRecorder)
+	assert.NoError(t, err)
+	assert.True(t, removed)
+	assert.Equal(t, "ng1/ng1-2", core_utils.GetStringFromChan(deletedNodes))
+
+	assert.False(t, clusterState.HasNodeGroupStartedScaleUp("ng1"))
+	failures := clusterState.GetScaleUpFailures()["ng1"]
+	if assert.Len(t, failures, 1) {
+		assert.Equal(t, 1, failures[0].Delta)
+		assert.Equal(t, string(metrics.Timeout), failures[0].ErrorInfo.ErrorCode)
+		assert.Equal(t, cloudprovider.OtherErrorClass, failures[0].ErrorInfo.ErrorClass)
+	}
 }
 
 func setupTestRemoveOldUnregisteredNodesAtomic(t *testing.T, now time.Time, allowNonAtomicScaleUpToMax bool) (*clusterstate.ClusterStateRegistry, *ca_context.AutoscalingContext, *clusterstate_utils.LogEventRecorder, chan string) {
@@ -4004,6 +4238,275 @@ func TestShouldScaleDown(t *testing.T) {
 	}
 }
 
+type mockScaleUpEnforcer struct {
+	force     bool
+	callCount int
+}
+
+func (m *mockScaleUpEnforcer) ShouldForceScaleUp(unschedulablePods []*apiv1.Pod) bool {
+	m.callCount++
+	return m.force
+}
+
+func TestShouldScaleUp(t *testing.T) {
+	now := time.Now()
+	readyNode := BuildTestNode("n1", 1000, 1000)
+	SetNodeReadyState(readyNode, true, now)
+
+	oldPod := BuildTestPod("old-pod", 500, 1000, MarkUnschedulable())
+	oldPod.CreationTimestamp = metav1.NewTime(now.Add(-1 * time.Minute))
+
+	newPod := BuildTestPod("new-pod", 500, 1000, MarkUnschedulable())
+	newPod.CreationTimestamp = metav1.NewTime(now.Add(-1 * time.Second))
+
+	testCases := []struct {
+		name                         string
+		gracefulDegradationEnabled   bool
+		gracefulDegradationLoopCount int
+		maxNodesTotal                int
+		bypassedSchedulers           map[string]bool
+		forceScaleUp                 bool
+		unschedulablePods            []*apiv1.Pod
+		readyNodes                   []*apiv1.Node
+		wantShouldScaleUp            bool
+		wantResult                   scaleupstatus.ScaleUpResult
+		wantPodsRemainUnschedulable  int
+		wantEnforcerCalls            int
+	}{
+		{
+			name:                         "graceful degradation cooldown",
+			gracefulDegradationEnabled:   true,
+			gracefulDegradationLoopCount: 4,
+			maxNodesTotal:                10,
+			unschedulablePods:            []*apiv1.Pod{oldPod},
+			readyNodes:                   []*apiv1.Node{readyNode},
+			wantShouldScaleUp:            false,
+			wantResult:                   scaleupstatus.ScaleUpInCooldown,
+			wantEnforcerCalls:            0,
+		},
+		{
+			name:              "no unschedulable pods",
+			maxNodesTotal:     10,
+			unschedulablePods: []*apiv1.Pod{},
+			readyNodes:        []*apiv1.Node{readyNode},
+			wantShouldScaleUp: false,
+			wantResult:        scaleupstatus.ScaleUpNotNeeded,
+			wantEnforcerCalls: 0,
+		},
+		{
+			name:                        "max nodes reached, not forced",
+			maxNodesTotal:               1,
+			unschedulablePods:           []*apiv1.Pod{oldPod},
+			readyNodes:                  []*apiv1.Node{readyNode},
+			forceScaleUp:                false,
+			wantShouldScaleUp:           false,
+			wantResult:                  scaleupstatus.ScaleUpLimitedByMaxNodesTotal,
+			wantPodsRemainUnschedulable: 1,
+			wantEnforcerCalls:           1,
+		},
+		{
+			name:              "max nodes reached, forced",
+			maxNodesTotal:     1,
+			unschedulablePods: []*apiv1.Pod{oldPod},
+			readyNodes:        []*apiv1.Node{readyNode},
+			forceScaleUp:      true,
+			wantShouldScaleUp: true,
+			wantEnforcerCalls: 1,
+		},
+		{
+			name:              "unschedulable pods are new, not forced",
+			maxNodesTotal:     10,
+			unschedulablePods: []*apiv1.Pod{newPod},
+			readyNodes:        []*apiv1.Node{readyNode},
+			forceScaleUp:      false,
+			wantShouldScaleUp: false,
+			wantResult:        scaleupstatus.ScaleUpInCooldown,
+			wantEnforcerCalls: 1,
+		},
+		{
+			name:              "unschedulable pods are new, forced",
+			maxNodesTotal:     10,
+			unschedulablePods: []*apiv1.Pod{newPod},
+			readyNodes:        []*apiv1.Node{readyNode},
+			forceScaleUp:      true,
+			wantShouldScaleUp: true,
+			wantEnforcerCalls: 1,
+		},
+		{
+			name:               "unschedulable pods are new, but bypassed schedulers configured",
+			maxNodesTotal:      10,
+			bypassedSchedulers: map[string]bool{"custom-scheduler": true},
+			unschedulablePods:  []*apiv1.Pod{newPod},
+			readyNodes:         []*apiv1.Node{readyNode},
+			wantShouldScaleUp:  true,
+			wantEnforcerCalls:  0,
+		},
+		{
+			name:              "both max nodes reached and pods are new, forced",
+			maxNodesTotal:     1,
+			unschedulablePods: []*apiv1.Pod{newPod},
+			readyNodes:        []*apiv1.Node{readyNode},
+			forceScaleUp:      true,
+			wantShouldScaleUp: true,
+			wantEnforcerCalls: 1,
+		},
+		{
+			name:              "normal scale-up eligible",
+			maxNodesTotal:     10,
+			unschedulablePods: []*apiv1.Pod{oldPod},
+			readyNodes:        []*apiv1.Node{readyNode},
+			wantShouldScaleUp: true,
+			wantEnforcerCalls: 0,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mocks := newCommonMocks()
+			setupConfig := &autoscalerSetupConfig{
+				autoscalingOptions: config.AutoscalingOptions{
+					MaxNodesTotal:              tc.maxNodesTotal,
+					GracefulDegradationEnabled: tc.gracefulDegradationEnabled,
+					BypassedSchedulers:         tc.bypassedSchedulers,
+				},
+				nodeGroups: []*nodeGroup{{
+					name:     "ng1",
+					min:      0,
+					max:      10,
+					nodes:    []*apiv1.Node{readyNode},
+					template: framework.NewTestNodeInfo(BuildTestNode("template-node", 1000, 1000)),
+				}},
+				nodeStateUpdateTime: now,
+				mocks:               mocks,
+			}
+
+			autoscaler, err := setupAutoscaler(setupConfig)
+			assert.NoError(t, err)
+			autoscaler.GracefulDegradationLoopCount = tc.gracefulDegradationLoopCount
+			enforcerMock := &mockScaleUpEnforcer{force: tc.forceScaleUp}
+			autoscaler.processors.ScaleUpEnforcer = enforcerMock
+
+			state := &loopState{
+				readyNodes:              tc.readyNodes,
+				unschedulablePodsToHelp: tc.unschedulablePods,
+				currentTime:             now,
+			}
+
+			shouldScaleUp, scaleUpStatus := autoscaler.shouldScaleUp(context.Background(), state)
+			assert.Equal(t, tc.wantShouldScaleUp, shouldScaleUp)
+			assert.Equal(t, tc.wantEnforcerCalls, enforcerMock.callCount, "enforcer call count mismatch")
+			if tc.wantShouldScaleUp {
+				assert.Nil(t, scaleUpStatus)
+			} else {
+				assert.NotNil(t, scaleUpStatus)
+				assert.Equal(t, tc.wantResult, scaleUpStatus.Result)
+				assert.Equal(t, tc.wantPodsRemainUnschedulable, len(scaleUpStatus.PodsRemainUnschedulable))
+				for i, info := range scaleUpStatus.PodsRemainUnschedulable {
+					assert.Equal(t, tc.unschedulablePods[i], info.Pod)
+				}
+			}
+		})
+	}
+}
+
+func TestStaticAutoscalerNoDeadlockBetweenCSRAndScaleStateNotifier(t *testing.T) {
+	now := time.Now()
+	n1 := BuildTestNode("n1", 1000, 1000)
+	SetNodeReadyState(n1, true, now.Add(-2*time.Minute))
+	nodes := []*apiv1.Node{n1}
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	provider.AddNodeGroup("ng1", 1, 10, 2)
+	provider.AddNode("ng1", n1)
+	ng1 := provider.GetNodeGroup("ng1")
+
+	daemonSetLister, err := kube_util.NewTestDaemonSetLister(nil)
+	assert.NoError(t, err)
+	listers := kube_util.NewListerRegistry(kube_util.NewTestNodeLister(nodes), kube_util.NewTestNodeLister(nodes),
+		kube_util.NewTestPodLister(nil), kube_util.NewTestPodDisruptionBudgetLister(nil), daemonSetLister, nil, nil, nil, nil)
+	opts := config.AutoscalingOptions{
+		NodeGroupDefaults: config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 10 * time.Second},
+	}
+	callbacks := newStaticAutoscalerProcessorCallbacks()
+	processors, templateRegistry := processorstest.NewTestProcessors(opts)
+	autoscalingCtx, err := NewScaleTestAutoscalingContext(opts, &fake.Clientset{}, listers, provider, callbacks, nil, templateRegistry)
+	assert.NoError(t, err)
+	csr := clusterstate.NewNotifiedClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), processors.NodeGroupConfigProcessor, templateRegistry,
+		clusterstate.WithAsyncNodeGroupStateChecker(processors.AsyncNodeGroupStateChecker),
+		clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier))
+	sdPlanner, sdActuator := newScaleDownPlannerAndActuator(&autoscalingCtx, processors, csr, nil)
+	autoscalingCtx.ScaleDownActuator = sdActuator
+	callbacks.scaleDownPlanner = sdPlanner
+	autoscaler := &StaticAutoscaler{
+		AutoscalingContext:   &autoscalingCtx,
+		clusterStateRegistry: csr,
+		scaleDownPlanner:     sdPlanner,
+		scaleDownActuator:    sdActuator,
+		processors:           processors,
+		loopStartNotifier:    loopstart.NewObserversList(nil),
+		processorCallbacks:   callbacks,
+		initialized:          true,
+	}
+
+	csr.RegisterScaleUp(context.Background(), ng1, 1, now.Add(-time.Minute))
+	probe := &deadlockProbeObserver{csr: csr, inFailedScaleUp: make(chan struct{})}
+	processors.ScaleStateNotifier.Register(probe)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	locked := make(chan struct{})
+	scaleDownDone := make(chan struct{})
+	go func() {
+		defer close(scaleDownDone)
+		probe.mu.Lock()
+		defer probe.mu.Unlock()
+		close(locked)
+		select {
+		case <-probe.inFailedScaleUp:
+			processors.ScaleStateNotifier.RegisterScaleDown(ng1, n1.Name, now, now.Add(time.Minute))
+		case <-ctx.Done():
+		}
+	}()
+	<-locked
+	runOnceDone := make(chan error, 1)
+	go func() {
+		runOnceDone <- autoscaler.RunOnce(ctx, now)
+	}()
+
+	select {
+	case err := <-runOnceDone:
+		cancel()
+		<-scaleDownDone
+		assert.NoError(t, err)
+		assert.True(t, csr.BackoffStatusForNodeGroup(context.Background(), ng1, now).IsBackedOff)
+	case <-time.After(10 * time.Second):
+		t.Fatal("deadlock between ClusterStateRegistry and ScaleStateNotifier")
+	}
+}
+
+// If RunOnce notifies failed scale-ups under the ClusterStateRegistry lock,
+// RegisterFailedScaleUp waits for mu while the mu holder waits for that lock.
+type deadlockProbeObserver struct {
+	mu              sync.Mutex
+	csr             *clusterstate.ClusterStateRegistry
+	inFailedScaleUp chan struct{}
+}
+
+func (o *deadlockProbeObserver) RegisterScaleUp(context.Context, cloudprovider.NodeGroup, int, time.Time) {
+}
+
+func (o *deadlockProbeObserver) RegisterScaleDown(cloudprovider.NodeGroup, string, time.Time, time.Time) {
+}
+
+func (o *deadlockProbeObserver) RegisterFailedScaleUp(_ context.Context, nodeGroup cloudprovider.NodeGroup, _ int, _ cloudprovider.InstanceErrorInfo, _ time.Time) {
+	close(o.inFailedScaleUp)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	_ = o.csr.HasNodeGroupStartedScaleUp(nodeGroup.Id())
+}
+
+func (o *deadlockProbeObserver) RegisterFailedScaleDown(cloudprovider.NodeGroup, string, time.Time) {
+}
+
 func TestScaleDownUpdatesUnremovableNodesCount(t *testing.T) {
 	now := time.Now()
 	n1 := BuildTestNode("n1", 1000, 1000)
@@ -4059,23 +4562,24 @@ func TestScaleDownUpdatesUnremovableNodesCount(t *testing.T) {
 			assert.NoError(t, err)
 			planner := &candidateTrackingFakePlanner{}
 			autoscaler.scaleDownPlanner = planner
-			autoscaler.processors.ScaleDownStatusProcessor = nil
+			statusProcessor := &scaleDownStatusProcessorMock{}
+			autoscaler.processors.ScaleDownStatusProcessor = statusProcessor
 			autoscaler.lastScaleUpTime = tc.lastScaleUpTime
 
 			state := &loopState{
 				currentTime:              now,
 				allNodes:                 tc.allNodes,
 				readyNodes:               tc.allNodes,
-				scaleDownStatus:          &status.ScaleDownStatus{},
 				scaleDownActuationStatus: deletiontracker.NewNodeDeletionTracker(0),
 			}
 
 			assert.Nil(t, autoscaler.scaleDown(t.Context(), state))
-			assert.Equal(t, tc.wantResult, state.scaleDownStatus.Result)
-			// scaleDown only reads UnremovableNodes to update the unremovable nodes metric.
-			wantCalls := 0
+			assert.Equal(t, tc.wantResult, statusProcessor.scaleDownStatus.Result)
+			// scaleDown reads UnremovableNodes once in the deferred ScaleDownStatusProcessor
+			// update, plus once when updating the unremovable nodes metric.
+			wantCalls := 1
 			if tc.wantMetricUpdate {
-				wantCalls = 1
+				wantCalls = 2
 			}
 			assert.Equal(t, wantCalls, planner.unremovableNodesCalls)
 		})

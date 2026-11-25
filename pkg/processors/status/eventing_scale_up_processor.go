@@ -63,8 +63,14 @@ func (p *EventingScaleUpStatusProcessor) CleanUp() {
 
 // ReasonsMessage aggregates reasons from NoScaleUpInfos.
 func ReasonsMessage(ctx context.Context, scaleUpStatus ScaleUpResult, noScaleUpInfo NoScaleUpInfo, consideredNodeGroups map[string]cloudprovider.NodeGroup) string {
+	messages := ReasonsMessages(ctx, scaleUpStatus, noScaleUpInfo, consideredNodeGroups)
+	return strings.Join(messages, ", ")
+}
+
+// ReasonsMessages aggregates reasons from NoScaleUpInfos into a list of messages.
+func ReasonsMessages(ctx context.Context, scaleUpStatus ScaleUpResult, noScaleUpInfo NoScaleUpInfo, consideredNodeGroups map[string]cloudprovider.NodeGroup) []string {
 	if scaleUpStatus == ScaleUpLimitedByMaxNodesTotal {
-		return "max total nodes in cluster reached"
+		return []string{"max total nodes in cluster reached"}
 	}
 
 	messages := []string{}
@@ -92,5 +98,5 @@ func ReasonsMessage(ctx context.Context, scaleUpStatus ScaleUpResult, noScaleUpI
 	for msg, count := range aggregated {
 		messages = append(messages, fmt.Sprintf("%d %s", count, msg))
 	}
-	return strings.Join(messages, ", ")
+	return messages
 }

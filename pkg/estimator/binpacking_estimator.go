@@ -157,7 +157,7 @@ func (e *BinpackingNodeEstimator) Estimate(
 	}
 
 	if e.estimationAnalyserFunc != nil {
-		e.estimationAnalyserFunc(e.clusterSnapshot, nodeGroup, estimationState.newNodesWithPods)
+		e.estimationAnalyserFunc(e.clusterSnapshot, nodeGroup, nodeTemplate, estimationState.newNodesWithPods)
 	}
 	return len(estimationState.newNodesWithPods), estimationState.scheduledPods
 }

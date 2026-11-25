@@ -52,7 +52,7 @@ func (p *GpuCustomResourcesProcessor) FilterOutNodesWithUnreadyResources(ctx con
 		}
 
 		_, hasGpuLabel := node.Labels[autoscalingCtx.CloudProvider.GPULabel(ctx)]
-		_, hasAnyGpuAllocatable := gpu.NodeHasGpuAllocatable(node)
+		hasAnyGpuAllocatable := gpu.NodeHasGpuResourceAllocatable(node)
 		if hasGpuLabel && !hasAnyGpuAllocatable {
 			logger.V(3).Info("Overriding status of node that seems to have unready GPU", "node", klog.KObj(node))
 			nodesWithUnreadyGpu[node.Name] = kubernetes.GetUnreadyNodeCopy(node, kubernetes.ResourceUnready)
@@ -78,8 +78,9 @@ func (p *GpuCustomResourcesProcessor) GetNodeResourceTargets(ctx context.Context
 	return []CustomResourceTarget{gpuTarget}, err
 }
 
-// GetNodeGpuTarget returns the gpu target of a given node. This includes gpus
-// that are not ready to use and visible in kubernetes.
+// GetNodeGpuTarget returns the physical GPU quota target for a node, including
+// GPUs expected from the node group template but not visible as whole-GPU
+// allocatable resources on the node.
 func (p *GpuCustomResourcesProcessor) GetNodeGpuTarget(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, node *apiv1.Node, nodeGroup cloudprovider.NodeGroup) (CustomResourceTarget, errors.AutoscalerError) {
 	logger := klog.FromContext(ctx)
 	gpuLabel, found := node.Labels[autoscalingCtx.CloudProvider.GPULabel(ctx)]
@@ -95,22 +96,19 @@ func (p *GpuCustomResourcesProcessor) GetNodeGpuTarget(ctx context.Context, auto
 		return CustomResourceTarget{gpuLabel, gpuAllocatableValue}, nil
 	}
 
-	// A node is supposed to have GPUs (based on label), but they're not available yet
-	// (driver haven't installed yet?).
-	// Unfortunately we can't deduce how many GPUs it will actually have from labels (just
-	// that it will have some).
-	// Ready for some evil hacks? Well, you won't be disappointed - let's pretend we haven't
-	// seen the node and just use the template we use for scale from 0. It'll be our little
-	// secret.
+	// A node is supposed to have GPUs based on its label, but its allocatable
+	// resources don't expose a physical GPU count. This can happen while GPU
+	// resources are still becoming available, or when the node exposes only MIG
+	// or time-sliced resources whose quantities represent slices or replicas.
+	// GPU labels identify the GPU type, but don't provide the physical GPU count,
+	// so use the node group template as the source of that count.
 
 	if nodeGroup == nil {
-		// We expect this code path to be triggered by situation when we are looking at a node which is expected to have gpus (has gpu label)
-		// But those are not yet visible in node's resource (e.g. gpu drivers are still being installed).
-		// In case of node coming from autoscaled node group we would look and node group template here.
-		// But for nodes coming from non-autoscaled groups we have no such possibility.
-		// Let's not fail here to not block cluster-wide scale ups, return empty resource target, it can possibly lead to GPU overprovisioning,
-		// while faulty GPU nodes exist, but it seems better than failing scaling at all.
-		klog.Warningf("Unable to determine expected GPU capacity for unmanaged node %q; excluding it from GPU quota usage", node.Name)
+		// Unmanaged nodes have no template from which to recover the physical GPU
+		// count. Exclude the node from GPU quota usage rather than blocking
+		// cluster-wide scale-ups. This can temporarily undercount GPU usage and
+		// allow overprovisioning.
+		klog.Warningf("Unable to determine physical GPU capacity for unmanaged node %q; excluding it from GPU quota usage", node.Name)
 		return CustomResourceTarget{}, nil
 	}
 
@@ -124,8 +122,8 @@ func (p *GpuCustomResourcesProcessor) GetNodeGpuTarget(ctx context.Context, auto
 			return CustomResourceTarget{gpuLabel, gpuCapacity.Value()}, nil
 		}
 	}
-	// if template does not define gpus we assume node will not have any even if ith has gpu label
-	logger.Info("Template does not define gpus even though node from its node group does", "node", klog.KObj(node))
+	// If the template doesn't define physical GPU capacity, omit it from quota usage.
+	logger.Info("Template does not define physical GPU capacity even though node has a GPU label", "node", klog.KObj(node))
 	return CustomResourceTarget{}, nil
 }
 

@@ -23,7 +23,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	cacontext "sigs.k8s.io/cluster-autoscaler/pkg/context"
-	"sigs.k8s.io/cluster-autoscaler/pkg/core/utils"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/customresources"
 )
 
@@ -64,13 +63,25 @@ func (nc *nodeResourcesCache) totalNodeResources(
 }
 
 // totalNodeResources calculates the amount of resources that a node contains.
+//
+// All resources reported in node.Status.Capacity are counted, which matches the
+// CapacityQuota API contract and the CapacityQuota status controller. This way
+// extended resources such as nvidia.com/gpu are supported without any dedicated code.
+//
+// Resources returned by the CustomResourcesProcessor are applied on top of the
+// capacity and take precedence over it. They provide keys that cannot be derived
+// from the capacity (e.g. GPU type keys used by the legacy --gpu-total limits)
+// and account for resources that are not yet visible in the capacity (e.g. GPUs
+// on nodes where the drivers are still being installed).
 func totalNodeResources(ctx context.Context, autoscalingCtx *cacontext.AutoscalingContext, crp customresources.CustomResourcesProcessor, node *corev1.Node, nodeGroup cloudprovider.NodeGroup) (resourceList, error) {
-	// TODO: storage?
-	nodeCPU, nodeMemory := utils.GetNodeCoresAndMemory(node)
-	nodeResources := resourceList{
-		string(corev1.ResourceCPU):    nodeCPU,
-		string(corev1.ResourceMemory): nodeMemory,
-		ResourceNodes:                 1,
+	nodeResources := resourceList{ResourceNodes: 1}
+	for name, quantity := range node.Status.Capacity {
+		// Capacity quantities are expected to be integers (e.g. kubelet reports whole
+		// CPU cores). Should a fractional quantity appear anyway (e.g. on a virtual
+		// node or in a node template), Value() rounds it up to the nearest integer.
+		if value := quantity.Value(); value > 0 {
+			nodeResources[string(name)] = value
+		}
 	}
 
 	resourceTargets, err := crp.GetNodeResourceTargets(ctx, autoscalingCtx, node, nodeGroup)

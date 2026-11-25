@@ -93,17 +93,17 @@ func TestUpdateScaleDownNodeRemovalLatency(t *testing.T) {
 	m := newCaMetricsWithRegistry(reg)
 	m.RegisterAll(false)
 
-	m.UpdateScaleDownNodeRemovalLatency(true, "none", 10*time.Second)
-	m.UpdateScaleDownNodeRemovalLatency(false, "BlockedByPod", 20*time.Second)
+	m.UpdateScaleDownNodeRemovalLatency(true, "none", Empty, 10*time.Second)
+	m.UpdateScaleDownNodeRemovalLatency(false, "BlockedByPod", Underutilized, 20*time.Second)
 
 	var metric1 dto.Metric
-	err := m.scaleDownNodeRemovalLatency.HistogramVec.WithLabelValues("true", "none").(prometheus.Histogram).Write(&metric1)
+	err := m.scaleDownNodeRemovalLatency.HistogramVec.WithLabelValues("true", "none", "empty").(prometheus.Histogram).Write(&metric1)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(1), metric1.Histogram.GetSampleCount())
 	assert.Equal(t, 10.0, metric1.Histogram.GetSampleSum())
 
 	var metric2 dto.Metric
-	err = m.scaleDownNodeRemovalLatency.HistogramVec.WithLabelValues("false", "BlockedByPod").(prometheus.Histogram).Write(&metric2)
+	err = m.scaleDownNodeRemovalLatency.HistogramVec.WithLabelValues("false", "BlockedByPod", "underutilized").(prometheus.Histogram).Write(&metric2)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(1), metric2.Histogram.GetSampleCount())
 	assert.Equal(t, 20.0, metric2.Histogram.GetSampleSum())
@@ -175,6 +175,23 @@ func TestRegisterNodesDeleted(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUpdateNodesCountPerNodeGroup(t *testing.T) {
+	reg := metrics.NewKubeRegistry()
+	m := newCaMetricsWithRegistry(reg)
+	m.RegisterAll(true)
+
+	nodeGroupID := "node-group-id"
+
+	m.UpdateNodesCountPerNodeGroup(1, 2, 3, 4, 5, 6, nodeGroupID)
+
+	assert.Equal(t, 1, int(testutil.ToFloat64(m.nodesCountPerNodeGroup.GaugeVec.WithLabelValues(readyLabel, nodeGroupID))))
+	assert.Equal(t, 2, int(testutil.ToFloat64(m.nodesCountPerNodeGroup.GaugeVec.WithLabelValues(unreadyLabel, nodeGroupID))))
+	assert.Equal(t, 3, int(testutil.ToFloat64(m.nodesCountPerNodeGroup.GaugeVec.WithLabelValues(startingLabel, nodeGroupID))))
+	assert.Equal(t, 4, int(testutil.ToFloat64(m.nodesCountPerNodeGroup.GaugeVec.WithLabelValues(suspendedLabel, nodeGroupID))))
+	assert.Equal(t, 5, int(testutil.ToFloat64(m.nodesCountPerNodeGroup.GaugeVec.WithLabelValues(longUnregisteredLabel, nodeGroupID))))
+	assert.Equal(t, 6, int(testutil.ToFloat64(m.nodesCountPerNodeGroup.GaugeVec.WithLabelValues(unregisteredLabel, nodeGroupID))))
 }
 
 func TestUpdateUnremovableNodesCount(t *testing.T) {

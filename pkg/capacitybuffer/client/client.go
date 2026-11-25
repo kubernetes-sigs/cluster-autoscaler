@@ -166,10 +166,14 @@ func NewCapacityBufferClientFromClients(buffersClient capacitybuffer.Interface, 
 			if !ok {
 				return []string{}, nil
 			}
+			var refs []string
 			if buffer.Spec.PodTemplateRef != nil {
-				return []string{buffer.Spec.PodTemplateRef.Name}, nil
+				refs = append(refs, buffer.Spec.PodTemplateRef.Name)
 			}
-			return []string{}, nil
+			if buffer.Status.PodTemplateRef != nil {
+				refs = append(refs, buffer.Status.PodTemplateRef.Name)
+			}
+			return refs, nil
 		},
 		ScalableRefIndex: func(obj interface{}) ([]string, error) {
 			buffer, ok := obj.(*v1.CapacityBuffer)
@@ -393,7 +397,8 @@ func (c *CapacityBufferClient) EnsurePodTemplate(ctx context.Context, podTemplat
 		}
 		return nil, err
 	}
-	if equality.Semantic.DeepEqual(existing.Template, podTemplate.Template) {
+	if equality.Semantic.DeepEqual(existing.Template, podTemplate.Template) &&
+		equality.Semantic.DeepEqual(existing.OwnerReferences, podTemplate.OwnerReferences) {
 		return existing, nil
 	}
 	existing.OwnerReferences = podTemplate.OwnerReferences

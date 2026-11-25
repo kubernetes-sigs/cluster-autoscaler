@@ -37,12 +37,17 @@ const (
 	// deletion is considered "slow". Deletions that take
 	// longer than this threshold will be logged at a more visible level
 	scaleDownLatencyLogThreshold = 3 * time.Minute
+
+	// FailedToMarkToBeDeleted is the delay reason recorded when a node's deletion
+	// is aborted because tainting failed.
+	FailedToMarkToBeDeleted = "FailedToMarkToBeDeleted"
 )
 
 type unneededNodeState struct {
 	unneededSince     time.Time
 	removalThreshold  time.Duration
 	latestDelayReason string
+	scaleDownReason   metrics.NodeScaleDownReason
 }
 
 // NodeLatencyTracker keeps track of nodes that are marked as unneeded, when they became unneeded,
@@ -71,6 +76,7 @@ func (t *NodeLatencyTracker) UpdateScaleDownCandidates(ctx context.Context, list
 			t.unneededNodes[nodeName] = unneededNodeState{
 				unneededSince:    timestamp,
 				removalThreshold: candidate.RemovalThreshold,
+				scaleDownReason:  candidate.ScaleDownReason,
 			}
 			logger.V(6).Info("Started tracking unneeded node with removal threshold.", "node", klog.KObj(candidate.Node), "timestamp", timestamp, "threshold", candidate.RemovalThreshold)
 		} else {
@@ -78,6 +84,11 @@ func (t *NodeLatencyTracker) UpdateScaleDownCandidates(ctx context.Context, list
 				info.removalThreshold = candidate.RemovalThreshold
 				t.unneededNodes[nodeName] = info
 				logger.V(6).Info("Updated removal threshold for tracked node.", "node", klog.KObj(candidate.Node), "threshold", candidate.RemovalThreshold)
+			}
+			if info.scaleDownReason != candidate.ScaleDownReason {
+				info.scaleDownReason = candidate.ScaleDownReason
+				t.unneededNodes[nodeName] = info
+				logger.V(6).Info("Updated scale-down reason for tracked node.", "node", klog.KObj(candidate.Node), "scaleDownReason", candidate.ScaleDownReason)
 			}
 		}
 	}
@@ -95,7 +106,7 @@ func (t *NodeLatencyTracker) Process(ctx context.Context, autoscalingCtx *ca_con
 		t.wrapped.Process(ctx, autoscalingCtx, status)
 	}
 
-	t.updateLatestDelayReasons(ctx, status.UnremovableNodes)
+	t.updateLatestDelayReasons(ctx, status.UnremovableNodes, status.NodeDeleteResults)
 
 	for _, node := range status.ScaledDownNodes {
 		t.recordAndCleanup(ctx, node.Node.Name, true)
@@ -127,7 +138,7 @@ func (t *NodeLatencyTracker) recordAndCleanup(ctx context.Context, nodeName stri
 	}
 
 	if latency > 0 {
-		metrics.UpdateScaleDownNodeRemovalLatency(isRemoved, delayReason, latency)
+		metrics.UpdateScaleDownNodeRemovalLatency(isRemoved, delayReason, info.scaleDownReason, latency)
 		if !isRemoved {
 			logger.V(4).Info("Node became needed again", "nodeName", nodeName, "unneededDuration", duration, "delayReason", delayReason, "latency", latency)
 		}
@@ -161,7 +172,7 @@ func (t *NodeLatencyTracker) CleanUp() {
 	}
 }
 
-func (t *NodeLatencyTracker) updateLatestDelayReasons(ctx context.Context, unremovableNodes []*status.UnremovableNode) {
+func (t *NodeLatencyTracker) updateLatestDelayReasons(ctx context.Context, unremovableNodes []*status.UnremovableNode, nodeDeleteResults map[string]status.NodeDeleteResult) {
 	logger := klog.FromContext(ctx)
 	for _, val := range unremovableNodes {
 		if info, exists := t.unneededNodes[val.Node.Name]; exists {
@@ -170,6 +181,15 @@ func (t *NodeLatencyTracker) updateLatestDelayReasons(ctx context.Context, unrem
 				info.latestDelayReason = reasonStr
 				t.unneededNodes[val.Node.Name] = info
 				logger.V(6).Info("Tracking latest delay reason for node", "delayReason", reasonStr, "node", klog.KObj(val.Node))
+			}
+		}
+	}
+	for nodeName, res := range nodeDeleteResults {
+		if res.ResultType == status.NodeDeleteErrorFailedToMarkToBeDeleted {
+			if info, exists := t.unneededNodes[nodeName]; exists {
+				info.latestDelayReason = FailedToMarkToBeDeleted
+				t.unneededNodes[nodeName] = info
+				logger.V(6).Info("Tracking latest delay reason for node", "delayReason", FailedToMarkToBeDeleted, "nodeName", nodeName)
 			}
 		}
 	}

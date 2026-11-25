@@ -19,6 +19,7 @@ package utils
 import (
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
@@ -112,6 +113,39 @@ func TestPodSpecSemanticallyEqual(t *testing.T) {
 			result := PodSpecSemanticallyEqual(tt.p1Spec, tt.p2Spec)
 			assert.Equal(t, tt.result, result)
 		})
+	}
+}
+
+func TestPodSpecSemanticallyEqualDoesNotMutateInputs(t *testing.T) {
+	newPod := func(projectedVolumeName string) *apiv1.Pod {
+		return &apiv1.Pod{Spec: apiv1.PodSpec{
+			Volumes: []apiv1.Volume{{
+				Name:         projectedVolumeName,
+				VolumeSource: apiv1.VolumeSource{Projected: &apiv1.ProjectedVolumeSource{}},
+			}},
+			Containers: []apiv1.Container{{
+				Name:         "main",
+				Env:          []apiv1.EnvVar{{Name: "FOO", Value: "bar"}},
+				VolumeMounts: []apiv1.VolumeMount{{Name: projectedVolumeName, MountPath: "/var/run/secrets/kubernetes.io/serviceaccount"}},
+			}},
+			InitContainers: []apiv1.Container{{
+				Name:         "init",
+				Env:          []apiv1.EnvVar{{Name: "FOO", Value: "bar"}},
+				VolumeMounts: []apiv1.VolumeMount{{Name: projectedVolumeName, MountPath: "/var/run/secrets/kubernetes.io/serviceaccount"}},
+			}},
+		}}
+	}
+	p1, p2 := newPod("kube-api-access-abcde"), newPod("kube-api-access-fghij")
+	p1Before, p2Before := p1.DeepCopy(), p2.DeepCopy()
+
+	if !PodSpecSemanticallyEqual(p1.Spec, p2.Spec) {
+		t.Fatalf("PodSpecSemanticallyEqual() = false, want true")
+	}
+	if diff := cmp.Diff(p1Before, p1); diff != "" {
+		t.Errorf("PodSpecSemanticallyEqual() mutated the first pod (-before +after):\n%s", diff)
+	}
+	if diff := cmp.Diff(p2Before, p2); diff != "" {
+		t.Errorf("PodSpecSemanticallyEqual() mutated the second pod (-before +after):\n%s", diff)
 	}
 }
 

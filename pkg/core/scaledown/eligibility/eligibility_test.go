@@ -26,6 +26,7 @@ import (
 
 	apiv1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	testprovider "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/test"
@@ -159,6 +160,17 @@ func getTestCases(now time.Time) []testCase {
 	dsPod := BuildTestPod("dsPod", 500, 0, WithDSController())
 	dsPod.Spec.NodeName = "regular"
 
+	mixedMigNode := BuildTestNode("mixed-mig", 1000, 1000, IsReady(true))
+	for resourceName, quantity := range (apiv1.ResourceList{
+		"nvidia.com/mig-1g.5gb":  resource.MustParse("2"),
+		"nvidia.com/mig-2g.10gb": resource.MustParse("1"),
+	}) {
+		mixedMigNode.Status.Capacity[resourceName] = quantity
+		mixedMigNode.Status.Allocatable[resourceName] = quantity
+	}
+	migPod := BuildTestPod("mig-pod", 100, 100, WithNodeName(mixedMigNode.Name))
+	migPod.Spec.Containers[0].Resources.Requests["nvidia.com/mig-2g.10gb"] = resource.MustParse("1")
+
 	brokenUtilNode := BuildTestNode("regular", 0, 0)
 	resourceSliceNodeName := "regular"
 	regularNodeIncompleteResourceSlice := &resourceapi.ResourceSlice{
@@ -200,6 +212,13 @@ func getTestCases(now time.Time) []testCase {
 			pods:            []*apiv1.Pod{bigPod},
 			wantUnneeded:    []string{},
 			wantUnremovable: []*simulator.UnremovableNode{{Node: regularNode, Reason: simulator.NotUnderutilized}},
+		},
+		{
+			desc:            "mixed MIG node with a busy profile is filtered out",
+			nodes:           []*apiv1.Node{mixedMigNode},
+			pods:            []*apiv1.Pod{migPod},
+			wantUnneeded:    []string{},
+			wantUnremovable: []*simulator.UnremovableNode{{Node: mixedMigNode, Reason: simulator.NotUnderutilized}},
 		},
 		{
 			desc:            "underutilized node stays",

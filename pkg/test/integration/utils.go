@@ -19,16 +19,23 @@ package integration
 import (
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	provreqfake "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/client/clientset/versioned/fake"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	clienttesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/cluster-autoscaler/pkg/builder"
 	fakecloudprovider "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/debuggingsnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/loop"
 	fakek8s "sigs.k8s.io/cluster-autoscaler/pkg/utils/fake"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/cache/informertest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -83,6 +90,7 @@ type FakeSet struct {
 // NewFakeSet initializes a coordinated set of fakes.
 func NewFakeSet() *FakeSet {
 	kubeClient := fake.NewClientset()
+	supportPodEviction(kubeClient)
 	informerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
 	fK8s := fakek8s.NewKubernetes(kubeClient, informerFactory)
 	fCloud := fakecloudprovider.NewCloudProvider(fK8s)
@@ -105,6 +113,7 @@ func NewFakeSet() *FakeSet {
 // It shouldn't be considered a replacement for a real clientset and is mostly useful in simple unit tests.
 func NewSimpleFakeSet() *FakeSet {
 	simpleKubeClient := fake.NewSimpleClientset()
+	supportPodEviction(simpleKubeClient)
 	informerFactory := informers.NewSharedInformerFactory(simpleKubeClient, 0)
 	fK8s := fakek8s.NewKubernetes(simpleKubeClient, informerFactory)
 	fCloud := fakecloudprovider.NewCloudProvider(fK8s)
@@ -121,15 +130,47 @@ func NewSimpleFakeSet() *FakeSet {
 	}
 }
 
-// MustCreateControllerRuntimeMgr creates a controller-runtime manager with metrics and health probes disabled.
+// supportPodEviction makes the fake clientset delete a pod when it is evicted.
+// The fake treats the eviction subresource as an update of the pod, so without
+// this a drain would wait for evicted pods that never disappear.
+func supportPodEviction(kubeClient *fake.Clientset) {
+	kubeClient.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "eviction" {
+			return false, nil, nil
+		}
+		eviction, ok := action.(clienttesting.CreateAction).GetObject().(metav1.Object)
+		if !ok {
+			return false, nil, nil
+		}
+		err := kubeClient.Tracker().Delete(action.GetResource(), action.GetNamespace(), eviction.GetName())
+		return true, nil, err
+	})
+}
+
+// MustCreateControllerRuntimeMgr creates a controller-runtime manager that
+// never talks to an API server: its client is an in-memory fake and its cache
+// serves fake informers. Components that read through the manager's client can
+// therefore be exercised in tests, which seed the objects they need through
+// Manager.GetClient(). The scheme is the production one, so this covers the
+// autoscaler's CRDs as well as built-in APIs. Metrics and health probes are
+// disabled.
 func MustCreateControllerRuntimeMgr(t testing.TB) manager.Manager {
 	t.Helper()
 
+	scheme := builder.NewScheme()
+	fakeClient := fakeclient.NewClientBuilder().WithScheme(scheme).Build()
 	mgr, err := manager.New(&rest.Config{}, manager.Options{
+		Scheme: scheme,
 		Metrics: metricsserver.Options{
 			BindAddress: "0",
 		},
 		HealthProbeBindAddress: "0",
+		NewClient: func(*rest.Config, client.Options) (client.Client, error) {
+			return fakeClient, nil
+		},
+		NewCache: func(_ *rest.Config, opts cache.Options) (cache.Cache, error) {
+			return &informertest.FakeInformers{Scheme: opts.Scheme}, nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("Failed to create controller runtime manager: %v", err)

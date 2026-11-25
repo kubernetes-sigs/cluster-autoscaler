@@ -19,7 +19,6 @@ package flags
 import (
 	"flag"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -49,25 +48,23 @@ const (
 // for parsing and building the AutoscalingOptions struct from commandline flags.
 type AutoscalingFlags struct {
 	// Flags that require post-processing to be converted to the AutoscalingOptions struct
-	schedulerConfigFile        string
-	coresTotal                 string
-	memoryTotal                string
-	drainPriorityConfig        string
-	gpuTotal                   []string
-	nodeGroups                 []string
-	nodeGroupAutodiscovery     []string
-	startupTaints              []string
-	statusTaints               []string
-	ignoreTaints               []string
-	bypassedSchedulers         []string
-	allowedSchedulers          []string
-	maxGracefulTerminationSec  int
-	kubeClientQPS              float64
-	clusterSnapshotParallelism int
-	startupTaintPrefixes       []string
-	balancingIgnoreLabels      []string
-	balancingLabels            []string
-	schedulerVerbosity         int
+	schedulerConfigFile       string
+	coresTotal                string
+	memoryTotal               string
+	drainPriorityConfig       string
+	gpuTotal                  []string
+	nodeGroups                []string
+	nodeGroupAutodiscovery    []string
+	startupTaints             []string
+	statusTaints              []string
+	bypassedSchedulers        []string
+	allowedSchedulers         []string
+	maxGracefulTerminationSec int
+	kubeClientQPS             float64
+	startupTaintPrefixes      []string
+	balancingIgnoreLabels     []string
+	balancingLabels           []string
+	schedulerVerbosity        int
 	// The AutoscalingOptions struct that will be populated by the flags
 	// as a result of parsing the flags
 	o config.AutoscalingOptions
@@ -96,8 +93,9 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&p.o.NodeGroupDefaults.ScaleDownUnreadyTime, "scale-down-unready-time", config.DefaultScaleDownUnreadyTime, "How long an unready node should be unneeded before it is eligible for scale down")
 	fs.Float64Var(&p.o.NodeGroupDefaults.ScaleDownUtilizationThreshold, "scale-down-utilization-threshold", config.DefaultScaleDownUtilizationThreshold, "The maximum value between the sum of cpu requests and sum of memory requests of all pods running on the node divided by node's corresponding allocatable resource, below which a node can be considered for scale down")
 	fs.Float64Var(&p.o.NodeGroupDefaults.ScaleDownGpuUtilizationThreshold, "scale-down-gpu-utilization-threshold", config.DefaultScaleDownGpuUtilizationThreshold,
-		"Sum of gpu requests of all pods running on the node divided by node's allocatable resource, below which a node can be considered for scale down."+
-			"Utilization calculation only cares about gpu resource for accelerator node. cpu and memory utilization will be ignored.")
+		"Maximum across resources representing the selected GPU family of the sum of pod requests divided by the node's allocatable resource, at or below which a node can be considered for scale down. "+
+			"NVIDIA whole-GPU, MIG, and time-sliced resources are evaluated together. "+
+			"CPU and memory utilization are ignored for GPU nodes.")
 	fs.IntVar(&p.o.ScaleDownNonEmptyCandidatesCount, "scale-down-non-empty-candidates-count", 30,
 		"Maximum number of non empty nodes considered in one iteration as candidates for scale down with drain."+
 			"Lower value means better CA responsiveness but possible slower scale down latency."+
@@ -200,6 +198,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&p.o.ForceDeleteLongUnregisteredNodes, "force-delete-unregistered-nodes", false, "Whether to enable force deletion of long unregistered nodes, regardless of the min size of the node group the belong to.")
 	fs.BoolVar(&p.o.ForceDeleteFailedNodes, "force-delete-failed-nodes", false, "Whether to enable force deletion of failed nodes, regardless of the min size of the node group the belong to.")
 	fs.BoolVar(&p.o.CSINodeAwareSchedulingEnabled, "enable-csi-node-aware-scheduling", true, "Whether logic for handling CSINode objects is enabled.")
+	fs.BoolVar(&p.o.PodGroupSupportEnabled, "enable-pod-group-support", false, "Whether logic for handling scheduling.k8s.io PodGroups is enabled: nodes hosting pods of gang-scheduled PodGroups (gang policy with minCount > 1) are not scaled down. Requires the GenericWorkload feature gate and the scheduling.k8s.io/v1beta1 API to be enabled on the API server.")
 	fs.IntVar(&p.o.PredicateParallelism, "predicate-parallelism", 4, "Maximum parallelism of scheduler predicate checking.")
 	fs.StringVar(&p.o.CheckCapacityProcessorInstance, "check-capacity-processor-instance", "", "Name of the processor instance. Only ProvisioningRequests that define this name in their parameters with the key \"processorInstance\" will be processed by this CA instance. It only refers to check capacity ProvisioningRequests, but if not empty, best-effort atomic ProvisioningRequests processing is disabled in this instance. Not recommended: Until CA 1.35, ProvisioningRequests with this name as prefix in their class will be also processed.")
 	fs.DurationVar(&p.o.NodeDeletionCandidateTTL, "node-deletion-candidate-ttl", time.Duration(0), "Maximum time a node can be marked as removable before the marking becomes stale. This sets the TTL of Cluster-Autoscaler's state if the Cluste-Autoscaler deployment becomes inactive (default 0s)")
@@ -213,12 +212,10 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&p.o.PendingPodsBatchingTimeout, "pending-pods-batching-timeout", 4*time.Minute, "The maximum time spends when running scheduling simulations when preparing the batch of pods passed to scale up logic. This timeout is used in core filter-out pod list processor.")
 	fs.BoolVar(&p.o.GracefulDegradationEnabled, "enable-graceful-degradation", false, "Enables graceful degradation for unschedulable pods. When enabled, scheduling simulations during filter out pod list processor will be stopped after a timeout(specified by scheduling-simulation-timeout) and CA will proceed with a sub set of pods.")
 	fs.BoolVar(&p.o.InterPodAffinityHostnameFastPath, "enable-inter-pod-affinity-hostname-fast-path", false, "Enable the InterPodAffinityHostnameFastPath scheduler feature gate.")
+	fs.BoolVar(&p.o.ScaleDownEnabled, "scale-down-enabled", true, "Should CA scale down the cluster")
 
 	// Deprecated flags
-	fs.StringArrayVar(&p.ignoreTaints, "ignore-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group (Deprecated, use startup-taints instead)")
 	fs.BoolVar(&p.o.DynamicResourceAllocationEnabled, "enable-dynamic-resource-allocation", true, "Handle DRA (Dynamic Resource Allocation) objects, locked to true.")
-	fs.IntVar(&p.clusterSnapshotParallelism, "cluster-snapshot-parallelism", 16, "Maximum parallelism of cluster snapshot creation (Deprecated, use predicate-parallelism instead)")
-	fs.BoolVar(&p.o.ScaleDownEnabled, "scale-down-enabled", true, "[Deprecated] Should CA scale down the cluster")
 
 	// Properties specific to the cloud provider, but kept for the sake of POC
 	fs.StringArrayVar(&p.nodeGroups, "nodes", []string{}, "sets min,max size and other configuration data for a node group in a format accepted by cloud provider. Can be used multiple times. Format: <min>:<max>:<other...>")
@@ -235,7 +232,7 @@ func (p *AutoscalingFlags) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&p.memoryTotal, "memory-total", minMaxFlagString(0, config.DefaultMaxClusterMemory), "Minimum and maximum number of gigabytes of memory in cluster, in the format <min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers.")
 	fs.IntVar(&p.maxGracefulTerminationSec, "max-graceful-termination-sec", MaxGracefulTerminationSecDefault, "Maximum number of seconds CA waits for pod termination when trying to scale down a node. This flag is mutually exclusion with drain-priority-config flag which allows more configuration options.")
 	fs.StringArrayVar(&p.gpuTotal, "gpu-total", []string{}, "Minimum and maximum number of different GPUs in cluster, in the format <gpu_type>:<min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers. Can be passed multiple times. CURRENTLY THIS FLAG ONLY WORKS ON GKE.")
-	fs.StringArrayVar(&p.startupTaints, "startup-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group (Equivalent to ignore-taint)")
+	fs.StringArrayVar(&p.startupTaints, "startup-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group")
 	fs.StringArrayVar(&p.statusTaints, "status-taint", []string{}, "Specifies a taint to ignore in node templates when considering to scale a node group but nodes will not be treated as unready")
 	fs.StringSliceVar(&p.bypassedSchedulers, "bypassed-scheduler-names", []string{}, "Names of schedulers to bypass. If set to non-empty value, CA will not wait for pods to reach a certain age before triggering a scale-up.")
 	fs.StringSliceVar(&p.allowedSchedulers, "allowed-scheduler-names", []string{}, "If set to non-empty value, CA will proceed only with pods targeting schedulers in the list, from the list of unschedulable and scheduler unprocessed pods")
@@ -305,10 +302,6 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 		return config.AutoscalingOptions{}, err
 	}
 
-	if p.o.ScaleDownEnabled == false {
-		klog.Warningf("--scale-down-enabled flag is deprecated and will be removed in a future release")
-	}
-
 	maxHealthCheckTimeout := max(p.o.MaxInactivityTime, p.o.MaxFailingTime, p.o.MaxStartupTime)
 	if p.o.MaxStartupTime < maxHealthCheckTimeout {
 		klog.Warningf("--max-startup-time needs to be at least as high as --max-failing-time and --max-inactivity, overriding it to the highest value out of them: %v", maxHealthCheckTimeout)
@@ -331,7 +324,7 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 
 	p.o.AllowedSchedulers = allowedSchedulers
 	p.o.BypassedSchedulers = scheduler_util.SchedulersMap(p.bypassedSchedulers)
-	p.o.StartupTaints = slices.Concat(p.ignoreTaints, p.startupTaints)
+	p.o.StartupTaints = p.startupTaints
 	p.o.MaxGracefulTerminationSec = p.maxGracefulTerminationSec
 	p.o.NodeGroupAutoDiscovery = p.nodeGroupAutodiscovery
 	p.o.DrainPriorityConfig = drainPriorityConfigMap

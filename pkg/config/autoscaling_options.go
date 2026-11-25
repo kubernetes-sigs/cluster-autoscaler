@@ -40,7 +40,9 @@ type NodeGroupAutoscalingOptions struct {
 	// ScaleDownUtilizationThreshold sets threshold for nodes to be considered for scale down if cpu or memory utilization is over threshold.
 	// Well-utilized nodes are not touched.
 	ScaleDownUtilizationThreshold float64
-	// ScaleDownGpuUtilizationThreshold sets threshold for gpu nodes to be considered for scale down if gpu utilization is over threshold.
+	// ScaleDownGpuUtilizationThreshold sets the maximum per-resource utilization
+	// across resources representing the selected GPU family, at or below which a
+	// node can be considered for scale down.
 	// Well-utilized nodes are not touched.
 	ScaleDownGpuUtilizationThreshold float64
 	// ScaleDownUnneededTime sets the duration CA expects a node to be unneeded/eligible for removal
@@ -337,6 +339,10 @@ type AutoscalingOptions struct {
 	DynamicResourceAllocationEnabled bool
 	// CSINodeAwareSchedulingEnabled configures whether logic for handling CSINode objects is enabled.
 	CSINodeAwareSchedulingEnabled bool
+	// PodGroupSupportEnabled configures whether logic for handling scheduling.k8s.io PodGroups is
+	// enabled: nodes hosting pods of gang-scheduled PodGroups are not scaled down. It requires the
+	// GenericWorkload feature gate and the scheduling.k8s.io/v1beta1 API to be enabled on the API server.
+	PodGroupSupportEnabled bool
 	// PredicateParallelism is the number of goroutines to use for running scheduler predicates.
 	PredicateParallelism int
 	// CheckCapacityProcessorInstance is the name of the processor instance.

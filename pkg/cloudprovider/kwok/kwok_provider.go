@@ -153,7 +153,7 @@ func (kwok *KwokCloudProvider) Refresh(ctx context.Context) error {
 	}
 
 	for _, ng := range kwok.nodeGroups {
-		ng.targetSize = targetSizeInCluster[ng.Id()]
+		ng.setTargetSize(targetSizeInCluster[ng.Id()])
 	}
 
 	return nil

@@ -54,6 +54,7 @@ func TestCalculateUsages(t *testing.T) {
 				"cluster-wide": {
 					"cpu":    6,
 					"memory": 14000,
+					"pods":   300,
 					"nodes":  3,
 				},
 			},
@@ -79,11 +80,13 @@ func TestCalculateUsages(t *testing.T) {
 				"pool-a": {
 					"cpu":    4,
 					"memory": 10000,
+					"pods":   200,
 					"nodes":  2,
 				},
 				"pool-b": {
 					"cpu":    2,
 					"memory": 4000,
+					"pods":   100,
 					"nodes":  1,
 				},
 			},
@@ -106,6 +109,7 @@ func TestCalculateUsages(t *testing.T) {
 				"cluster-wide": {
 					"cpu":    4,
 					"memory": 10000,
+					"pods":   200,
 					"nodes":  2,
 				},
 			},
@@ -146,6 +150,7 @@ func TestCalculateUsages(t *testing.T) {
 				"cluster-wide": {
 					"cpu":    3,
 					"memory": 6000,
+					"pods":   200,
 					"gpu":    2,
 					"nodes":  2,
 				},
@@ -173,11 +178,13 @@ func TestCalculateUsages(t *testing.T) {
 				"pool-a": {
 					"cpu":    1,
 					"memory": 2000,
+					"pods":   100,
 					"nodes":  1,
 				},
 				"pool-b": {
 					"cpu":    2,
 					"memory": 4000,
+					"pods":   100,
 					"nodes":  1,
 				},
 			},

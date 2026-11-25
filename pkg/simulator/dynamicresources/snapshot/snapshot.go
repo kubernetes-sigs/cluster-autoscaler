@@ -254,24 +254,12 @@ func (s *Snapshot) Fork() {
 
 // listDeviceClasses retrieves all effective DeviceClasses from the snapshot.
 func (s *Snapshot) listDeviceClasses() []*resourceapi.DeviceClass {
-	deviceClasses := s.deviceClasses.AsMap()
-	deviceClassesList := make([]*resourceapi.DeviceClass, 0, len(deviceClasses))
-	for _, class := range deviceClasses {
-		deviceClassesList = append(deviceClassesList, class)
-	}
-
-	return deviceClassesList
+	return s.deviceClasses.ValuesSlice()
 }
 
 // listResourceClaims retrieves all effective ResourceClaims from the snapshot.
 func (s *Snapshot) listResourceClaims() []*resourceapi.ResourceClaim {
-	claims := s.resourceClaims.AsMap()
-	claimsList := make([]*resourceapi.ResourceClaim, 0, len(claims))
-	for _, claim := range claims {
-		claimsList = append(claimsList, claim)
-	}
-
-	return claimsList
+	return s.resourceClaims.ValuesSlice()
 }
 
 // configureResourceClaim updates or adds a ResourceClaim in the current patch layer.
@@ -288,9 +276,10 @@ func (s *Snapshot) getResourceClaim(claimId ResourceClaimId) (*resourceapi.Resou
 
 // listResourceSlices retrieves all effective ResourceSlices from the snapshot.
 func (s *Snapshot) listResourceSlices() []*resourceapi.ResourceSlice {
-	resourceSlices := s.resourceSlices.AsMap()
-	resourceSlicesList := make([]*resourceapi.ResourceSlice, 0, len(resourceSlices))
-	for _, nodeSlices := range resourceSlices {
+	// Values are per-node lists of slices, so flatten them without
+	// materializing an intermediate map.
+	resourceSlicesList := make([]*resourceapi.ResourceSlice, 0, s.resourceSlices.Len())
+	for nodeSlices := range s.resourceSlices.Values() {
 		resourceSlicesList = append(resourceSlicesList, nodeSlices...)
 	}
 
@@ -355,7 +344,13 @@ func (s *Snapshot) findPodClaims(pod *apiv1.Pod, ignoreNotTracked bool) ([]*reso
 func (s *Snapshot) ensureClaimWritable(claim *resourceapi.ResourceClaim) *resourceapi.ResourceClaim {
 	claimId := GetClaimId(claim)
 	if s.resourceClaims.InCurrentPatch(claimId) {
-		return claim
+		// A Pod can reference the same claim through more than one alias, in which case
+		// the caller's claim may still be the base layer's pointer even though this claim
+		// id already has a copy in the current patch from an earlier alias. Fetch that
+		// copy instead of trusting the caller, or an in-place mutation would land on the
+		// base object and survive a Revert.
+		current, _ := s.resourceClaims.FindValue(claimId)
+		return current
 	}
 
 	return claim.DeepCopy()

@@ -177,6 +177,139 @@ func TestCalculate(t *testing.T) {
 	assert.Zero(t, utilInfo.Utilization)
 }
 
+func TestCalculateWithMultipleGpuResources(t *testing.T) {
+	for _, tc := range []struct {
+		testName        string
+		allocatable     apiv1.ResourceList
+		requests        apiv1.ResourceList
+		gpuResourceName apiv1.ResourceName
+		wantUtilInfo    Info
+	}{
+		{
+			testName: "busy MIG profile is not hidden by an idle profile",
+			allocatable: apiv1.ResourceList{
+				"nvidia.com/mig-1g.5gb":  resource.MustParse("2"),
+				"nvidia.com/mig-2g.10gb": resource.MustParse("1"),
+			},
+			requests: apiv1.ResourceList{
+				"nvidia.com/mig-2g.10gb": resource.MustParse("1"),
+			},
+			gpuResourceName: "nvidia.com/mig-1g.5gb",
+			wantUtilInfo:    Info{GpuUtil: 1, Utilization: 1, ResourceName: "nvidia.com/mig-2g.10gb"},
+		},
+		{
+			testName: "time-sliced MIG profiles use their own allocatable quantities",
+			allocatable: apiv1.ResourceList{
+				"nvidia.com/mig-1g.5gb.shared":  resource.MustParse("16"),
+				"nvidia.com/mig-2g.10gb.shared": resource.MustParse("8"),
+			},
+			requests: apiv1.ResourceList{
+				"nvidia.com/mig-1g.5gb.shared":  resource.MustParse("4"),
+				"nvidia.com/mig-2g.10gb.shared": resource.MustParse("6"),
+			},
+			gpuResourceName: "nvidia.com/mig-1g.5gb.shared",
+			wantUtilInfo:    Info{GpuUtil: 0.75, Utilization: 0.75, ResourceName: "nvidia.com/mig-2g.10gb.shared"},
+		},
+		{
+			testName: "whole GPUs do not hide a busy MIG profile",
+			allocatable: apiv1.ResourceList{
+				gpu.ResourceNvidiaGPU:    resource.MustParse("1"),
+				"nvidia.com/mig-2g.10gb": resource.MustParse("1"),
+			},
+			requests: apiv1.ResourceList{
+				"nvidia.com/mig-2g.10gb": resource.MustParse("1"),
+			},
+			gpuResourceName: gpu.ResourceNvidiaGPU,
+			wantUtilInfo:    Info{GpuUtil: 1, Utilization: 1, ResourceName: "nvidia.com/mig-2g.10gb"},
+		},
+		{
+			testName: "busy AMD GPU does not affect selected NVIDIA GPU",
+			allocatable: apiv1.ResourceList{
+				gpu.ResourceNvidiaGPU: resource.MustParse("1"),
+				gpu.ResourceAMDGPU:    resource.MustParse("1"),
+			},
+			requests: apiv1.ResourceList{
+				gpu.ResourceAMDGPU: resource.MustParse("1"),
+			},
+			gpuResourceName: gpu.ResourceNvidiaGPU,
+			wantUtilInfo:    Info{ResourceName: gpu.ResourceNvidiaGPU},
+		},
+		{
+			testName: "busy NVIDIA GPU does not affect selected AMD GPU",
+			allocatable: apiv1.ResourceList{
+				gpu.ResourceAMDGPU:    resource.MustParse("1"),
+				gpu.ResourceNvidiaGPU: resource.MustParse("1"),
+			},
+			requests: apiv1.ResourceList{
+				gpu.ResourceNvidiaGPU: resource.MustParse("1"),
+			},
+			gpuResourceName: gpu.ResourceAMDGPU,
+			wantUtilInfo:    Info{ResourceName: gpu.ResourceAMDGPU},
+		},
+		{
+			testName: "MIG selection includes busy whole NVIDIA GPU",
+			allocatable: apiv1.ResourceList{
+				"nvidia.com/mig-1g.5gb": resource.MustParse("2"),
+				gpu.ResourceNvidiaGPU:   resource.MustParse("1"),
+			},
+			requests: apiv1.ResourceList{
+				gpu.ResourceNvidiaGPU: resource.MustParse("1"),
+			},
+			gpuResourceName: "nvidia.com/mig-1g.5gb",
+			wantUtilInfo:    Info{GpuUtil: 1, Utilization: 1, ResourceName: gpu.ResourceNvidiaGPU},
+		},
+		{
+			testName: "unready configured GPU does not hide a busy MIG profile",
+			allocatable: apiv1.ResourceList{
+				gpu.ResourceNvidiaGPU:    resource.MustParse("0"),
+				"nvidia.com/mig-2g.10gb": resource.MustParse("1"),
+			},
+			requests: apiv1.ResourceList{
+				"nvidia.com/mig-2g.10gb": resource.MustParse("1"),
+			},
+			gpuResourceName: gpu.ResourceNvidiaGPU,
+			wantUtilInfo:    Info{GpuUtil: 1, Utilization: 1, ResourceName: "nvidia.com/mig-2g.10gb"},
+		},
+		{
+			testName: "provider-specific GPU ignores other vendor and non-GPU resources",
+			allocatable: apiv1.ResourceList{
+				"example.com/accelerator": resource.MustParse("4"),
+				"nvidia.com/mig-1g.5gb":   resource.MustParse("2"),
+				gpu.ResourceAMDGPU:        resource.MustParse("1"),
+				"nvidia.com/hostdev":      resource.MustParse("1"),
+			},
+			requests: apiv1.ResourceList{
+				"example.com/accelerator": resource.MustParse("3"),
+				"nvidia.com/mig-1g.5gb":   resource.MustParse("2"),
+				gpu.ResourceAMDGPU:        resource.MustParse("1"),
+				"nvidia.com/hostdev":      resource.MustParse("1"),
+			},
+			gpuResourceName: "example.com/accelerator",
+			wantUtilInfo:    Info{GpuUtil: 0.75, Utilization: 0.75, ResourceName: "example.com/accelerator"},
+		},
+	} {
+		t.Run(tc.testName, func(t *testing.T) {
+			node := BuildTestNode("gpu-node", 2000, 2000000)
+			for resourceName, quantity := range tc.allocatable {
+				node.Status.Capacity[resourceName] = quantity
+				node.Status.Allocatable[resourceName] = quantity
+			}
+			pod := BuildTestPod("gpu-pod", 900, 900)
+			for resourceName, quantity := range tc.requests {
+				pod.Spec.Containers[0].Resources.Requests[resourceName] = quantity
+			}
+			nodeInfo := framework.NewTestNodeInfo(node, pod)
+			gpuConfig := &cloudprovider.GpuConfig{ExtendedResourceName: tc.gpuResourceName}
+
+			utilInfo, err := Calculate(context.Background(), nodeInfo, false, false, false, gpuConfig, time.Now())
+			assert.NoError(t, err)
+			if diff := cmp.Diff(tc.wantUtilInfo, utilInfo); diff != "" {
+				t.Errorf("Calculate(): unexpected output (-want +got): %s", diff)
+			}
+		})
+	}
+}
+
 func TestCalculateWithDynamicResources(t *testing.T) {
 	now := time.Date(2024, 12, 4, 0, 0, 0, 0, time.UTC)
 	node := BuildTestNode("node", 1000, 1000)

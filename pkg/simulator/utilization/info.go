@@ -19,12 +19,14 @@ package utilization
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	drautils "sigs.k8s.io/cluster-autoscaler/pkg/simulator/dynamicresources/utils"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/drain"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/gpu"
 	podutils "sigs.k8s.io/cluster-autoscaler/pkg/utils/pod"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -40,26 +42,43 @@ type Info struct {
 	DynamicResourceUtil float64
 	// Resource name of highest utilization resource
 	ResourceName apiv1.ResourceName
-	// Max(CpuUtil, MemUtil) or GpuUtils
+	// Max(CpuUtil, MemUtil), highest GPU resource utilization, or DynamicResourceUtil.
 	Utilization float64
 }
 
-// Calculate calculates utilization of a node, defined as maximum of (cpu,
-// memory) or gpu utilization based on if the node has GPU or not. Per resource
-// utilization is the sum of requests for it divided by allocatable. It also
-// returns the individual cpu, memory and gpu utilization.
+// Calculate calculates utilization of a node, defined as the maximum of CPU and
+// memory utilization, or the highest per-resource GPU utilization for GPU nodes.
+// Per-resource utilization is the sum of requests for it divided by allocatable.
+// It also returns the individual CPU, memory and GPU utilization.
 func Calculate(ctx context.Context, nodeInfo *framework.NodeInfo, skipDaemonSetPods, skipMirrorPods, draEnabled bool, gpuConfig *cloudprovider.GpuConfig, currentTime time.Time) (utilInfo Info, err error) {
 	logger := klog.FromContext(ctx)
 	if gpuConfig != nil && !gpuConfig.ExposedViaDra() {
-		gpuUtil, err := CalculateUtilizationOfResource(nodeInfo, gpuConfig.ExtendedResourceName, skipDaemonSetPods, skipMirrorPods, currentTime)
-		if err != nil {
-			logger.V(3).Info("Node has unready GPU resource", "node", klog.KObj(nodeInfo.Node()), "resourceName", gpuConfig.ExtendedResourceName, "err", err)
-
-			// Return 0 if GPU is unready. This will guarantee we can still scale down a node with unready GPU.
-			return Info{GpuUtil: 0, ResourceName: gpuConfig.ExtendedResourceName, Utilization: 0}, nil
+		gpuResources := []apiv1.ResourceName{gpuConfig.ExtendedResourceName}
+		if gpu.IsNvidiaGPUResource(gpuConfig.ExtendedResourceName) {
+			for resourceName, allocatable := range nodeInfo.Node().Status.Allocatable {
+				if resourceName != gpuConfig.ExtendedResourceName && gpu.IsNvidiaGPUResource(resourceName) && !allocatable.IsZero() {
+					gpuResources = append(gpuResources, resourceName)
+				}
+			}
 		}
+		// Keep the provider-selected resource first so it wins utilization ties.
+		slices.Sort(gpuResources[1:])
+
+		gpuUtilInfo := Info{ResourceName: gpuConfig.ExtendedResourceName}
+		for _, resourceName := range gpuResources {
+			gpuUtil, err := CalculateUtilizationOfResource(nodeInfo, resourceName, skipDaemonSetPods, skipMirrorPods, currentTime)
+			if err != nil {
+				logger.V(3).Info("Node has unready GPU resource", "node", klog.KObj(nodeInfo.Node()), "resourceName", resourceName, "err", err)
+				// Unready GPU resources contribute zero utilization so they do not block scale-down.
+				continue
+			}
+			if gpuUtil > gpuUtilInfo.GpuUtil {
+				gpuUtilInfo = Info{GpuUtil: gpuUtil, ResourceName: resourceName, Utilization: gpuUtil}
+			}
+		}
+
 		// Skips cpu and memory utilization calculation for node with GPU.
-		return Info{GpuUtil: gpuUtil, ResourceName: gpuConfig.ExtendedResourceName, Utilization: gpuUtil}, err
+		return gpuUtilInfo, nil
 	}
 
 	if draEnabled && len(nodeInfo.LocalResourceSlices) > 0 {
