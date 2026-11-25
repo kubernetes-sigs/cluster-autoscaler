@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/expander"
+	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
 )
 
 // TimeLimiter limits binpacking based on the total time spends on binpacking.
@@ -63,6 +64,7 @@ func (b *TimeLimiter) StopBinpacking(ctx context.Context, autoscalingCtx *ca_con
 	now := b.now()
 	if now.After(b.startTime.Add(b.maxBinpackingDuration)) {
 		logger.Info("Binpacking is cut short due to exceeding maxBinpackingDuration", "duration", now.Sub(b.startTime), "maxDuration", b.maxBinpackingDuration)
+		metrics.RegisterTimeout(metrics.BinpackingTimeout)
 		return true
 	}
 	return false
