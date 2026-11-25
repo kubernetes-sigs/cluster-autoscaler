@@ -74,6 +74,12 @@ func (s staticSchedulablePodGroups) Delete(nodeGroupId string) {
 // pod equivalence groups, within a single snapshot fork. Results are never partial, so similar node
 // groups can be compared reliably.
 //
+// If the context deadline is exceeded before all pod equivalence groups were evaluated for a node
+// group, it is as if nothing happened: no result is returned or cached, pod equivalence groups are
+// not updated, and the node group stays unevaluated and is remembered as dropped. Dropped node groups
+// are not computed again by the cache, e.g. when looked up as similar node groups, so a slow node
+// group is simulated at most once during binpacking.
+//
 // Only eligible node groups (node groups valid for scale-up and node groups created during the
 // scale-up) are computed. Other node groups, e.g. skipped ones returned by FindSimilarNodeGroups,
 // are unknown to the cache.
@@ -90,6 +96,9 @@ type schedulablePodGroupsCache struct {
 	computed   map[string][]estimator.PodEquivalenceGroup
 	// evaluations is the number of node groups simulated by the cache.
 	evaluations int
+	// dropped holds node groups whose computation was dropped because the context was done. They
+	// stay unevaluated and were not considered for binpacking.
+	dropped map[string]bool
 }
 
 func newSchedulablePodGroupsCache(
@@ -109,6 +118,7 @@ func newSchedulablePodGroupsCache(
 		nodeGroups:           slices.Clone(nodeGroups),
 		eligible:             eligible,
 		computed:             make(map[string][]estimator.PodEquivalenceGroup, len(nodeGroups)),
+		dropped:              make(map[string]bool),
 	}
 }
 
@@ -118,31 +128,42 @@ func (c *schedulablePodGroupsCache) Get(ctx context.Context, nodeGroupId string)
 		return podGroups, true
 	}
 	nodeGroup, found := c.eligible[nodeGroupId]
-	if !found {
+	if !found || c.dropped[nodeGroupId] {
 		return nil, false
 	}
-	return c.compute(ctx, nodeGroup)
+	return c.compute(ctx, nodeGroup, true)
 }
 
 // computeAll computes schedulable pod groups for all eligible node groups which weren't computed
-// yet. It is used when lazy computation is disabled.
+// yet, without any time limit. It is used when lazy computation is disabled.
 func (c *schedulablePodGroupsCache) computeAll(ctx context.Context) {
 	for _, nodeGroup := range c.nodeGroups {
 		if _, found := c.computed[nodeGroup.Id()]; !found {
-			c.compute(ctx, nodeGroup)
+			c.compute(ctx, nodeGroup, false)
 		}
 	}
 }
 
-// compute computes and caches schedulable pod groups for the node group.
-func (c *schedulablePodGroupsCache) compute(ctx context.Context, nodeGroup cloudprovider.NodeGroup) ([]estimator.PodEquivalenceGroup, bool) {
+// compute computes and caches schedulable pod groups for the node group. If stopOnContextDone is
+// set and the computation is stopped before all pod equivalence groups were evaluated, the node
+// group is remembered as dropped and no result is returned.
+func (c *schedulablePodGroupsCache) compute(ctx context.Context, nodeGroup cloudprovider.NodeGroup, stopOnContextDone bool) ([]estimator.PodEquivalenceGroup, bool) {
 	nodeGroupId := nodeGroup.Id()
+	logger := klog.FromContext(ctx)
 	var podGroups []estimator.PodEquivalenceGroup
 	// Node groups valid for scale-up always have node infos, so this is not expected to happen.
 	if nodeInfo, found := c.nodeInfos[nodeGroupId]; !found {
-		klog.FromContext(ctx).Error(nil, "No node info for node group, assuming no pods can be scheduled on it", "nodeGroupId", nodeGroupId)
+		logger.Error(nil, "No node info for node group, assuming no pods can be scheduled on it", "nodeGroupId", nodeGroupId)
 	} else {
-		podGroups = c.orchestrator.SchedulablePodGroups(ctx, c.podEquivalenceGroups, nodeGroup, nodeInfo)
+		var evaluated int
+		podGroups, evaluated = c.orchestrator.schedulablePodGroups(ctx, c.podEquivalenceGroups, nodeGroup, nodeInfo, stopOnContextDone)
+		if evaluated < len(c.podEquivalenceGroups) {
+			// The computation was stopped: drop the partial result. Pod equivalence groups were not updated.
+			logger.V(1).Info("Couldn't compute schedulable pod groups in time", "nodeGroupId", nodeGroupId,
+				"maxDuration", c.orchestrator.autoscalingCtx.MaxPerNodeGroupSchedulablePodGroupsDuration, "evaluatedPodGroups", evaluated, "podGroups", len(c.podEquivalenceGroups))
+			c.dropped[nodeGroupId] = true
+			return nil, false
+		}
 		c.evaluations++
 	}
 	c.computed[nodeGroupId] = podGroups
@@ -157,23 +178,55 @@ func (c *schedulablePodGroupsCache) Set(nodeGroup cloudprovider.NodeGroup, podGr
 	}
 	c.eligible[nodeGroupId] = nodeGroup
 	c.computed[nodeGroupId] = podGroups
+	delete(c.dropped, nodeGroupId)
 }
 
 // Delete implements schedulablePodGroupsStore.
 func (c *schedulablePodGroupsCache) Delete(nodeGroupId string) {
 	delete(c.eligible, nodeGroupId)
 	delete(c.computed, nodeGroupId)
+	delete(c.dropped, nodeGroupId)
 	c.nodeGroups = slices.DeleteFunc(c.nodeGroups, func(ng cloudprovider.NodeGroup) bool { return ng.Id() == nodeGroupId })
 }
 
-// unevaluated returns the eligible node groups for which schedulable pod groups were not computed,
-// in binpacking order.
+// schedulableOnDropped returns whether the pod equivalence group is schedulable on any node group
+// which was dropped from binpacking (so scaling it up wasn't considered for the pod equivalence
+// group), and whether it is schedulable only on such node groups. Node groups with a scheduling
+// error, e.g. because scaling them up failed, can't help the pod equivalence group anymore, so they
+// are ignored.
+func (c *schedulablePodGroupsCache) schedulableOnDropped(eg *equivalence.PodGroup) (onAnyDropped, onlyOnDropped bool) {
+	if !eg.Schedulable || len(eg.SchedulableGroups) == 0 {
+		return false, false
+	}
+	onlyOnDropped = true
+	for _, nodeGroupId := range eg.SchedulableGroups {
+		if _, failed := eg.SchedulingErrors[nodeGroupId]; failed {
+			continue
+		}
+		if c.dropped[nodeGroupId] {
+			onAnyDropped = true
+		} else {
+			onlyOnDropped = false
+		}
+	}
+	return onAnyDropped, onAnyDropped && onlyOnDropped
+}
+
+// unevaluated returns the eligible node groups for which schedulable pod groups were not computed:
+// node groups not reached by binpacking first, in binpacking order, then node groups dropped from
+// binpacking. Dropped node groups already exceeded their maximum duration once, so they are the
+// least likely to be evaluated within the reporting budget.
 func (c *schedulablePodGroupsCache) unevaluated() []cloudprovider.NodeGroup {
-	var result []cloudprovider.NodeGroup
+	var result, dropped []cloudprovider.NodeGroup
 	for _, nodeGroup := range c.nodeGroups {
-		if _, found := c.computed[nodeGroup.Id()]; !found {
+		if _, found := c.computed[nodeGroup.Id()]; found {
+			continue
+		}
+		if c.dropped[nodeGroup.Id()] {
+			dropped = append(dropped, nodeGroup)
+		} else {
 			result = append(result, nodeGroup)
 		}
 	}
-	return result
+	return append(result, dropped...)
 }

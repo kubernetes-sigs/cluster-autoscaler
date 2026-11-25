@@ -478,6 +478,102 @@ func TestLazySchedulablePodGroupsSkippedNodeGroupsSimulationDeadline(t *testing.
 	}
 }
 
+func TestLazySchedulablePodGroupsNodeGroupMaxDurationDropsNodeGroup(t *testing.T) {
+	env := newLazyTestEnv(t, []lazyTestNodeGroup{
+		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
+		{id: "ng2", cpu: 1000, mem: 1000, size: 1, max: 10},
+	}, func(o *config.AutoscalingOptions) {
+		o.MaxPerNodeGroupSchedulablePodGroupsDuration = 20 * time.Millisecond
+	}, 0)
+	// Computing schedulable pod groups for ng1 exceeds the maximum duration.
+	env.snapshot.onCheck = func(id string, _ int) {
+		if id == "ng1" {
+			time.Sleep(60 * time.Millisecond)
+		}
+	}
+
+	scaleUpStatus := env.scaleUp(t,
+		utilstest.BuildTestPod("p1", 500, 0),
+		utilstest.BuildTestPod("p2", 400, 0),
+	)
+
+	assert.True(t, scaleUpStatus.WasSuccessful())
+	// ng1 was dropped after its first pod group, binpacking continued with ng2.
+	assert.Equal(t, 1, env.snapshot.checks["ng1"])
+	assert.Len(t, env.expander.options, 1)
+	assert.Equal(t, "ng2", scaleUpStatus.ScaleUpInfos[0].Group.Id())
+	// Nothing was recorded for ng1: both pods are schedulable on ng2 only.
+	assert.Empty(t, scaleUpStatus.PodsRemainUnschedulable)
+	assert.Empty(t, scaleUpStatus.PodsAwaitEvaluation)
+}
+
+func TestLazySchedulablePodGroupsNodeGroupMaxDurationExceededEverywhere(t *testing.T) {
+	env := newLazyTestEnv(t, []lazyTestNodeGroup{
+		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
+		{id: "ng2", cpu: 1000, mem: 1000, size: 1, max: 10},
+	}, func(o *config.AutoscalingOptions) { o.MaxPerNodeGroupSchedulablePodGroupsDuration = time.Nanosecond }, 0)
+
+	scaleUpStatus := env.scaleUp(t, utilstest.BuildTestPod("p1", 500, 0))
+
+	// No node group could be evaluated, neither for binpacking nor for reporting, so the pod awaits
+	// evaluation instead of being reported as unschedulable.
+	assert.Equal(t, status.ScaleUpNoOptionsAvailable, scaleUpStatus.Result)
+	assert.Empty(t, env.snapshot.checks)
+	assert.Empty(t, scaleUpStatus.PodsRemainUnschedulable)
+	assert.Equal(t, []string{"p1"}, podNames(scaleUpStatus.PodsAwaitEvaluation))
+}
+
+func TestLazySchedulablePodGroupsNodeGroupDroppedFromBinpackingNoOptions(t *testing.T) {
+	env := newLazyTestEnv(t, []lazyTestNodeGroup{
+		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
+	}, func(o *config.AutoscalingOptions) {
+		o.MaxPerNodeGroupSchedulablePodGroupsDuration = 20 * time.Millisecond
+	}, 0)
+	// ng1 exceeds the maximum duration during binpacking only.
+	env.snapshot.onCheck = func(id string, count int) {
+		if id == "ng1" && count == 1 {
+			time.Sleep(60 * time.Millisecond)
+		}
+	}
+
+	scaleUpStatus := env.scaleUp(t, utilstest.BuildTestPod("p1", 500, 0), utilstest.BuildTestPod("p2", 400, 0))
+
+	// ng1 was dropped after its first check. Reporting doesn't evaluate it again for the same pod
+	// groups, which would most likely exceed the maximum duration again.
+	assert.Equal(t, 1, env.snapshot.checks["ng1"])
+	// The pods weren't evaluated against ng1, which binpacking never considered: they are not
+	// reported as unhelpable ("no scale-up options available"), but as awaiting evaluation.
+	assert.Equal(t, status.ScaleUpNoOptionsAvailable, scaleUpStatus.Result)
+	assert.Empty(t, scaleUpStatus.PodsRemainUnschedulable)
+	assert.Equal(t, []string{"p1", "p2"}, podNames(scaleUpStatus.PodsAwaitEvaluation))
+}
+
+func TestLazySchedulablePodGroupsNodeGroupDroppedFromBinpackingOtherOptionChosen(t *testing.T) {
+	env := newLazyTestEnv(t, []lazyTestNodeGroup{
+		{id: "ng1", cpu: 4000, mem: 1000, size: 1, max: 10},
+		{id: "ng2", cpu: 1000, mem: 1000, size: 1, max: 10},
+	}, func(o *config.AutoscalingOptions) {
+		o.MaxPerNodeGroupSchedulablePodGroupsDuration = 20 * time.Millisecond
+	}, 0)
+	// ng1 exceeds the maximum duration during binpacking only; the reporting simulation succeeds.
+	env.snapshot.onCheck = func(id string, count int) {
+		if id == "ng1" && count == 1 {
+			time.Sleep(60 * time.Millisecond)
+		}
+	}
+
+	scaleUpStatus := env.scaleUp(t, utilstest.BuildTestPod("small", 500, 0), utilstest.BuildTestPod("big", 3000, 0))
+
+	// ng1 was dropped after its first check, then evaluated by reporting for big only.
+	assert.Equal(t, 2, env.snapshot.checks["ng1"])
+	// small is scaled up on ng2. big fits only ng1, which was dropped from binpacking.
+	assert.True(t, scaleUpStatus.WasSuccessful())
+	assert.Equal(t, "ng2", scaleUpStatus.ScaleUpInfos[0].Group.Id())
+	assert.Equal(t, []string{"small"}, podNames(scaleUpStatus.PodsTriggeredScaleUp))
+	assert.Empty(t, scaleUpStatus.PodsRemainUnschedulable)
+	assert.Equal(t, []string{"big"}, podNames(scaleUpStatus.PodsAwaitEvaluation))
+}
+
 func TestLazySchedulablePodGroupsDisabledEvaluatesAllNodeGroups(t *testing.T) {
 	env := newLazyTestEnv(t, []lazyTestNodeGroup{
 		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
@@ -485,6 +581,8 @@ func TestLazySchedulablePodGroupsDisabledEvaluatesAllNodeGroups(t *testing.T) {
 		{id: "ng3", cpu: 1000, mem: 1000, size: 1, max: 10},
 	}, func(o *config.AutoscalingOptions) {
 		o.LazySchedulablePodGroupsEnabled = false
+		// Doesn't apply when lazy computation is disabled.
+		o.MaxPerNodeGroupSchedulablePodGroupsDuration = time.Nanosecond
 	}, 1)
 
 	scaleUpStatus := env.scaleUp(t, utilstest.BuildTestPod("p1", 500, 0), utilstest.BuildTestPod("huge", 10000, 0))
@@ -501,6 +599,36 @@ func TestLazySchedulablePodGroupsDisabledEvaluatesAllNodeGroups(t *testing.T) {
 	assert.Equal(t, []string{"huge"}, remainingPodNames(scaleUpStatus.PodsRemainUnschedulable))
 	assert.Len(t, scaleUpStatus.PodsRemainUnschedulable[0].RejectedNodeGroups, 3)
 	assert.Empty(t, scaleUpStatus.PodsAwaitEvaluation)
+}
+
+func TestLazySchedulablePodGroupsDroppedNodeGroupNotRecomputedDuringBinpacking(t *testing.T) {
+	env := newLazyTestEnv(t, []lazyTestNodeGroup{
+		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
+		{id: "ng2", cpu: 1000, mem: 1000, size: 1, max: 10},
+	}, func(o *config.AutoscalingOptions) {
+		o.BalanceSimilarNodeGroups = true
+		o.MaxPerNodeGroupSchedulablePodGroupsDuration = 20 * time.Millisecond
+	}, 0)
+	// ng1 exceeds the maximum duration on its first evaluation only.
+	env.snapshot.onCheck = func(id string, count int) {
+		if id == "ng1" && count == 1 {
+			time.Sleep(60 * time.Millisecond)
+		}
+	}
+
+	pods := make([]*apiv1.Pod, 0, 4)
+	for i := 0; i < 4; i++ {
+		pods = append(pods, utilstest.BuildTestPod(fmt.Sprintf("p%d", i), 800, 0))
+	}
+	scaleUpStatus := env.scaleUp(t, pods...)
+
+	assert.True(t, scaleUpStatus.WasSuccessful())
+	// ng1 was dropped, and is not simulated again when looked up as a similar node group of ng2
+	// (or when balancing), so it isn't considered for this scale-up at all.
+	assert.Equal(t, 1, env.snapshot.forks["ng1"])
+	assert.Len(t, scaleUpStatus.ScaleUpInfos, 1)
+	assert.Equal(t, "ng2", scaleUpStatus.ScaleUpInfos[0].Group.Id())
+	assert.Empty(t, scaleUpStatus.PodsRemainUnschedulable)
 }
 
 func TestLazySchedulablePodGroupsSkippedNodeGroupsSimulatedOnlyForUnschedulablePods(t *testing.T) {
@@ -596,6 +724,86 @@ func TestLazySchedulablePodGroupsAllOptionsFilteredOutReportsAllNodeGroups(t *te
 			}
 		})
 	}
+}
+
+func TestLazySchedulablePodGroupsDisabledSkippedNodeGroupsWithoutMaxDuration(t *testing.T) {
+	env := newLazyTestEnv(t, []lazyTestNodeGroup{
+		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
+		// Skipped because it reached its max size.
+		{id: "ng3", cpu: 1000, mem: 1000, size: 1, max: 1},
+	}, func(o *config.AutoscalingOptions) {
+		o.LazySchedulablePodGroupsEnabled = false
+		o.ScaleUpSimulationForSkippedNodeGroupsEnabled = true
+		// Doesn't apply when lazy computation is disabled, including for skipped node groups.
+		o.MaxPerNodeGroupSchedulablePodGroupsDuration = time.Nanosecond
+	}, 0)
+
+	scaleUpStatus := env.scaleUp(t, utilstest.BuildTestPod("huge", 10000, 0))
+
+	assert.Equal(t, status.ScaleUpNoOptionsAvailable, scaleUpStatus.Result)
+	if assert.Equal(t, []string{"huge"}, remainingPodNames(scaleUpStatus.PodsRemainUnschedulable)) {
+		info := scaleUpStatus.PodsRemainUnschedulable[0]
+		assert.Contains(t, info.RejectedNodeGroups, "ng3")
+		assert.NotContains(t, info.SkippedNodeGroups, "ng3")
+	}
+}
+
+func TestLazySchedulablePodGroupsAllOrNothingNodeGroupDroppedFromBinpacking(t *testing.T) {
+	env := newLazyTestEnv(t, []lazyTestNodeGroup{
+		// Fits a only.
+		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
+		// Fits a and b, but exceeds the maximum duration during binpacking.
+		{id: "ng2", cpu: 2000, mem: 1000, size: 1, max: 10},
+	}, func(o *config.AutoscalingOptions) {
+		o.MaxPerNodeGroupSchedulablePodGroupsDuration = 20 * time.Millisecond
+	}, 0)
+	env.snapshot.onCheck = func(id string, count int) {
+		if id == "ng2" && count == 1 {
+			time.Sleep(60 * time.Millisecond)
+		}
+	}
+
+	scaleUpStatus, err := env.tryScaleUp(true, utilstest.BuildTestPod("a", 500, 0), utilstest.BuildTestPod("b", 1500, 0))
+
+	assert.NoError(t, err)
+	// ng1's option doesn't fit all pods and ng2 was dropped, so there are no options. Reporting
+	// doesn't evaluate ng2 again for all pod groups. With eager evaluation ng2 might have been scaled
+	// up, so a, which also fits ng1, must not be reported as unhelpable ("no scale-up options
+	// available"): both pods await evaluation.
+	assert.Equal(t, status.ScaleUpNoOptionsAvailable, scaleUpStatus.Result)
+	assert.Equal(t, 1, env.snapshot.checks["ng2"])
+	assert.Empty(t, scaleUpStatus.PodsRemainUnschedulable)
+	assert.Equal(t, []string{"a", "b"}, podNames(scaleUpStatus.PodsAwaitEvaluation))
+}
+
+func TestLazySchedulablePodGroupsFailedScaleUpPodFitsOnlyDroppedNodeGroup(t *testing.T) {
+	env := newLazyTestEnv(t, []lazyTestNodeGroup{
+		// Fits a and d, chosen, but its scale-up fails.
+		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
+		// Fits a and d, but exceeds the maximum duration during binpacking.
+		{id: "ng2", cpu: 2000, mem: 1000, size: 1, max: 10},
+		// Fits d only.
+		{id: "ng3", cpu: 300, mem: 1000, size: 1, max: 10},
+	}, func(o *config.AutoscalingOptions) {
+		o.MaxPerNodeGroupSchedulablePodGroupsDuration = 20 * time.Millisecond
+	}, 0)
+	env.failScaleUp["ng1"] = true
+	env.snapshot.onCheck = func(id string, count int) {
+		if id == "ng2" && count == 1 {
+			time.Sleep(60 * time.Millisecond)
+		}
+	}
+
+	scaleUpStatus, err := env.tryScaleUp(false, utilstest.BuildTestPod("a", 500, 0), utilstest.BuildTestPod("d", 200, 0))
+
+	assert.Error(t, err)
+	assert.Equal(t, status.ScaleUpError, scaleUpStatus.Result)
+	// After scaling up ng1 failed, reporting evaluated the dropped ng2 for a only.
+	assert.Equal(t, 2, env.snapshot.checks["ng2"])
+	// a fits the failed ng1 and the dropped ng2, which binpacking never considered, so it awaits
+	// evaluation. d still fits ng3, so as with eager evaluation it is neither.
+	assert.Empty(t, scaleUpStatus.PodsRemainUnschedulable)
+	assert.Equal(t, []string{"a"}, podNames(scaleUpStatus.PodsAwaitEvaluation))
 }
 
 func TestLazySchedulablePodGroupsErrorAfterBestOptionReportsAllNodeGroups(t *testing.T) {
@@ -771,4 +979,88 @@ func BenchmarkLazySchedulablePodGroups(b *testing.B) {
 			b.ReportMetric(float64(forks), "node-group-simulations/op")
 		})
 	}
+}
+
+func TestSchedulablePodGroupsCacheDropsPartialResults(t *testing.T) {
+	env := newLazyTestEnv(t, []lazyTestNodeGroup{
+		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
+	}, nil, 0)
+	ng1 := env.provider.GetNodeGroup("ng1")
+	egs := equivalence.BuildPodGroups([]*apiv1.Pod{
+		utilstest.BuildTestPod("p1", 500, 0),
+		utilstest.BuildTestPod("p2", 400, 0),
+		utilstest.BuildTestPod("too-big", 5000, 0),
+		utilstest.BuildTestPod("p3", 300, 0),
+	})
+	cache := newSchedulablePodGroupsCache(env.orchestrator, egs, env.nodeInfos, []cloudprovider.NodeGroup{ng1})
+
+	// Context done after three of the four pod groups were checked: as if nothing happened, the
+	// partial result is dropped and no pod group records any scheduling result.
+	ctx, cancel := context.WithCancel(context.Background())
+	env.snapshot.onCheck = func(id string, count int) {
+		if id == "ng1" && count == 3 {
+			cancel()
+		}
+	}
+	podGroups, found := cache.Get(ctx, "ng1")
+	assert.False(t, found)
+	assert.Nil(t, podGroups)
+	assert.Equal(t, 3, env.snapshot.checks["ng1"])
+	assert.Zero(t, cache.evaluations)
+	assert.Equal(t, []cloudprovider.NodeGroup{ng1}, cache.unevaluated())
+	for _, eg := range egs {
+		assert.False(t, eg.Schedulable, eg.Pods[0].Name)
+		assert.Empty(t, eg.SchedulableGroups, eg.Pods[0].Name)
+		assert.Empty(t, eg.SchedulingErrors, eg.Pods[0].Name)
+	}
+
+	// A dropped node group is not computed again, e.g. when looked up as a similar node group, but
+	// it stays unevaluated, so that reporting can still evaluate it.
+	env.snapshot.onCheck = nil
+	podGroups, found = cache.Get(context.Background(), "ng1")
+	assert.False(t, found)
+	assert.Nil(t, podGroups)
+	assert.Equal(t, 3, env.snapshot.checks["ng1"])
+	assert.Equal(t, []cloudprovider.NodeGroup{ng1}, cache.unevaluated())
+
+	// Computing all node groups (lazy computation disabled) has no time limit.
+	cache = newSchedulablePodGroupsCache(env.orchestrator, egs, env.nodeInfos, []cloudprovider.NodeGroup{ng1})
+	cache.computeAll(ctx)
+	podGroups, found = cache.Get(context.Background(), "ng1")
+	assert.True(t, found)
+	assert.Len(t, podGroups, 3)
+	assert.Equal(t, 1, cache.evaluations)
+	assert.Empty(t, cache.unevaluated())
+	for _, eg := range egs {
+		if eg.Pods[0].Name == "too-big" {
+			assert.False(t, eg.Schedulable)
+			assert.Contains(t, eg.SchedulingErrors, "ng1")
+		} else {
+			assert.True(t, eg.Schedulable)
+			assert.Equal(t, []string{"ng1"}, eg.SchedulableGroups)
+		}
+	}
+}
+
+func TestSchedulablePodGroupsCacheUnevaluatedReturnsDroppedNodeGroupsLast(t *testing.T) {
+	env := newLazyTestEnv(t, []lazyTestNodeGroup{
+		{id: "ng1", cpu: 1000, mem: 1000, size: 1, max: 10},
+		{id: "ng2", cpu: 1000, mem: 1000, size: 1, max: 10},
+		{id: "ng3", cpu: 1000, mem: 1000, size: 1, max: 10},
+	}, nil, 0)
+	ng1, ng2, ng3 := env.provider.GetNodeGroup("ng1"), env.provider.GetNodeGroup("ng2"), env.provider.GetNodeGroup("ng3")
+	egs := equivalence.BuildPodGroups([]*apiv1.Pod{utilstest.BuildTestPod("p1", 500, 0)})
+	cache := newSchedulablePodGroupsCache(env.orchestrator, egs, env.nodeInfos, []cloudprovider.NodeGroup{ng1, ng2, ng3})
+
+	// ng1 is dropped, ng2 is computed, ng3 isn't reached.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, found := cache.Get(ctx, "ng1")
+	assert.False(t, found)
+	_, found = cache.Get(context.Background(), "ng2")
+	assert.True(t, found)
+
+	// Dropped node groups come after node groups which weren't reached, regardless of the
+	// binpacking order.
+	assert.Equal(t, []cloudprovider.NodeGroup{ng3, ng1}, cache.unevaluated())
 }

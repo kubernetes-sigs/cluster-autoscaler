@@ -18,6 +18,7 @@ package orchestrator
 
 import (
 	"context"
+	stdErrors "errors"
 	"slices"
 	"strings"
 	"time"
@@ -45,6 +46,10 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/klogx"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 )
+
+// errSchedulablePodGroupsTimeout is the cause of the context of a schedulable pod groups computation
+// exceeding MaxPerNodeGroupSchedulablePodGroupsDuration.
+var errSchedulablePodGroupsTimeout = stdErrors.New("schedulable pod groups computation for node group exceeded its maximum duration")
 
 // ScaleUpOrchestrator implements scaleup.Orchestrator interface.
 type ScaleUpOrchestrator struct {
@@ -599,8 +604,9 @@ func (o *ScaleUpOrchestrator) SchedulablePodGroups(
 
 // schedulablePodGroups returns a list of pods that could be scheduled in a given node group after a
 // scale up, and the number of pod equivalence groups evaluated. If stopOnContextDone is set, the
-// evaluation stops when the context is done: then no result is returned and pod equivalence groups
-// are not updated.
+// evaluation stops when the context is done or, if lazy computation is enabled,
+// MaxPerNodeGroupSchedulablePodGroupsDuration is exceeded: then no result is returned and pod
+// equivalence groups are not updated.
 func (o *ScaleUpOrchestrator) schedulablePodGroups(
 	ctx context.Context,
 	podEquivalenceGroups []*equivalence.PodGroup,
@@ -609,6 +615,11 @@ func (o *ScaleUpOrchestrator) schedulablePodGroups(
 	stopOnContextDone bool,
 ) ([]estimator.PodEquivalenceGroup, int) {
 	logger := klog.FromContext(ctx)
+	if maxDuration := o.autoscalingCtx.MaxPerNodeGroupSchedulablePodGroupsDuration; stopOnContextDone && o.autoscalingCtx.LazySchedulablePodGroupsEnabled && maxDuration > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, maxDuration, errSchedulablePodGroupsTimeout)
+		defer cancel()
+	}
 	o.autoscalingCtx.ClusterSnapshot.Fork()
 	defer o.autoscalingCtx.ClusterSnapshot.Revert()
 
@@ -624,6 +635,9 @@ func (o *ScaleUpOrchestrator) schedulablePodGroups(
 	schedulingErrors := make([]clustersnapshot.SchedulingError, len(podEquivalenceGroups))
 	for i, eg := range podEquivalenceGroups {
 		if stopOnContextDone && ctx.Err() != nil {
+			if context.Cause(ctx) == errSchedulablePodGroupsTimeout {
+				metrics.RegisterTimeout(metrics.SchedulablePodGroupsTimeout)
+			}
 			return nil, i
 		}
 		schedulingErrors[i] = o.autoscalingCtx.ClusterSnapshot.CheckPredicates(eg.Pods[0], nodeInfo.Node().Name)
@@ -1017,8 +1031,8 @@ func (o *ScaleUpOrchestrator) abortAllOrNothing(ctx context.Context, args scaleU
 //
 // Marking decides that nothing is scaled up for the pods in this loop; the evaluation decides
 // how they are reported, so it must come first:
-//   - pods which couldn't be evaluated within the reporting budget are reported as awaiting
-//     evaluation instead of as unhelpable;
+//   - pods which fit node groups dropped from binpacking, or which couldn't be evaluated within
+//     the reporting budget, are reported as awaiting evaluation instead of as unhelpable;
 //   - the other pods get a result for every node group (a scheduling error, or the given reason
 //     for node groups they fit), so as with eager evaluation they are reported as rejected by
 //     every node group, not only by the ones reached by binpacking.
@@ -1214,7 +1228,7 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 	o.processors.BinpackingLimiter.FinalizeBinpacking(o.autoscalingCtx, options)
 	metrics.ObserveSchedulablePodGroupsEvaluations(metrics.SchedulablePodGroupsBinpacking, schedulablePodGroups.evaluations)
 	if unevaluated := len(schedulablePodGroups.unevaluated()); unevaluated > 0 {
-		logger.V(1).Info("Some node groups were not evaluated during binpacking", "evaluatedNodeGroups", schedulablePodGroups.evaluations, "unevaluatedNodeGroups", unevaluated)
+		logger.V(1).Info("Some node groups were not evaluated during binpacking", "evaluatedNodeGroups", schedulablePodGroups.evaluations, "unevaluatedNodeGroups", unevaluated, "droppedDueToContextExceedNodeGroups", len(schedulablePodGroups.dropped))
 	}
 
 	if len(options) == 0 {

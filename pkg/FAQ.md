@@ -1091,6 +1091,7 @@ The following startup parameters are supported for cluster autoscaler:
 | `max-nodegroup-binpacking-duration` | Maximum time that will be spent in binpacking simulation for each NodeGroup. | 10s |
 | `max-nodes-per-scaleup` | Max nodes added in a single scale-up. This is intended strictly for optimizing CA algorithm latency and not a tool to rate-limit scale-up throughput. | 1000 |
 | `max-nodes-total` | Maximum number of nodes in all node groups. Cluster autoscaler will not grow the cluster beyond this number. |  |
+| `max-per-node-group-schedulable-pod-groups-duration` | Maximum time spent computing which pod equivalence groups can be scheduled on a single node group. If it is exceeded, the node group is not considered for the scale-up and pods are not evaluated against it. Requires enable-lazy-schedulable-pod-groups. Zero means no limit. | 0s |
 | `max-pod-eviction-time` | Maximum time CA tries to evict a pod before giving up | 2m0s |
 | `max-scale-down-parallelism` | Maximum number of nodes (both empty and needing drain) that can be deleted in parallel. | 10 |
 | `max-scale-up-reporting-simulation-duration` | Maximum time spent in a single scale-up on scheduling simulations which only serve reporting the scale-up status (node groups not evaluated during binpacking and skipped node groups). Pods not evaluated against all node groups which binpacking didn't reach are reported as awaiting evaluation; skipped node groups not simulated before the deadline are reported as skipped. Zero means no limit. | 0s |

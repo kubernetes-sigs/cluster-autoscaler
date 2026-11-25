@@ -112,7 +112,7 @@ This metrics describe internal state and actions taken by Cluster Autoscaler.
 | node_taints_count | Gauge | `type`=&lt;taint-type&gt; | Number of node taints currently present in the cluster, grouped by taint type. |
 | inconsistent_instances_migs_count | Gauge | | Number of migs where instance count according to `InstanceGroupManagers.List()` differs from the results of `Instances.List()`. This can happen when some instances are abandoned or a user edits instance `created-by` metadata. |
 | binpacking_heterogeneity | Histogram | `instance_type`, `cpu_count`, `namespace_count` | Number of groups of equivalent pods being processed as a part of the same binpacking simulation. |
-| timeouts_total | Counter | `type`=&lt;`binpacking` or `scale_up_reporting_simulation`&gt; | Number of times CA degraded gracefully because an operation exceeded its maximum duration. |
+| timeouts_total | Counter | `type`=&lt;`binpacking`, `scale_up_reporting_simulation` or `schedulable_pod_groups`&gt; | Number of times CA degraded gracefully because an operation exceeded its maximum duration. |
 | scale_up_schedulable_pod_groups_node_group_evaluations | Histogram | `phase`=&lt;`binpacking` or `reporting`&gt; | Number of node groups for which schedulable pod groups were computed in a single scale-up, per phase. |
 | max_node_skip_eval_duration_seconds | Gauge | | Maximum evaluation time of a node being skipped during ScaleDown. |
 | node_removal_latency_seconds | Histogram | `deleted`=&lt;`true` or `false`&gt; | Latency from when an unneeded node becomes eligible for scale-down until it is actually removed (`deleted=true`) or becomes needed again (`deleted=false`). |

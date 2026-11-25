@@ -58,9 +58,10 @@ type scaleUpReporting struct {
 	// covered holds pod groups which were already evaluated against the node groups not reached by
 	// binpacking. Each pod group is evaluated at most once.
 	covered map[*equivalence.PodGroup]bool
-	// pending holds pod groups which Cluster Autoscaler couldn't fully evaluate, because they were not
-	// evaluated against all node groups within the budget. They are reported as awaiting evaluation,
-	// never as remaining unschedulable.
+	// pending holds pod groups which Cluster Autoscaler couldn't fully evaluate: either they were not
+	// evaluated against all node groups, or they are schedulable on node groups dropped from binpacking
+	// (only on such node groups, or on any of them when all pod groups are marked unschedulable). They
+	// are reported as awaiting evaluation, never as remaining unschedulable.
 	pending  map[*equivalence.PodGroup]bool
 	timedOut bool
 }
@@ -144,6 +145,22 @@ func (r *scaleUpReporting) evaluate(ctx context.Context, egs []*equivalence.PodG
 
 	newPending := 0
 	for _, eg := range candidates {
+		// A dropped node group timed out during binpacking, so scaling it up was never considered.
+		// Cluster Autoscaler might have helped pod groups which fit it, so they are reported as
+		// awaiting evaluation rather than as unhelpable:
+		//   - with includeSchedulable, all pod groups are about to be marked unschedulable on every
+		//     node group they fit (e.g. "no scale-up options available"), which would be false for a
+		//     dropped node group, so a pod group fitting at least one dropped node group is reported
+		//     as awaiting evaluation;
+		//   - otherwise, pod groups which also fit other node groups are reported as with eager
+		//     evaluation, so only pod groups fitting nothing but dropped node groups are reported as
+		//     awaiting evaluation.
+		onAnyDropped, onlyOnDropped := r.cache.schedulableOnDropped(eg)
+		if onlyOnDropped || (includeSchedulable && onAnyDropped) {
+			r.pending[eg] = true
+			newPending++
+			continue
+		}
 		// Pod groups which miss a result for any of the node groups which couldn't be evaluated were
 		// not fully evaluated. Without includeSchedulable, pod groups which are schedulable don't
 		// need results for all node groups.
@@ -160,14 +177,16 @@ func (r *scaleUpReporting) evaluate(ctx context.Context, egs []*equivalence.PodG
 	}
 	if newPending > 0 {
 		klog.FromContext(ctx).V(1).Info("Couldn't fully evaluate some pods, they will be reported as awaiting evaluation",
-			"budget", r.budget, "notEvaluatedNodeGroups", len(notEvaluated), "pendingPodGroups", newPending)
+			"budget", r.budget, "notEvaluatedNodeGroups", len(notEvaluated), "droppedNodeGroups", len(r.cache.dropped), "pendingPodGroups", newPending)
 	}
 }
 
 // simulateUnevaluatedNodeGroups simulates eligible node groups which were not reached during
 // binpacking, for the candidate pod groups, within the reporting budget. Without
 // includeSchedulable, candidates which became schedulable are not simulated anymore. It returns the
-// node groups which couldn't be evaluated because the reporting budget was exceeded.
+// node groups which couldn't be evaluated, either because the reporting budget or the maximum
+// duration for a single node group was exceeded, or because they were dropped from binpacking and
+// would have to be evaluated for all pod groups again.
 func (r *scaleUpReporting) simulateUnevaluatedNodeGroups(ctx context.Context, candidates []*equivalence.PodGroup, includeSchedulable bool) []cloudprovider.NodeGroup {
 	unevaluated := r.cache.unevaluated()
 	if len(unevaluated) == 0 {
@@ -191,6 +210,13 @@ func (r *scaleUpReporting) simulateUnevaluatedNodeGroups(ctx context.Context, ca
 		if ctx.Err() != nil {
 			notEvaluated = append(notEvaluated, unevaluated[i:]...)
 			break
+		}
+		// A dropped node group exceeded its maximum duration during binpacking, when it was
+		// evaluated for all pod groups. Evaluating it again for all of them would most likely only
+		// exceed it again, so it is only evaluated for a subset of pod groups.
+		if r.cache.dropped[nodeGroup.Id()] && len(targets) == len(r.cache.podEquivalenceGroups) {
+			notEvaluated = append(notEvaluated, nodeGroup)
+			continue
 		}
 		nodeInfo, found := r.cache.nodeInfos[nodeGroup.Id()]
 		if !found {

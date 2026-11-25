@@ -159,6 +159,10 @@ const (
 	// status (e.g. for node groups not evaluated during binpacking or for skipped node groups) were
 	// cut short because they exceeded their maximum duration.
 	ScaleUpReportingSimulationTimeout TimeoutType = "scale_up_reporting_simulation"
+	// SchedulablePodGroupsTimeout means that computing schedulable pod groups for a node group
+	// exceeded its maximum duration, so the result was discarded: during binpacking the node group
+	// is dropped, during reporting simulations pods are not evaluated against it.
+	SchedulablePodGroupsTimeout TimeoutType = "schedulable_pod_groups"
 )
 
 // SchedulablePodGroupsPhase identifies the scale-up phase in which schedulable pod groups were computed.
@@ -730,7 +734,7 @@ func (m *caMetrics) InitMetrics() {
 	m.skippedScaleEventsCount.WithLabelValues(DirectionScaleUp, CpuResourceLimit).Add(0)
 	m.skippedScaleEventsCount.WithLabelValues(DirectionScaleUp, MemoryResourceLimit).Add(0)
 
-	for _, timeoutType := range []TimeoutType{BinpackingTimeout, ScaleUpReportingSimulationTimeout} {
+	for _, timeoutType := range []TimeoutType{BinpackingTimeout, ScaleUpReportingSimulationTimeout, SchedulablePodGroupsTimeout} {
 		m.timeoutsCount.WithLabelValues(string(timeoutType)).Add(0)
 	}
 }
