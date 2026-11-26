@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"io/ioutil"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	core "k8s.io/client-go/testing"
+	kube_record "k8s.io/client-go/tools/record"
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/api"
 
 	"github.com/stretchr/testify/assert"
@@ -380,4 +382,55 @@ func TestMarshalAndTruncateStatus(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWriteStatusConfigMapConcurrentWithEvents(t *testing.T) {
+	const writeIterations = 20
+	fakeClient := fake.NewSimpleClientset()
+	fakeRecorder := kube_record.NewFakeRecorder(100)
+	logRecorder, err := NewStatusMapRecorder(fakeClient, "kube-system", fakeRecorder, true, "race-configmap")
+	assert.NoError(t, err)
+
+	var recordedCount int
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for range fakeRecorder.Events {
+			recordedCount++
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var eventCount, eventfCount int
+	var started, wg sync.WaitGroup
+	started.Add(2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		started.Done()
+		for ctx.Err() == nil {
+			logRecorder.Event(apiv1.EventTypeNormal, "ScaleDownEmpty", "Scale-down: empty node removed")
+			eventCount++
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		started.Done()
+		for ctx.Err() == nil {
+			logRecorder.Eventf(apiv1.EventTypeNormal, "ScaleDown", "Scale-down: node-%d removed", eventfCount)
+			eventfCount++
+		}
+	}()
+
+	started.Wait()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range writeIterations {
+		_, err := WriteStatusConfigMap(context.Background(), fakeClient, "kube-system", status, logRecorder, "race-configmap", now.Add(time.Duration(i)*time.Second))
+		assert.NoError(t, err)
+	}
+	cancel()
+	wg.Wait()
+	close(fakeRecorder.Events)
+	<-drained
+	assert.Equal(t, eventCount+eventfCount, recordedCount)
 }
