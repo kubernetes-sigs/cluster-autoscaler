@@ -19,6 +19,7 @@ package latencytracker
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -51,11 +52,34 @@ func TestNodeLatencyTracker_Decorator(t *testing.T) {
 	}
 }
 
+func TestNodeLatencyTracker_ScaleDownNotTriedSkipsTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		tracker := NewNodeLatencyTracker(processor.NewDefaultScaleDownStatusProcessor())
+		candidates := candidatesFromNames([]string{"node1"}, nil, nil)
+
+		tracker.UpdateScaleDownCandidates(ctx, candidates, time.Now())
+
+		time.Sleep(scaleDownNodeRemovalTimeout + time.Minute)
+		tracker.Process(ctx, &ca_context.AutoscalingContext{}, &status.ScaleDownStatus{Result: status.ScaleDownNotTried})
+		if tracker.unneededNodes["node1"].reported {
+			t.Fatalf("Process(ScaleDownNotTried) marked node1 reported before candidates were refreshed")
+		}
+
+		tracker.UpdateScaleDownCandidates(ctx, candidates, time.Now())
+		tracker.Process(ctx, &ca_context.AutoscalingContext{}, &status.ScaleDownStatus{Result: status.ScaleDownNoNodeDeleted})
+		if !tracker.unneededNodes["node1"].reported {
+			t.Fatalf("Process(ScaleDownNoNodeDeleted) did not mark timed-out node1 reported")
+		}
+	})
+}
+
 func TestNodeLatencyTracker_SimulationLoop(t *testing.T) {
 	// A step represents one loop of the autoscaler:
 	// 1. Planner calculates unneeded nodes (UpdateScaleDownCandidates)
 	// 2. Actuator attempts deletion and reports status (Process)
 	type step struct {
+		stepDuration          time.Duration                          // Virtual time elapsed before this loop (defaults to testStepDuration)
 		unneededList          []string                               // Nodes found unneeded this loop
 		thresholds            map[string]time.Duration               // Specific thresholds for this loop
 		scaleDownReasons      map[string]metrics.NodeScaleDownReason // Specific scale-down reasons for this loop
@@ -64,12 +88,11 @@ func TestNodeLatencyTracker_SimulationLoop(t *testing.T) {
 		unremovableReason     map[string]simulator.UnremovableReason // Nodes failed to delete with specific reasons
 		nodeDeleteResults     map[string]status.NodeDeleteResult     // Node deletion results reported in this loop
 		wantTrackedNodes      []string                               // Expected internal state after this loop
+		wantReportedNodes     []string                               // Expected nodes marked reported after this loop
 		wantThresholds        map[string]time.Duration               // Expected threshold values in internal state
 		wantScaleDownReasons  map[string]metrics.NodeScaleDownReason // Expected scaleDownReason values in internal state
 		wantLatestDelayReason map[string]string                      // Expected latestDelayReason values in internal state
 	}
-
-	baseTime := time.Now()
 
 	tests := []struct {
 		name  string
@@ -282,67 +305,183 @@ func TestNodeLatencyTracker_SimulationLoop(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "Timeout boundary: marks reported only strictly past 60m past removalThreshold",
+			steps: []step{
+				{
+					// Step 0: node1 becomes unneeded with a 10m threshold
+					unneededList:     []string{"node1"},
+					thresholds:       map[string]time.Duration{"node1": 10 * time.Minute},
+					wantTrackedNodes: []string{"node1"},
+					wantThresholds:   map[string]time.Duration{"node1": 10 * time.Minute},
+				},
+				{
+					// Step 1: exactly 60m past threshold (70m unneeded - 10m threshold = 3600s) -> not timed out yet
+					stepDuration:     70 * time.Minute,
+					unneededList:     []string{"node1"},
+					thresholds:       map[string]time.Duration{"node1": 10 * time.Minute},
+					wantTrackedNodes: []string{"node1"},
+					wantThresholds:   map[string]time.Duration{"node1": 10 * time.Minute},
+				},
+				{
+					// Step 2: 1s past 60m (latency = 60m1s > 3600s) -> marks reported while remaining tracked
+					stepDuration:      time.Second,
+					unneededList:      []string{"node1"},
+					thresholds:        map[string]time.Duration{"node1": 10 * time.Minute},
+					wantTrackedNodes:  []string{"node1"},
+					wantReportedNodes: []string{"node1"},
+					wantThresholds:    map[string]time.Duration{"node1": 10 * time.Minute},
+				},
+				{
+					// Step 3: cleaned up when later deleted
+					stepDuration:     15 * time.Minute,
+					unneededList:     []string{"node1"},
+					thresholds:       map[string]time.Duration{"node1": 10 * time.Minute},
+					scaledDownList:   []string{"node1"},
+					wantTrackedNodes: []string{},
+				},
+			},
+		},
+		{
+			name: "Timed-out node cleaned up when needed again and starts fresh if unneeded in a later episode",
+			steps: []step{
+				{
+					unneededList:         []string{"node1"},
+					scaleDownReasons:     map[string]metrics.NodeScaleDownReason{"node1": metrics.Underutilized},
+					wantTrackedNodes:     []string{"node1"},
+					wantScaleDownReasons: map[string]metrics.NodeScaleDownReason{"node1": metrics.Underutilized},
+				},
+				{
+					stepDuration:     60*time.Minute + time.Second,
+					unneededList:     []string{"node1"},
+					scaleDownReasons: map[string]metrics.NodeScaleDownReason{"node1": metrics.Underutilized},
+					nodeDeleteResults: map[string]status.NodeDeleteResult{
+						"node1": {ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted},
+					},
+					wantTrackedNodes:      []string{"node1"},
+					wantReportedNodes:     []string{"node1"},
+					wantScaleDownReasons:  map[string]metrics.NodeScaleDownReason{"node1": metrics.Underutilized},
+					wantLatestDelayReason: map[string]string{"node1": FailedToMarkToBeDeleted},
+				},
+				{
+					// Node becomes needed again -> removed from tracking
+					stepDuration:     5 * time.Minute,
+					unneededList:     []string{},
+					wantTrackedNodes: []string{},
+				},
+				{
+					// Later in the same CA run, node enters a brand-new unneeded episode with reported=false
+					stepDuration:     5 * time.Minute,
+					unneededList:     []string{"node1"},
+					wantTrackedNodes: []string{"node1"},
+				},
+			},
+		},
+		{
+			name: "Threshold and scaleDownReason updates preserve reported=true after timeout",
+			steps: []step{
+				{
+					unneededList:     []string{"node1"},
+					thresholds:       map[string]time.Duration{"node1": time.Minute},
+					wantTrackedNodes: []string{"node1"},
+					wantThresholds:   map[string]time.Duration{"node1": time.Minute},
+				},
+				{
+					stepDuration:      62 * time.Minute,
+					unneededList:      []string{"node1"},
+					thresholds:        map[string]time.Duration{"node1": time.Minute},
+					wantTrackedNodes:  []string{"node1"},
+					wantReportedNodes: []string{"node1"},
+					wantThresholds:    map[string]time.Duration{"node1": time.Minute},
+				},
+				{
+					stepDuration:         time.Minute,
+					unneededList:         []string{"node1"},
+					thresholds:           map[string]time.Duration{"node1": 10 * time.Minute},
+					scaleDownReasons:     map[string]metrics.NodeScaleDownReason{"node1": metrics.Underutilized},
+					wantTrackedNodes:     []string{"node1"},
+					wantReportedNodes:    []string{"node1"},
+					wantThresholds:       map[string]time.Duration{"node1": 10 * time.Minute},
+					wantScaleDownReasons: map[string]metrics.NodeScaleDownReason{"node1": metrics.Underutilized},
+				},
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tracker := NewNodeLatencyTracker(processor.NewDefaultScaleDownStatusProcessor())
+			synctest.Test(t, func(t *testing.T) {
+				tracker := NewNodeLatencyTracker(processor.NewDefaultScaleDownStatusProcessor())
 
-			for i, step := range tc.steps {
-				stepTime := baseTime.Add(time.Duration(i+1) * testStepDuration)
+				for i, step := range tc.steps {
+					dur := step.stepDuration
+					if dur == 0 {
+						dur = testStepDuration
+					}
+					time.Sleep(dur)
 
-				candidates := candidatesFromNames(step.unneededList, step.thresholds, step.scaleDownReasons)
-				tracker.UpdateScaleDownCandidates(context.Background(), candidates, stepTime)
+					candidates := candidatesFromNames(step.unneededList, step.thresholds, step.scaleDownReasons)
+					tracker.UpdateScaleDownCandidates(context.Background(), candidates, time.Now())
 
-				var sd *status.ScaleDownStatus
-				if step.unremovableReason != nil {
-					sd = newScaleDownStatusWithReasons(step.scaledDownList, step.unremovableReason)
-				} else {
-					sd = newScaleDownStatus(step.scaledDownList, step.unremovableList)
-				}
-				sd.NodeDeleteResults = step.nodeDeleteResults
-				tracker.Process(context.Background(), &ca_context.AutoscalingContext{}, sd)
+					var sd *status.ScaleDownStatus
+					if step.unremovableReason != nil {
+						sd = newScaleDownStatusWithReasons(step.scaledDownList, step.unremovableReason)
+					} else {
+						sd = newScaleDownStatus(step.scaledDownList, step.unremovableList)
+					}
+					sd.NodeDeleteResults = step.nodeDeleteResults
+					tracker.Process(context.Background(), &ca_context.AutoscalingContext{}, sd)
 
-				gotTracked := tracker.getTrackedNodes()
-				gotSet := sets.New(gotTracked...)
-				expectedSet := sets.New(step.wantTrackedNodes...)
-
-				if !gotSet.Equal(expectedSet) {
-					t.Errorf("Step %d: incorrect tracked nodes:\ngot:  %v\nwant: %v", i, sets.List(gotSet), sets.List(expectedSet))
-				}
-
-				for _, nodeName := range step.wantTrackedNodes {
-					wantThreshold := time.Duration(0)
-					if val, ok := step.wantThresholds[nodeName]; ok {
-						wantThreshold = val
+					gotTracked := sets.New(tracker.getTrackedNodes()...)
+					wantTracked := sets.New(step.wantTrackedNodes...)
+					if !gotTracked.Equal(wantTracked) {
+						t.Errorf("Step %d: incorrect tracked nodes:\ngot:  %v\nwant: %v", i, sets.List(gotTracked), sets.List(wantTracked))
 					}
 
-					wantScaleDownReason := metrics.Empty
-					if val, ok := step.wantScaleDownReasons[nodeName]; ok {
-						wantScaleDownReason = val
+					gotReported := sets.New[string]()
+					for nodeName, info := range tracker.unneededNodes {
+						if info.reported {
+							gotReported.Insert(nodeName)
+						}
+					}
+					wantReported := sets.New(step.wantReportedNodes...)
+					if !gotReported.Equal(wantReported) {
+						t.Errorf("Step %d: incorrect reported nodes:\ngot:  %v\nwant: %v", i, sets.List(gotReported), sets.List(wantReported))
 					}
 
-					if actualInfo, ok := tracker.unneededNodes[nodeName]; ok {
-						if actualInfo.removalThreshold != wantThreshold {
-							t.Errorf("Step %d: node %q incorrect threshold: got %v, want %v", i, nodeName, actualInfo.removalThreshold, wantThreshold)
+					for _, nodeName := range step.wantTrackedNodes {
+						wantThreshold := time.Duration(0)
+						if val, ok := step.wantThresholds[nodeName]; ok {
+							wantThreshold = val
 						}
 
-						if actualInfo.scaleDownReason != wantScaleDownReason {
-							t.Errorf("Step %d: node %q incorrect scaleDownReason: got %v, want %v", i, nodeName, actualInfo.scaleDownReason, wantScaleDownReason)
+						wantScaleDownReason := metrics.Empty
+						if val, ok := step.wantScaleDownReasons[nodeName]; ok {
+							wantScaleDownReason = val
 						}
 
-						if step.wantLatestDelayReason != nil {
-							if wantReason, ok := step.wantLatestDelayReason[nodeName]; ok {
-								if actualInfo.latestDelayReason != wantReason {
-									t.Errorf("Step %d: node %q incorrect latestDelayReason: got %q, want %q", i, nodeName, actualInfo.latestDelayReason, wantReason)
+						if actualInfo, ok := tracker.unneededNodes[nodeName]; ok {
+							if actualInfo.removalThreshold != wantThreshold {
+								t.Errorf("Step %d: node %q incorrect threshold: got %v, want %v", i, nodeName, actualInfo.removalThreshold, wantThreshold)
+							}
+
+							if actualInfo.scaleDownReason != wantScaleDownReason {
+								t.Errorf("Step %d: node %q incorrect scaleDownReason: got %v, want %v", i, nodeName, actualInfo.scaleDownReason, wantScaleDownReason)
+							}
+
+							if step.wantLatestDelayReason != nil {
+								if wantReason, ok := step.wantLatestDelayReason[nodeName]; ok {
+									if actualInfo.latestDelayReason != wantReason {
+										t.Errorf("Step %d: node %q incorrect latestDelayReason: got %q, want %q", i, nodeName, actualInfo.latestDelayReason, wantReason)
+									}
 								}
 							}
+						} else {
+							t.Errorf("Step %d: node %q expected to be tracked but was not", i, nodeName)
 						}
-					} else {
-						t.Errorf("Step %d: node %q expected to be tracked but was not", i, nodeName)
 					}
 				}
-			}
+			})
 		})
 	}
 }
