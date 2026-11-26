@@ -68,6 +68,10 @@ func NewTracker(metrics ...scaleDownMetric) *Tracker {
 func (mt *Tracker) ReportToBenchmark(b *testing.B) {
 	for _, m := range mt.metrics {
 		metricValues := mt.metricsTimeline[m.Name()]
+		if len(metricValues) == 0 {
+			b.Logf("no values recorded for metric %s, skipping", m.Name())
+			continue
+		}
 		benchVals := m.Summarize(metricValues)
 		for name, val := range benchVals {
 			b.ReportMetric(val, name)
