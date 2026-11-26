@@ -65,8 +65,6 @@ const (
 	unregisteredLabel     = "unregistered"
 	longUnregisteredLabel = "longUnregistered"
 
-	nodeGroupIDLabel = "node_group_id"
-
 	// Underutilized node was removed because of low utilization
 	Underutilized NodeScaleDownReason = "underutilized"
 	// Empty node was removed

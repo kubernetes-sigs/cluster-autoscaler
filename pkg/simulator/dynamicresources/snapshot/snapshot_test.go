@@ -46,8 +46,7 @@ var (
 	globalSlice1 = &resourceapi.ResourceSlice{ObjectMeta: metav1.ObjectMeta{Name: "global-slice-1", UID: "global-slice-1"}, Spec: resourceapi.ResourceSliceSpec{AllNodes: &trueValue}}
 	globalSlice2 = &resourceapi.ResourceSlice{ObjectMeta: metav1.ObjectMeta{Name: "global-slice-2", UID: "global-slice-2"}, Spec: resourceapi.ResourceSliceSpec{AllNodes: &trueValue}}
 
-	node1 = test.BuildTestNode("node1", 1000, 1000)
-	pod1  = test.BuildTestPod("pod1", 1, 1,
+	pod1 = test.BuildTestPod("pod1", 1, 1,
 		test.WithResourceClaim("ownClaim1", "pod1-ownClaim1-abc", "pod1-ownClaim1"),
 		test.WithResourceClaim("ownClaim2", "pod1-ownClaim2-abc", "pod1-ownClaim2"),
 		test.WithResourceClaim("sharedClaim1", "sharedClaim1", ""),

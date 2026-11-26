@@ -114,11 +114,6 @@ func priority(priority int32) func(*apiv1.Pod) {
 		pod.Spec.Priority = &priority
 	}
 }
-func nominatedNodeName(nodeName string) func(*apiv1.Pod) {
-	return func(pod *apiv1.Pod) {
-		pod.Status.NominatedNodeName = nodeName
-	}
-}
 
 type mockListerRegistry struct {
 	kube_util.ListerRegistry

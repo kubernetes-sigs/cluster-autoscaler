@@ -20,7 +20,10 @@ run:
 
 linters:
   default: none
-  enable: []
+  enable:
+    - govet
+    - ineffassign
+    - unused
   exclusions:
     generated: lax
 

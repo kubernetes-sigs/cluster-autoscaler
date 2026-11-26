@@ -130,7 +130,7 @@ func TestPriorityExpanderCorrecltyFiltersTwoMatchingOptionsOutOfMany(t *testing.
 }
 
 func TestPriorityExpanderCorrecltyFallsBackToAllWhenNoMatches(t *testing.T) {
-	s, _, _ := getFilterInstance(t, config)
+	s, _, _ := getFilterInstance(t, notMatchingConfig)
 	ret := s.BestOptions(context.Background(), []expander.Option{eoT2Large, eoT3Large}, nil)
 	assert.Equal(t, ret, []expander.Option{eoT2Large, eoT3Large})
 }

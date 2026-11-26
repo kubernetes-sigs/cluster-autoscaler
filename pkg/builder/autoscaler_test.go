@@ -55,6 +55,7 @@ func TestAutoscalerBuilderNoError(t *testing.T) {
 			},
 			HealthProbeBindAddress: "0",
 		})
+		assert.NoError(t, err)
 
 		autoscaler, trigger, err := New(options).
 			WithDebuggingSnapshotter(debuggingSnapshotter).

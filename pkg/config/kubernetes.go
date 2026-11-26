@@ -18,8 +18,8 @@ package config
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net/url"
+	"os"
 	"strconv"
 
 	kube_rest "k8s.io/client-go/rest"
@@ -106,7 +106,7 @@ func GetKubeClientConfig(uri *url.URL) (*kube_rest.Config, error) {
 
 	if useServiceAccount {
 		// If a readable service account token exists, then use it
-		if contents, err := ioutil.ReadFile(defaultServiceAccountFile); err == nil {
+		if contents, err := os.ReadFile(defaultServiceAccountFile); err == nil {
 			kubeConfig.BearerToken = string(contents)
 		}
 	}

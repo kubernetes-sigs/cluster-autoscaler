@@ -31,11 +31,10 @@ import (
 
 func TestWaitForDelayDeletion(t *testing.T) {
 	type testcase struct {
-		name                 string
-		timeout              time.Duration
-		addAnnotation        bool
-		removeAnnotation     bool
-		expectCallingGetNode bool
+		name             string
+		timeout          time.Duration
+		addAnnotation    bool
+		removeAnnotation bool
 	}
 	tests := []testcase{
 		{
