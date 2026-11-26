@@ -18,6 +18,7 @@ package example
 
 import "flag"
 
+//nolint:unused // Starter code: this is main() of the separate expander server application, see fake_grpc_server.go.
 func main() {
 
 	certPath := flag.String("cert-path", "", "Path to cert file for gRPC Expander Server")

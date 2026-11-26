@@ -2713,6 +2713,7 @@ func TestStaticAutoscalerUpcomingScaleDownCandidates(t *testing.T) {
 			// Unready instead. The unready nodes should be passed as scale-down candidates at this point, and inserted into the snapshot. Fake upcoming
 			// nodes should no longer be inserted.
 			err = autoscaler.RunOnce(t.Context(), startTime.Add(clusterstate.MaxNodeStartupTime).Add(time.Second))
+			assert.NoError(t, err)
 			assert.Equal(t, allNodeNames, planner.lastCandidateNodes)
 			assertNodesInSnapshot(t, autoscaler.ClusterSnapshot, allNodeNames)
 			assertSnapshotNodeCount(t, autoscaler.ClusterSnapshot, len(allNodeNames)) // Ready nodes + actual unready nodes.

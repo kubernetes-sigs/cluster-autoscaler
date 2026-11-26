@@ -97,10 +97,6 @@ var (
 			},
 		},
 	}
-
-	node1 = test.BuildTestNode(node1Name, 1000, 1000)
-	node2 = test.BuildTestNode(node2Name, 2000, 2000)
-	node3 = test.BuildTestNode(node3Name, 1500, 1500)
 )
 
 func TestSnapshotCSINodes(t *testing.T) {

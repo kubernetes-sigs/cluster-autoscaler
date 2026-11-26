@@ -133,13 +133,6 @@ func (p *CapacityBufferPodListProcessor) markBuffersProcessed(buffers []*v1beta1
 	}
 }
 
-func (p *CapacityBufferPodListProcessor) clearCapacityBufferRegistry() {
-	if p.buffersRegistry == nil {
-		return
-	}
-	p.buffersRegistry.Clear()
-}
-
 func (p *CapacityBufferPodListProcessor) provision(ctx context.Context, buffer *v1beta1.CapacityBuffer) []*apiv1.Pod {
 	if buffer.Status.PodTemplateRef == nil || buffer.Status.Replicas == nil || meta.IsStatusConditionFalse(buffer.Status.Conditions, capacitybuffer.ReadyForProvisioningCondition) {
 		changed := common.UpdateBufferStatusToFailedProvisioning(buffer, NotReadyForProvisioningReason, "CapacityBuffer is not ready for provisioning")

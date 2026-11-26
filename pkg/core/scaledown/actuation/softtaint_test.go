@@ -80,7 +80,6 @@ func TestSoftTaintUpdate(t *testing.T) {
 	assert.False(t, hasDeletionCandidateTaint(t, fakeClient, n2000.Name))
 
 	// Test one unneeded node
-	nodes = getAllNodes(t, fakeClient)
 	errs = UpdateSoftDeletionTaints(context.Background(), &actx, []*apiv1.Node{n1000}, []*apiv1.Node{n2000})
 	assert.Empty(t, errs)
 	assert.True(t, hasDeletionCandidateTaint(t, fakeClient, n1000.Name))

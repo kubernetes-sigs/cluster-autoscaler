@@ -19,7 +19,7 @@ package utils
 import (
 	"context"
 	"errors"
-	"io/ioutil"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -254,7 +254,7 @@ var status api.ClusterAutoscalerStatus = api.ClusterAutoscalerStatus{
 func TestWriteStatusConfigMapMarshal(t *testing.T) {
 	const statusYamlTestFile = "status_test.yaml"
 	ti := setUpTest(t)
-	want, err := ioutil.ReadFile(statusYamlTestFile)
+	want, err := os.ReadFile(statusYamlTestFile)
 	if err != nil {
 		t.Fatalf("Failed to Marshal %s: %v", statusYamlTestFile, err)
 	}

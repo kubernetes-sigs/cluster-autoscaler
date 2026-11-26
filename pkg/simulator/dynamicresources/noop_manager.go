@@ -21,7 +21,6 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
-	schedulingapi "k8s.io/api/scheduling/v1beta1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/dynamic-resource-allocation/structured"
@@ -40,7 +39,6 @@ type noOpResourceClaimTracker NoOpDRAManager
 type noOpResourceSliceLister NoOpDRAManager
 type noOpDeviceClassLister NoOpDRAManager
 type noOpDeviceClassResolver NoOpDRAManager
-type noOpPodGroupLister NoOpDRAManager
 
 // NewNoOpDRAManager returns a no-op SharedDRAManager.
 func NewNoOpDRAManager() fwk.SharedDRAManager {
@@ -142,13 +140,4 @@ func (dcl noOpDeviceClassLister) Get(className string) (*resourceapi.DeviceClass
 // GetDeviceClass is a no-op implementation of the GetDeviceClass method on fwk.DeviceClassResolver.
 func (dcr noOpDeviceClassResolver) GetDeviceClass(resourceName v1.ResourceName) *resourceapi.DeviceClass {
 	return nil
-}
-
-// -------------------------------
-// Pod Group Lister Implementation
-// -------------------------------
-
-// Get is a no-op implementation of the Get method on fwk.PodGroupLister.
-func (pgl noOpPodGroupLister) Get(namespace, podGroupName string) (*schedulingapi.PodGroup, error) {
-	return nil, errorNotFound
 }

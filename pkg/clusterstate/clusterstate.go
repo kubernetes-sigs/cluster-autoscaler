@@ -56,10 +56,6 @@ const (
 	suspendedNodeCondition = "Suspended"
 )
 
-var (
-	errMaxNodeProvisionTimeProviderNotSet = errors.New("MaxNodeProvisionTimeProvider was not set in cluster state")
-)
-
 // ScaleUpRequest contains information about the requested node group scale up.
 type ScaleUpRequest struct {
 	// NodeGroup is the node group to be scaled up.
