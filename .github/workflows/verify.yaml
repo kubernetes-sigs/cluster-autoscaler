@@ -10,6 +10,9 @@ on:
       - 'go.sum'
       - 'hack/**'
       - 'tools/**'
+      - '.golangci.yml'
+      - 'Makefile'
+      - '.github/workflows/verify.yaml'
   pull_request:
     paths:
       - '**/*.go'
@@ -17,6 +20,9 @@ on:
       - 'go.sum'
       - 'hack/**'
       - 'tools/**'
+      - '.golangci.yml'
+      - 'Makefile'
+      - '.github/workflows/verify.yaml'
 
 permissions:
   contents: read
@@ -37,6 +43,11 @@ jobs:
 
       - name: Apt-get
         run: sudo apt-get install libseccomp-dev -qq
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
 
       - name: Prepare
         run: hack/install-verify-tools.sh

@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This script checks if go versions from go.mod and tools/go.mod are in sync.
+# This script checks if go versions from go.mod and the module files in tools/
+# are in sync.
 
 set -o errexit
 set -o nounset
@@ -24,14 +25,17 @@ KUBE_ROOT=$(dirname "${BASH_SOURCE[0]}")/..
 
 # Extract Go versions using awk
 ROOT_GO_VER=$(awk '/^go [0-9]/ { print $2 }' "${KUBE_ROOT}/go.mod")
-TOOLS_GO_VER=$(awk '/^go [0-9]/ { print $2 }' "${KUBE_ROOT}/tools/go.mod")
 
-if [ "${ROOT_GO_VER}" != "${TOOLS_GO_VER}" ]; then
-  echo "Error: Go version mismatch detected!"
-  echo "  Root go.mod  : ${ROOT_GO_VER}"
-  echo "  tools/go.mod : ${TOOLS_GO_VER}"
-  echo "Please align the versions by manually updating 'tools/go.mod'."
-  exit 1
-fi
+for MOD_FILE in tools/go.mod tools/golangci-lint.mod; do
+  MOD_GO_VER=$(awk '/^go [0-9]/ { print $2 }' "${KUBE_ROOT}/${MOD_FILE}")
+
+  if [ "${ROOT_GO_VER}" != "${MOD_GO_VER}" ]; then
+    echo "Error: Go version mismatch detected!"
+    echo "  Root go.mod: ${ROOT_GO_VER}"
+    echo "  ${MOD_FILE}: ${MOD_GO_VER}"
+    echo "Please align the versions by manually updating '${MOD_FILE}'."
+    exit 1
+  fi
+done
 
 echo "Go versions are aligned: ${ROOT_GO_VER}"
