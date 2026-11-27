@@ -17,9 +17,11 @@ limitations under the License.
 package orchestrator
 
 import (
+	"cmp"
 	"context"
 	gocontext "context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -1750,16 +1752,23 @@ func TestScaleUpBalanceGroups(t *testing.T) {
 
 func TestScaleUpBalanceGroupsRespectsQuota(t *testing.T) {
 	tests := []struct {
-		name          string
-		initialSizes  map[string]int
-		maxSize       int
-		quotas        []resourcequotas.Quota
-		expectedSizes map[string]int
+		name            string
+		initialSizes    map[string]int
+		maxSize         int
+		quotas          []resourcequotas.Quota
+		wantSizes       map[string]int
+		podCount        int    // unschedulable pods and the estimate the mock expects; 0 means 6
+		bestGroup       string // the group the mock expander picks; empty means ng1
+		allOrNothing    bool   // passed through to ScaleUp
+		wantNotScaledUp bool   // the case expects no scale-up, so sizes stay at initialSizes
+		firstGroupOnly  bool   // a custom NodeGroupSetProcessor puts every node in the best group
+		wantPlaced      int    // nodes that custom processor is asked to place
 	}{
 		{
 			name:         "per-group quota caps one group",
 			initialSizes: map[string]int{"ng1": 1, "ng2": 1, "ng3": 1},
 			maxSize:      5,
+			podCount:     7,
 			quotas: []resourcequotas.Quota{
 				&resourcequotas.FakeQuota{
 					Name:        "quota-ng2",
@@ -1767,9 +1776,9 @@ func TestScaleUpBalanceGroupsRespectsQuota(t *testing.T) {
 					LimitsVal:   map[string]int64{"cpu": 2},
 				},
 			},
-			// ng2 has 1 node (1 core), quota allows 2 cores → room for 1 more.
-			// Balance tries 2 each, ng2 capped to 1. ng1: 1→3, ng2: 1→2, ng3: 1→3.
-			expectedSizes: map[string]int{"ng1": 3, "ng2": 2, "ng3": 3},
+			// ng2 has 1 node (1 core) and its quota allows 2, so it has room for 1. Balancing
+			// gives ng2 that 1, and ng1 and ng3 share the other 6.
+			wantSizes: map[string]int{"ng1": 4, "ng2": 2, "ng3": 4},
 		},
 		{
 			name:         "shared quota including bestOption caps total before balancing",
@@ -1784,7 +1793,7 @@ func TestScaleUpBalanceGroupsRespectsQuota(t *testing.T) {
 			},
 			// 5 existing nodes, shared quota of 6 → room for 1. applyLimits caps total to 1.
 			// ng1 (size 1) is smallest, so balance assigns it the 1 node.
-			expectedSizes: map[string]int{"ng1": 2, "ng2": 2, "ng3": 2},
+			wantSizes: map[string]int{"ng1": 2, "ng2": 2, "ng3": 2},
 		},
 		{
 			name:         "shared quota on similar groups only",
@@ -1797,10 +1806,9 @@ func TestScaleUpBalanceGroupsRespectsQuota(t *testing.T) {
 					LimitsVal:   map[string]int64{"nodes": 4},
 				},
 			},
-			// Shared quota on ng2+ng3 (3 existing, limit 4, room for 1). ng1 uncapped.
-			// ng2 (size 1) is smaller than ng3 (size 2), so balance sorts ng2 first.
-			// ng2 gets the 1 quota slot via ApplyDelta; ng3 sees 0 remaining, capped.
-			expectedSizes: map[string]int{"ng1": 4, "ng2": 2, "ng3": 2},
+			// ng2 and ng3 share room for 1 (3 nodes, limit 4). ng2, the smaller, takes it and
+			// unconstrained ng1 takes the other 5.
+			wantSizes: map[string]int{"ng1": 6, "ng2": 2, "ng3": 2},
 		},
 		{
 			name:         "pre-filter excludes group already at quota limit",
@@ -1815,7 +1823,235 @@ func TestScaleUpBalanceGroupsRespectsQuota(t *testing.T) {
 			},
 			// ng2 has 1 node (1 core), quota allows 1 core → no room.
 			// Pre-filter excludes ng2 from balancing entirely. Only ng1 and ng3 participate.
-			expectedSizes: map[string]int{"ng1": 4, "ng2": 1, "ng3": 4},
+			wantSizes: map[string]int{"ng1": 4, "ng2": 1, "ng3": 4},
+		},
+		{
+			name:         "per-group node quotas across the set allow full placement in one loop",
+			initialSizes: map[string]int{"ng1": 1, "ng2": 1, "ng3": 1},
+			maxSize:      5,
+			quotas: []resourcequotas.Quota{
+				&resourcequotas.FakeQuota{
+					Name:        "quota-ng1",
+					AppliesToFn: matchNodeGroups([]string{"ng1"}),
+					LimitsVal:   map[string]int64{"nodes": 3},
+				},
+				&resourcequotas.FakeQuota{
+					Name:        "quota-ng2",
+					AppliesToFn: matchNodeGroups([]string{"ng2"}),
+					LimitsVal:   map[string]int64{"nodes": 3},
+				},
+				&resourcequotas.FakeQuota{
+					Name:        "quota-ng3",
+					AppliesToFn: matchNodeGroups([]string{"ng3"}),
+					LimitsVal:   map[string]int64{"nodes": 3},
+				},
+			},
+			// Each group's own quota has room for 2. The best group alone would cap the scale-up
+			// at 2; measured across the set the bound is 6, so all 6 pods land in one loop.
+			wantSizes: map[string]int{"ng1": 3, "ng2": 3, "ng3": 3},
+		},
+		{
+			name:         "balanced scale-up claims the whole per-zone quota in one loop",
+			initialSizes: map[string]int{"ng1": 1, "ng2": 1, "ng3": 1},
+			maxSize:      10,
+			podCount:     9,
+			quotas: []resourcequotas.Quota{
+				&resourcequotas.FakeQuota{
+					Name:        "zone-ng1",
+					AppliesToFn: matchNodeGroups([]string{"ng1"}),
+					LimitsVal:   map[string]int64{"nodes": 6},
+				},
+				&resourcequotas.FakeQuota{
+					Name:        "zone-ng2",
+					AppliesToFn: matchNodeGroups([]string{"ng2"}),
+					LimitsVal:   map[string]int64{"nodes": 2},
+				},
+				&resourcequotas.FakeQuota{
+					Name:        "zone-ng3",
+					AppliesToFn: matchNodeGroups([]string{"ng3"}),
+					LimitsVal:   map[string]int64{"nodes": 2},
+				},
+			},
+			// Per-zone quotas with room for 5, 1 and 1, and 9 pending pods. ng2 and ng3 get 1
+			// each and ng1 its 5, so the set uses all of its quota in one loop.
+			wantSizes: map[string]int{"ng1": 6, "ng2": 2, "ng3": 2},
+		},
+		{
+			name:         "per-zone quota is used in full when the expander picks a zone with little room",
+			initialSizes: map[string]int{"ng1": 1, "ng2": 1, "ng3": 1},
+			maxSize:      10,
+			podCount:     9,
+			bestGroup:    "ng2",
+			quotas: []resourcequotas.Quota{
+				&resourcequotas.FakeQuota{
+					Name:        "zone-ng1",
+					AppliesToFn: matchNodeGroups([]string{"ng1"}),
+					LimitsVal:   map[string]int64{"nodes": 6},
+				},
+				&resourcequotas.FakeQuota{
+					Name:        "zone-ng2",
+					AppliesToFn: matchNodeGroups([]string{"ng2"}),
+					LimitsVal:   map[string]int64{"nodes": 2},
+				},
+				&resourcequotas.FakeQuota{
+					Name:        "zone-ng3",
+					AppliesToFn: matchNodeGroups([]string{"ng3"}),
+					LimitsVal:   map[string]int64{"nodes": 2},
+				},
+			},
+			// As above, but the expander picks ng2, whose zone has room for 1.
+			wantSizes: map[string]int{"ng1": 6, "ng2": 2, "ng3": 2},
+		},
+		{
+			name:         "shared quota short of demand splits evenly",
+			initialSizes: map[string]int{"ng1": 1, "ng2": 1, "ng3": 1},
+			maxSize:      20,
+			podCount:     25,
+			quotas: []resourcequotas.Quota{
+				&resourcequotas.FakeQuota{
+					Name:        "shared",
+					AppliesToFn: resourcequotas.MatchEveryNode,
+					LimitsVal:   map[string]int64{"nodes": 9},
+				},
+			},
+			// Three groups share room for 6 and 25 are wanted, so the scale-up is capped at 6
+			// and split evenly.
+			wantSizes: map[string]int{"ng1": 3, "ng2": 3, "ng3": 3},
+		},
+		{
+			name:         "larger group takes what a small capped group cannot",
+			initialSizes: map[string]int{"ng1": 1, "ng2": 10, "ng3": 1},
+			maxSize:      20,
+			quotas: []resourcequotas.Quota{
+				&resourcequotas.FakeQuota{
+					Name:        "quota-ng1",
+					AppliesToFn: matchNodeGroups([]string{"ng1"}),
+					LimitsVal:   map[string]int64{"nodes": 2},
+				},
+				&resourcequotas.FakeQuota{
+					Name:        "quota-ng3",
+					AppliesToFn: matchNodeGroups([]string{"ng3"}),
+					LimitsVal:   map[string]int64{"nodes": 1},
+				},
+			},
+			// ng3 is at its quota and drops out. Smallest first, ng1 gets the 1 node its quota
+			// allows, and the other 5 go to ng2.
+			wantSizes: map[string]int{"ng1": 2, "ng2": 15, "ng3": 1},
+		},
+		{
+			name:         "all-or-nothing goes ahead when per-zone quotas together fit every pod",
+			initialSizes: map[string]int{"ng1": 1, "ng2": 1, "ng3": 1},
+			maxSize:      20,
+			podCount:     6,
+			allOrNothing: true,
+			quotas: []resourcequotas.Quota{
+				&resourcequotas.FakeQuota{
+					Name:        "zone-ng1",
+					AppliesToFn: matchNodeGroups([]string{"ng1"}),
+					LimitsVal:   map[string]int64{"nodes": 3},
+				},
+				&resourcequotas.FakeQuota{
+					Name:        "zone-ng2",
+					AppliesToFn: matchNodeGroups([]string{"ng2"}),
+					LimitsVal:   map[string]int64{"nodes": 3},
+				},
+				&resourcequotas.FakeQuota{
+					Name:        "zone-ng3",
+					AppliesToFn: matchNodeGroups([]string{"ng3"}),
+					LimitsVal:   map[string]int64{"nodes": 3},
+				},
+			},
+			// Each zone has room for 2. No zone fits the 6 pods alone, but the set does, so
+			// all-or-nothing goes through.
+			wantSizes: map[string]int{"ng1": 3, "ng2": 3, "ng3": 3},
+		},
+		{
+			name:            "all-or-nothing aborts when the shared quota cannot fit every pod",
+			initialSizes:    map[string]int{"ng1": 1, "ng2": 1, "ng3": 1},
+			maxSize:         20,
+			podCount:        9,
+			allOrNothing:    true,
+			wantNotScaledUp: true,
+			quotas: []resourcequotas.Quota{
+				&resourcequotas.FakeQuota{
+					Name:        "shared",
+					AppliesToFn: resourcequotas.MatchEveryNode,
+					LimitsVal:   map[string]int64{"nodes": 9},
+				},
+			},
+			// Room for 6 but 9 pods: all-or-nothing cannot place them all, so it scales nothing.
+			wantSizes: map[string]int{"ng1": 1, "ng2": 1, "ng3": 1},
+		},
+		{
+			name:         "global and per-zone quotas both apply without double counting",
+			initialSizes: map[string]int{"ng1": 1, "ng2": 10},
+			maxSize:      20,
+			podCount:     6,
+			quotas: []resourcequotas.Quota{
+				&resourcequotas.FakeQuota{
+					Name:        "global",
+					AppliesToFn: resourcequotas.MatchEveryNode,
+					LimitsVal:   map[string]int64{"nodes": 16},
+				},
+				&resourcequotas.FakeQuota{
+					Name:        "zone-ng1",
+					AppliesToFn: matchNodeGroups([]string{"ng1"}),
+					LimitsVal:   map[string]int64{"nodes": 2},
+				},
+			},
+			// The global quota leaves room for 5 and ng1's own quota for 1. ng1 takes its 1,
+			// and the global room carries the other 4 to ng2; neither quota is exceeded.
+			wantSizes: map[string]int{"ng1": 2, "ng2": 14},
+		},
+		{
+			name:         "smallest groups fill first within a shared quota",
+			initialSizes: map[string]int{"ng1": 1, "ng2": 2, "ng3": 3, "ng4": 4},
+			maxSize:      20,
+			podCount:     11,
+			quotas: []resourcequotas.Quota{
+				&resourcequotas.FakeQuota{
+					Name:        "shared-ng3-ng4",
+					AppliesToFn: matchNodeGroups([]string{"ng3", "ng4"}),
+					LimitsVal:   map[string]int64{"nodes": 9},
+				},
+			},
+			// ng3 and ng4 share room for 2. Smallest first, ng3 reaches 5 before that room runs
+			// out and ng4 stays at 4; ng1 and ng2 take the rest.
+			wantSizes: map[string]int{"ng1": 6, "ng2": 6, "ng3": 5, "ng4": 4},
+		},
+		{
+			name:         "shared quota over a subset stays balanced across those groups",
+			initialSizes: map[string]int{"ng1": 1, "ng2": 1, "ng3": 1},
+			maxSize:      20,
+			podCount:     6,
+			quotas: []resourcequotas.Quota{
+				&resourcequotas.FakeQuota{
+					Name:        "shared-ng2-ng3",
+					AppliesToFn: matchNodeGroups([]string{"ng2", "ng3"}),
+					LimitsVal:   map[string]int64{"nodes": 4},
+				},
+			},
+			// ng2 and ng3 share room for 2. They should take one each (2 and 2), not one group
+			// taking both while the other is capped to zero.
+			wantSizes: map[string]int{"ng1": 5, "ng2": 2, "ng3": 2},
+		},
+		{
+			name:           "custom processor keeps the zones it chose",
+			initialSizes:   map[string]int{"ng1": 5, "ng2": 1, "ng3": 1},
+			maxSize:        20,
+			podCount:       10,
+			firstGroupOnly: true,
+			quotas: []resourcequotas.Quota{
+				&resourcequotas.FakeQuota{
+					Name:        "zone-of-ng1",
+					AppliesToFn: matchNodeGroups([]string{"ng1"}),
+					LimitsVal:   map[string]int64{"nodes": 13},
+				},
+			},
+			// The processor places only in ng1, whose zone has room for 8. It is asked for those 8,
+			// not for the 10 that ng2 and ng3 could take, and none go to the zones it left out.
+			wantPlaced: 8,
+			wantSizes:  map[string]int{"ng1": 13, "ng2": 1, "ng3": 1},
 		},
 	}
 
@@ -1825,22 +2061,16 @@ func TestScaleUpBalanceGroupsRespectsQuota(t *testing.T) {
 				return nil
 			}).Build()
 
-			type ngInfo struct {
-				min, max, size int
-			}
-			testCfg := map[string]ngInfo{
-				"ng1": {min: 1, max: tt.maxSize, size: tt.initialSizes["ng1"]},
-				"ng2": {min: 1, max: tt.maxSize, size: tt.initialSizes["ng2"]},
-				"ng3": {min: 1, max: tt.maxSize, size: tt.initialSizes["ng3"]},
-			}
+			gids := slices.Sorted(maps.Keys(tt.initialSizes))
 			podList := make([]*apiv1.Pod, 0)
 			nodes := make([]*apiv1.Node, 0)
 
 			now := time.Now()
 
-			for gid, gconf := range testCfg {
-				provider.AddNodeGroup(gid, gconf.min, gconf.max, gconf.size)
-				for i := 0; i < gconf.size; i++ {
+			for _, gid := range gids {
+				size := tt.initialSizes[gid]
+				provider.AddNodeGroup(gid, 1, tt.maxSize, size)
+				for i := range size {
 					nodeName := fmt.Sprintf("%v-node-%v", gid, i)
 					node := BuildTestNode(nodeName, 100, 1000)
 					node.Labels[nodeGroupLabel] = gid
@@ -1868,6 +2098,10 @@ func TestScaleUpBalanceGroupsRespectsQuota(t *testing.T) {
 			processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(options)
 			// Override NodeGroupSetProcessor to ignore nodeGroupLabel so ng1/ng2/ng3 are recognized as similar.
 			processors.NodeGroupSetProcessor = nodegroupset.NewDefaultNodeGroupSetProcessor([]string{nodeGroupLabel}, config.NodeGroupDifferenceRatios{})
+			firstGroupOnly := &firstGroupOnlyNodeGroupSetProcessor{NodeGroupSetProcessor: processors.NodeGroupSetProcessor}
+			if tt.firstGroupOnly {
+				processors.NodeGroupSetProcessor = firstGroupOnly
+			}
 			autoscalingCtx, err := NewScaleTestAutoscalingContext(options, &fake.Clientset{}, listers, provider, nil, nil, templateNodeInfoRegistry)
 			assert.NoError(t, err)
 			err = autoscalingCtx.ClusterSnapshot.SetClusterState(gocontext.Background(), nodes, podList, nil, nil)
@@ -1877,12 +2111,16 @@ func TestScaleUpBalanceGroupsRespectsQuota(t *testing.T) {
 			clusterState := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute}), autoscalingCtx.TemplateNodeInfoRegistry, clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier))
 			clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now())
 
+			podCount := tt.podCount
+			if podCount == 0 {
+				podCount = 6
+			}
 			pods := make([]*apiv1.Pod, 0)
-			for i := 0; i < 6; i++ {
+			for i := range podCount {
 				pods = append(pods, BuildTestPod(fmt.Sprintf("test-pod-%v", i), 80, 0))
 			}
 
-			autoscalingCtx.ExpanderStrategy = NewMockReportingStrategy(t, &GroupSizeChange{GroupName: "ng1", SizeChange: 6}, nil)
+			autoscalingCtx.ExpanderStrategy = NewMockReportingStrategy(t, &GroupSizeChange{GroupName: cmp.Or(tt.bestGroup, "ng1"), SizeChange: podCount}, nil)
 
 			cloudQuotasProvider := resourcequotas.NewCloudQuotasProvider(provider)
 			fakeQuotasProvider := resourcequotas.NewFakeProvider(tt.quotas)
@@ -1892,18 +2130,41 @@ func TestScaleUpBalanceGroupsRespectsQuota(t *testing.T) {
 			})
 			suOrchestrator := New()
 			suOrchestrator.Initialize(&autoscalingCtx, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, trackerFactory)
-			scaleUpStatus, typedErr := suOrchestrator.ScaleUp(gocontext.Background(), pods, nodes, []*appsv1.DaemonSet{}, nodeInfos, false)
+			scaleUpStatus, typedErr := suOrchestrator.ScaleUp(t.Context(), pods, nodes, []*appsv1.DaemonSet{}, nodeInfos, tt.allOrNothing)
 
 			assert.NoError(t, typedErr)
-			assert.True(t, scaleUpStatus.WasSuccessful())
+			if tt.wantNotScaledUp {
+				assert.False(t, scaleUpStatus.WasSuccessful())
+			} else {
+				assert.True(t, scaleUpStatus.WasSuccessful())
+			}
 
 			for _, group := range provider.NodeGroups(gocontext.Background()) {
 				size, err := group.TargetSize(gocontext.Background())
 				assert.NoError(t, err)
-				assert.Equal(t, tt.expectedSizes[group.Id()], size, "unexpected size for %s", group.Id())
+				assert.Equal(t, tt.wantSizes[group.Id()], size, "unexpected size for %s", group.Id())
 			}
+			assert.Equal(t, tt.wantPlaced, firstGroupOnly.placed, "nodes the custom processor was asked to place")
 		})
 	}
+}
+
+// firstGroupOnlyNodeGroupSetProcessor finds similar node groups like the processor it wraps, but
+// puts every node in the first group, as a processor that leaves some zones out on purpose would.
+// It embeds the interface, so it is not a QuotaAwareNodeGroupSetProcessor.
+type firstGroupOnlyNodeGroupSetProcessor struct {
+	nodegroupset.NodeGroupSetProcessor
+	placed int
+}
+
+func (p *firstGroupOnlyNodeGroupSetProcessor) BalanceScaleUpBetweenGroups(ctx gocontext.Context, _ *ca_context.AutoscalingContext, groups []cloudprovider.NodeGroup, newNodes int) ([]nodegroupset.ScaleUpInfo, errors.AutoscalerError) {
+	p.placed += newNodes
+	ng := groups[0]
+	size, err := ng.TargetSize(ctx)
+	if err != nil {
+		return nil, errors.ToAutoscalerError(errors.CloudProviderError, err)
+	}
+	return []nodegroupset.ScaleUpInfo{{Group: ng, CurrentSize: size, NewSize: size + newNodes, MaxSize: ng.MaxSize(ctx)}}, nil
 }
 
 func TestScaleUpAutoprovisionedNodeGroup(t *testing.T) {
@@ -1971,6 +2232,91 @@ func TestScaleUpAutoprovisionedNodeGroup(t *testing.T) {
 		}
 	}
 	assert.True(t, foundP2, "p2 was not found in PodsRemainUnschedulable")
+}
+
+// createRenamingNodeGroupManager creates the node group under a new id, as a cloud provider that
+// mints its own does, so balancing checks quota for an id the quota cache has not seen.
+type createRenamingNodeGroupManager struct {
+	*MockAutoprovisioningNodeGroupManager
+	createdID string
+}
+
+func (m *createRenamingNodeGroupManager) CreateNodeGroup(autoscalingCtx *ca_context.AutoscalingContext, nodeGroup cloudprovider.NodeGroup) (nodegroups.CreateNodeGroupResult, errors.AutoscalerError) {
+	tcp := autoscalingCtx.CloudProvider.(*testprovider.TestCloudProvider)
+	tng := nodeGroup.(*testprovider.TestNodeGroup)
+	created, err := tcp.BuildNodeGroup(m.createdID, 0, 1000, 0, false, true, tng.MachineType(), nil).Create(m.T.Context())
+	if err != nil {
+		return nodegroups.CreateNodeGroupResult{}, errors.ToAutoscalerError(errors.InternalError, err)
+	}
+	return nodegroups.CreateNodeGroupResult{MainCreatedNodeGroup: created}, nil
+}
+
+func TestScaleUpFailsClosedWhenCreatedGroupQuotaCannotBeEvaluated(t *testing.T) {
+	createdGroups := make(chan string, 10)
+	expandedGroups := make(chan string, 10)
+
+	p1 := BuildTestPod("p1", 80, 0)
+	fakeClient := &fake.Clientset{}
+	t1 := BuildTestNode("t1", 4000, 1000000)
+	SetNodeReadyState(t1, true, time.Time{})
+	ti1 := framework.NewTestNodeInfo(t1)
+
+	provider := testprovider.NewTestCloudProviderBuilder().WithOnScaleUp(func(nodeGroup string, increase int) error {
+		expandedGroups <- fmt.Sprintf("%s-%d", nodeGroup, increase)
+		return nil
+	}).WithOnNodeGroupCreate(func(nodeGroup string) error {
+		createdGroups <- nodeGroup
+		return nil
+	}).WithMachineTypes([]string{"T1"}).WithMachineTemplates(map[string]*framework.NodeInfo{"T1": ti1}).Build()
+
+	options := config.AutoscalingOptions{
+		EstimatorName:                  estimator.BinpackingEstimatorName,
+		MaxCoresTotal:                  5000 * 64,
+		MaxMemoryTotal:                 5000 * 64 * 20,
+		MaxNodeGroupBinpackingDuration: 1 * time.Second,
+	}
+	podLister := kube_util.NewTestPodLister([]*apiv1.Pod{})
+	listers := kube_util.NewListerRegistry(nil, nil, podLister, nil, nil, nil, nil, nil, nil)
+	processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(options)
+	autoscalingCtx, err := NewScaleTestAutoscalingContext(options, fakeClient, listers, provider, nil, nil, templateNodeInfoRegistry)
+	assert.NoError(t, err)
+
+	clusterState := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute}), autoscalingCtx.TemplateNodeInfoRegistry, clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier))
+
+	processors.NodeGroupListProcessor = &MockAutoprovisioningNodeGroupListProcessor{T: t}
+	processors.NodeGroupManager = &createRenamingNodeGroupManager{
+		MockAutoprovisioningNodeGroupManager: &MockAutoprovisioningNodeGroupManager{T: t, ExtraGroups: 0},
+		createdID:                            "created-T1",
+	}
+	// Only the created id fails, so the candidate passes applyLimits and the error comes from balancing.
+	quotaErr := errors.NewAutoscalerError(errors.CloudProviderError, "node resources unavailable")
+	processors.CustomResourcesProcessor = &failingCustomResourcesProcessor{failFor: "created-T1", err: quotaErr}
+
+	nodes := []*apiv1.Node{}
+	_ = autoscalingCtx.TemplateNodeInfoRegistry.Recompute(t.Context(), &autoscalingCtx, nodes, []*appsv1.DaemonSet{}, taints.TaintConfig{}, time.Now())
+	nodeInfos := autoscalingCtx.TemplateNodeInfoRegistry.GetNodeInfos()
+
+	quotasProvider := resourcequotas.NewCloudQuotasProvider(provider)
+	trackerFactory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{
+		QuotaProvider:            quotasProvider,
+		CustomResourcesProcessor: processors.CustomResourcesProcessor,
+	})
+	suOrchestrator := New()
+	suOrchestrator.Initialize(&autoscalingCtx, processors, clusterState, newEstimatorBuilder(), taints.TaintConfig{}, trackerFactory)
+	scaleUpStatus, aErr := suOrchestrator.ScaleUp(t.Context(), []*apiv1.Pod{p1}, nodes, []*appsv1.DaemonSet{}, nodeInfos, false)
+
+	// The created group's quota cannot be evaluated, so the scale-up fails there instead of
+	// resizing it as if no quota applied. The group is created, but nothing reaches the executor.
+	assert.Error(t, aErr)
+	assert.False(t, scaleUpStatus.WasSuccessful())
+	assert.Equal(t, "created-T1", utils.GetStringFromChan(createdGroups))
+	assert.Len(t, expandedGroups, 0)
+	createdNG := provider.GetNodeGroup("created-T1")
+	if assert.NotNil(t, createdNG) {
+		size, err := createdNG.TargetSize(t.Context())
+		assert.NoError(t, err)
+		assert.Equal(t, 0, size)
+	}
 }
 
 func TestScaleUpBalanceAutoprovisionedNodeGroups(t *testing.T) {
@@ -2710,6 +3056,8 @@ func newQuotaCapTestEnv(t *testing.T, quotas []resourcequotas.Quota, crp customr
 
 	n1 := BuildTestNode("n1", 1000, 1000)
 	n2 := BuildTestNode("n2", 1000, 1000)
+	n1.Labels[nodeGroupLabel] = "ng1"
+	n2.Labels[nodeGroupLabel] = "ng2"
 	now := time.Now()
 	SetNodeReadyState(n1, true, now.Add(-2*time.Minute))
 	SetNodeReadyState(n2, true, now.Add(-2*time.Minute))
@@ -2831,6 +3179,66 @@ func TestCapScaleUpsByQuotaSharedQuota(t *testing.T) {
 		sizes[sui.Group.Id()] = sui.NewSize
 	}
 	assert.Equal(t, map[string]int{"ng1": 4}, sizes)
+}
+
+func TestApplyLimitsBoundsSharedQuotaAndLeavesTrackerUnchanged(t *testing.T) {
+	quotas := []resourcequotas.Quota{
+		&resourcequotas.FakeQuota{
+			Name:        "shared",
+			AppliesToFn: resourcequotas.MatchEveryNode,
+			LimitsVal:   map[string]int64{resourcequotas.ResourceNodes: 8},
+		},
+	}
+	env := newQuotaCapTestEnv(t, quotas, nil)
+	similar := []cloudprovider.NodeGroup{env.groups["ng2"], env.groups["ng3"]}
+
+	// Usage is 2 (ng1 and ng2 have a node each), so the shared room is 6. A request for 25 is
+	// bounded to that 6: the shared quota counts once, not once per group.
+	allowed, aErr := env.orchestrator.applyLimits(t.Context(), 25, env.tracker, env.groups["ng1"], similar, env.nodeInfos)
+	assert.NoError(t, aErr)
+	assert.Equal(t, 6, allowed)
+
+	// applyLimits reserves on a clone, so the live tracker is unspent and a second call gets the same bound.
+	again, aErr := env.orchestrator.applyLimits(t.Context(), 25, env.tracker, env.groups["ng1"], similar, env.nodeInfos)
+	assert.NoError(t, aErr)
+	assert.Equal(t, 6, again)
+}
+
+func TestApplyLimitsCountsSimilarGroupsUpToMaxSize(t *testing.T) {
+	quotas := []resourcequotas.Quota{
+		&resourcequotas.FakeQuota{
+			Name:        "ng1-only",
+			AppliesToFn: matchNodeGroups([]string{"ng1"}),
+			LimitsVal:   map[string]int64{resourcequotas.ResourceNodes: 3},
+		},
+	}
+	env := newQuotaCapTestEnv(t, quotas, nil)
+	similar := []cloudprovider.NodeGroup{env.groups["ng2"], env.groups["ng3"]}
+
+	// ng1's quota leaves room for 2. ng2 and ng3 have no quota, but can only grow by 9 and
+	// 10 to their max size, so 21 of the 25 wanted are allowed.
+	allowed, aErr := env.orchestrator.applyLimits(t.Context(), 25, env.tracker, env.groups["ng1"], similar, env.nodeInfos)
+	assert.NoError(t, aErr)
+	assert.Equal(t, 21, allowed)
+}
+
+func TestApplyLimitsSkipsSimilarGroupWithUnevaluableQuota(t *testing.T) {
+	quotas := []resourcequotas.Quota{
+		&resourcequotas.FakeQuota{
+			Name:        "ng1-only",
+			AppliesToFn: matchNodeGroups([]string{"ng1"}),
+			LimitsVal:   map[string]int64{resourcequotas.ResourceNodes: 3},
+		},
+	}
+	quotaErr := errors.NewAutoscalerError(errors.CloudProviderError, "custom resources unavailable")
+	env := newQuotaCapTestEnv(t, quotas, &failingCustomResourcesProcessor{failFor: "ng3", err: quotaErr})
+	similar := []cloudprovider.NodeGroup{env.groups["ng3"], env.groups["ng2"]}
+
+	// ng1's quota leaves room for 2 and ng3's quota cannot be evaluated, so ng3 is left out
+	// and ng2 adds the 9 its max size allows. Counting ng3 anyway would give 21.
+	allowed, aErr := env.orchestrator.applyLimits(t.Context(), 25, env.tracker, env.groups["ng1"], similar, env.nodeInfos)
+	assert.NoError(t, aErr)
+	assert.Equal(t, 11, allowed)
 }
 
 type failingNodeGroupListProcessor struct {

@@ -196,19 +196,54 @@ func (o *ScaleUpOrchestrator) ScaleUp(
 	}, nil
 }
 
-func (o *ScaleUpOrchestrator) applyLimits(ctx context.Context, newNodes int, tracker *resourcequotas.Tracker, nodeGroup cloudprovider.NodeGroup, nodeInfos map[string]*framework.NodeInfo) (int, errors.AutoscalerError) {
+// applyLimits caps newNodes to the quota room of the node group and the similar groups it
+// balances into. It reserves on a clone of the tracker, so a shared quota is counted once.
+func (o *ScaleUpOrchestrator) applyLimits(ctx context.Context, newNodes int, tracker *resourcequotas.Tracker, nodeGroup cloudprovider.NodeGroup, similarNodeGroups []cloudprovider.NodeGroup, nodeInfos map[string]*framework.NodeInfo) (int, errors.AutoscalerError) {
 	logger := klog.FromContext(ctx)
-	nodeInfo, found := nodeInfos[nodeGroup.Id()]
-	if !found {
+	if _, found := nodeInfos[nodeGroup.Id()]; !found {
 		// This should never happen, as we already should have retrieved nodeInfo for any considered nodegroup.
 		logger.Error(nil, "No node info for best expansion option", "nodeGroupId", nodeGroup.Id())
 		return 0, errors.NewAutoscalerError(errors.CloudProviderError, "No node info for best expansion option!")
 	}
-	checkResult, err := tracker.CheckQuota(ctx, o.autoscalingCtx, nodeGroup, nodeInfo.Node(), newNodes)
-	if err != nil {
-		return 0, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to check resource quotas: ")
+	clone := tracker.Clone()
+	allowed := 0
+	groups := append([]cloudprovider.NodeGroup{nodeGroup}, similarNodeGroups...)
+	for i, ng := range groups {
+		if allowed >= newNodes {
+			break
+		}
+		nodeInfo, found := nodeInfos[ng.Id()]
+		if !found {
+			continue
+		}
+		wanted := newNodes - allowed
+		if i > 0 {
+			// Room past a similar group's max size cannot be used, so it is not counted. The best
+			// group stays uncapped, as before, because balancing recomputes the similar groups.
+			size, err := ng.TargetSize(ctx)
+			if err != nil {
+				continue
+			}
+			if wanted = min(wanted, ng.MaxSize(ctx)-size); wanted <= 0 {
+				continue
+			}
+		}
+		// ConsumeQuota reserves nothing unless the whole delta fits, so reserve what CheckQuota
+		// allows. That reservation stops the groups after this one counting a shared quota again.
+		checkResult, err := clone.CheckQuota(ctx, o.autoscalingCtx, ng, nodeInfo.Node(), wanted)
+		if err == nil && checkResult.AllowedDelta > 0 {
+			_, err = clone.ConsumeQuota(ctx, o.autoscalingCtx, ng, nodeInfo.Node(), checkResult.AllowedDelta)
+		}
+		if err != nil {
+			if i == 0 {
+				return 0, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to check resource quotas: ")
+			}
+			// filterValidScaleUpNodeGroups already dropped, and logged, any group whose quota failed.
+			continue
+		}
+		allowed += checkResult.AllowedDelta
 	}
-	return checkResult.AllowedDelta, nil
+	return allowed, nil
 }
 
 // ScaleUpToNodeGroupMinSize tries to scale up node groups that have less nodes
@@ -693,7 +728,13 @@ func (o *ScaleUpOrchestrator) balanceScaleUps(
 		}
 		logger.V(1).Info("Splitting scale-up between similar node groups", "nodeGroupCount", len(targetNodeGroups), "nodeGroupNames", strings.Join(names, ", "))
 	}
-	scaleUpInfos, aErr := o.processors.NodeGroupSetProcessor.BalanceScaleUpBetweenGroups(ctx, o.autoscalingCtx, targetNodeGroups, newNodes)
+	var scaleUpInfos []nodegroupset.ScaleUpInfo
+	var aErr errors.AutoscalerError
+	if p, ok := o.processors.NodeGroupSetProcessor.(nodegroupset.QuotaAwareNodeGroupSetProcessor); ok {
+		scaleUpInfos, aErr = p.BalanceScaleUpBetweenGroupsWithQuota(ctx, o.autoscalingCtx, targetNodeGroups, newNodes, nodeInfos, tracker)
+	} else {
+		scaleUpInfos, aErr = o.processors.NodeGroupSetProcessor.BalanceScaleUpBetweenGroups(ctx, o.autoscalingCtx, targetNodeGroups, newNodes)
+	}
 	if aErr != nil {
 		return nil, aErr
 	}
@@ -704,9 +745,10 @@ func (o *ScaleUpOrchestrator) balanceScaleUps(
 // out groups capped to zero. Uses ConsumeQuota to commit consumed quota so subsequent groups
 // sharing the same quota see the updated limits. A quota that cannot be evaluated is an error
 // rather than an unlimited group, as it already is in applyLimits.
-// Note: unclaimed capacity from a capped group is not redistributed to other groups;
-// a group capped below its balanced delta may leave some pods unschedulable until the
-// next autoscaler cycle.
+// Note: unclaimed capacity from a capped group is not redistributed to other groups, which the
+// NodeGroupSetProcessor may have left out on purpose. A group capped below its balanced delta may
+// leave some pods unschedulable until the next autoscaler cycle. The plan of a
+// QuotaAwareNodeGroupSetProcessor already fits, so for it this only reserves the quota.
 func (o *ScaleUpOrchestrator) capScaleUpsByQuota(
 	ctx context.Context,
 	scaleUpInfos []nodegroupset.ScaleUpInfo,
@@ -1112,7 +1154,14 @@ func (o *ScaleUpOrchestrator) prepareScaleUp(ctx context.Context, args scaleUpCt
 		return scaleUpPlan{}, st, err
 	}
 
-	newNodes, aErr = o.applyLimits(ctx, newNodes, args.tracker, bestOption.NodeGroup, args.nodeInfos)
+	// Only a QuotaAwareNodeGroupSetProcessor is known to use the quota of the similar groups. Other
+	// processors get the room of the best group alone, as before, so a plan that places only in the
+	// best group is not trimmed after it was made.
+	similarNodeGroups := bestOption.SimilarNodeGroups
+	if _, ok := o.processors.NodeGroupSetProcessor.(nodegroupset.QuotaAwareNodeGroupSetProcessor); !ok {
+		similarNodeGroups = nil
+	}
+	newNodes, aErr = o.applyLimits(ctx, newNodes, args.tracker, bestOption.NodeGroup, similarNodeGroups, args.nodeInfos)
 	if aErr != nil {
 		markedEquivalenceGroups := markAllGroupsAsUnschedulable(args.podEquivalenceGroups, ScaleUpExecutionErrorReason)
 		st, err := status.UpdateScaleUpError(

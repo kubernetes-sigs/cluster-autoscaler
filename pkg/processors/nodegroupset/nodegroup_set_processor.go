@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
+	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
 )
@@ -83,6 +84,20 @@ type NodeGroupSetProcessor interface {
 
 	BalanceScaleUpBetweenGroups(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, groups []cloudprovider.NodeGroup, newNodes int) ([]ScaleUpInfo, errors.AutoscalerError)
 	CleanUp()
+}
+
+// QuotaAwareNodeGroupSetProcessor is a NodeGroupSetProcessor that can balance a scale-up within
+// resource quotas. When a processor implements it, the scale-up orchestrator counts the quota room
+// of the similar node groups in the scale-up size and calls BalanceScaleUpBetweenGroupsWithQuota.
+// Otherwise it calls BalanceScaleUpBetweenGroups. Either way, it then caps each group of the plan
+// in place by quota and reserves that quota. A processor that embeds BalancingNodeGroupSetProcessor
+// and overrides BalanceScaleUpBetweenGroups has to override this method too.
+type QuotaAwareNodeGroupSetProcessor interface {
+	NodeGroupSetProcessor
+	// BalanceScaleUpBetweenGroupsWithQuota splits a scale-up like BalanceScaleUpBetweenGroups, but
+	// keeps the result within the quotas of the tracker. It must not consume quota on the tracker.
+	BalanceScaleUpBetweenGroupsWithQuota(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, groups []cloudprovider.NodeGroup, newNodes int,
+		nodeInfos map[string]*framework.NodeInfo, tracker *resourcequotas.Tracker) ([]ScaleUpInfo, errors.AutoscalerError)
 }
 
 // NoOpNodeGroupSetProcessor returns no similar node groups and doesn't do any balancing.

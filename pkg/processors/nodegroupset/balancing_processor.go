@@ -22,6 +22,7 @@ import (
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
+	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
 
@@ -79,6 +80,32 @@ func (b *BalancingNodeGroupSetProcessor) FindSimilarNodeGroups(ctx context.Conte
 // of all NodeGroups it will be capped to total capacity. In particular if all
 // group already have MaxSize, empty list will be returned.
 func (b *BalancingNodeGroupSetProcessor) BalanceScaleUpBetweenGroups(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, groups []cloudprovider.NodeGroup, newNodes int) ([]ScaleUpInfo, errors.AutoscalerError) {
+	return balanceScaleUp(ctx, groups, newNodes, nil)
+}
+
+// BalanceScaleUpBetweenGroupsWithQuota balances like BalanceScaleUpBetweenGroups, but a group also
+// stops growing when the tracker has no quota left for its next node. Quota is reserved on a clone,
+// so a shared quota is counted once and the tracker itself is not changed.
+func (b *BalancingNodeGroupSetProcessor) BalanceScaleUpBetweenGroupsWithQuota(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, groups []cloudprovider.NodeGroup, newNodes int,
+	nodeInfos map[string]*framework.NodeInfo, tracker *resourcequotas.Tracker) ([]ScaleUpInfo, errors.AutoscalerError) {
+	clone := tracker.Clone()
+	fits := func(ng cloudprovider.NodeGroup) (bool, errors.AutoscalerError) {
+		nodeInfo, found := nodeInfos[ng.Id()]
+		if !found {
+			return false, errors.NewAutoscalerErrorf(errors.CloudProviderError, "no node info for balanced node group %s", ng.Id())
+		}
+		result, err := clone.ConsumeQuota(ctx, autoscalingCtx, ng, nodeInfo.Node(), 1)
+		if err != nil {
+			return false, errors.ToAutoscalerError(errors.InternalError, err).AddPrefix("failed to check resource quotas for node group %s: ", ng.Id())
+		}
+		return result.AllowedDelta == 1, nil
+	}
+	return balanceScaleUp(ctx, groups, newNodes, fits)
+}
+
+// balanceScaleUp adds nodes to the smallest group first. If fits is set, a group that it rejects
+// is treated as full.
+func balanceScaleUp(ctx context.Context, groups []cloudprovider.NodeGroup, newNodes int, fits func(cloudprovider.NodeGroup) (bool, errors.AutoscalerError)) ([]ScaleUpInfo, errors.AutoscalerError) {
 	logger := klog.FromContext(ctx)
 	if len(groups) == 0 {
 		return []ScaleUpInfo{}, errors.NewAutoscalerError(
@@ -118,17 +145,17 @@ func (b *BalancingNodeGroupSetProcessor) BalanceScaleUpBetweenGroups(ctx context
 
 	// The actual balancing algorithm.
 	// Sort the node groups by current size and just loop over nodes adding
-	// to smallest group. If a group hits max size remove it from the list
-	// (by moving it to start of the list and increasing startIndex).
+	// to smallest group. If a group hits max size, or fits rejects it, remove
+	// it from the list (by moving it to start of the list and increasing startIndex).
 	//
-	// In each iteration we either allocate one node, or 'remove' a maxed out
+	// In each iteration we either allocate one node, or 'remove' a full
 	// node group, so this will terminate in O(#nodes + #node groups) steps.
-	// We already know that newNodes <= total capacity, so we don't have to
-	// worry about accidentally removing all node groups while we still
-	// have nodes to allocate.
+	// Without fits, newNodes <= total capacity, so we never remove all node
+	// groups while we still have nodes to allocate. With fits we can, so the
+	// loop also stops when no group is left.
 	//
 	// Loop invariants:
-	// 1. i < startIndex -> scaleUpInfos[i].CurrentSize == scaleUpInfos[i].MaxSize
+	// 1. i < startIndex -> scaleUpInfos[i] cannot grow
 	// 2. i >= startIndex -> scaleUpInfos[i].CurrentSize < scaleUpInfos[i].MaxSize
 	// 3. startIndex <= currentIndex < len(scaleUpInfos)
 	// 4. currentIndex <= i < j -> scaleUpInfos[i].CurrentSize <= scaleUpInfos[j].CurrentSize
@@ -139,10 +166,18 @@ func (b *BalancingNodeGroupSetProcessor) BalanceScaleUpBetweenGroups(ctx context
 	})
 	startIndex := 0
 	currentIndex := 0
-	for newNodes > 0 {
+	// Quota can fill every group before newNodes runs out.
+	for newNodes > 0 && startIndex < len(scaleUpInfos) {
 		currentInfo := &scaleUpInfos[currentIndex]
 
-		if currentInfo.NewSize < currentInfo.MaxSize {
+		canGrow := currentInfo.NewSize < currentInfo.MaxSize
+		if canGrow && fits != nil {
+			var aErr errors.AutoscalerError
+			if canGrow, aErr = fits(currentInfo.Group); aErr != nil {
+				return []ScaleUpInfo{}, aErr
+			}
+		}
+		if canGrow {
 			// Add a node to group on currentIndex
 			currentInfo.NewSize++
 			newNodes--
