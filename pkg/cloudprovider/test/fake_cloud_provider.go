@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/rand"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
+	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/experimental"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
@@ -308,6 +309,8 @@ func (c *CloudProvider) ConfigureHasInstanceBehavior(notImplemented bool) {
 	c.hasInstanceNotImplemented = notImplemented
 }
 
+var _ experimental.InstanceCreator = (*NodeGroup)(nil)
+
 // NodeGroup is a fake implementation of the cloudprovider.NodeGroup interface for testing.
 type NodeGroup struct {
 	sync.RWMutex
@@ -478,29 +481,50 @@ func (n *NodeGroup) TargetSize(ctx context.Context) (int, error) {
 
 // IncreaseSize adds nodes to the node group and updates internal instance mapping.
 func (n *NodeGroup) IncreaseSize(ctx context.Context, delta int) error {
+	_, err := n.IncreaseSizeWithInstances(ctx, delta)
+	return err
+}
+
+// IncreaseSizeWithInstances adds nodes to the node group like IncreaseSize, and returns the created instances.
+func (n *NodeGroup) IncreaseSizeWithInstances(ctx context.Context, delta int) ([]cloudprovider.Instance, error) {
+	if delta <= 0 {
+		return nil, fmt.Errorf("size increase must be positive, got %d", delta)
+	}
+
 	n.Lock()
 	defer n.Unlock()
 
 	if n.targetSize+delta > n.maxSize {
-		return fmt.Errorf("size too large")
+		return nil, fmt.Errorf("size too large")
 	}
 	if n.template == nil || n.template.Node() == nil {
-		return fmt.Errorf("node group %s has no template to create new nodes", n.id)
+		return nil, fmt.Errorf("node group %s has no template to create new nodes", n.id)
 	}
 
 	n.provider.Lock()
 	defer n.provider.Unlock()
 
-	var newNodes []*apiv1.Node
+	newNodes := make([]*apiv1.Node, 0, delta)
+	instances := make([]cloudprovider.Instance, 0, delta)
 	for i := 0; i < delta; i++ {
-		nodeName := fmt.Sprintf("%s-node-%s", n.id, rand.String(4))
+		var nodeName string
+		for {
+			nodeName = fmt.Sprintf("%s-node-%s", n.id, rand.String(4))
+			if _, exists := n.provider.nodeToGroup[nodeName]; !exists {
+				break
+			}
+		}
 		newNode := n.addNodeFromTemplate(nodeName)
 		newNodes = append(newNodes, newNode)
+		instances = append(instances, cloudprovider.Instance{
+			Id:     newNode.Spec.ProviderID,
+			Status: &cloudprovider.InstanceStatus{State: n.instances[newNode.Spec.ProviderID]},
+		})
 	}
 
 	// Add the new Nodes to the K8s fake if it's configured.
 	if n.provider.k8s == nil {
-		return nil
+		return instances, nil
 	}
 	if n.nodeRegistrationDelay == 0 && n.nodeReadinessDelay == 0 {
 		// No delays configured, synchronously add the Nodes as Ready to the K8s fake.
@@ -514,7 +538,7 @@ func (n *NodeGroup) IncreaseSize(ctx context.Context, delta int) error {
 		go simulateK8sApiNodeRegistration(n.provider.k8s, newNodes, n.nodeRegistrationDelay, n.nodeReadinessDelay)
 	}
 
-	return nil
+	return instances, nil
 }
 
 // TemplateNodeInfo returns the template node information for this node group.
@@ -601,6 +625,8 @@ func simulateK8sApiNodeRegistration(k8s *fakek8s.Kubernetes, nodes []*apiv1.Node
 	for _, node := range nodes {
 		// We injected the Node object to the API earlier, so something could be reading it asynchronously - we need to deep copy before modifying the readiness.
 		nodeCopy := node.DeepCopy()
+		// IsReady(false) above tainted the Node as not ready, the taint has to be removed for the Node to be considered ready.
+		testutils.RemoveNodeNotReadyTaint(nodeCopy)
 		testutils.IsReady(true)(nodeCopy)
 		k8s.UpdateNode(nodeCopy)
 	}
