@@ -54,4 +54,10 @@ const (
 	DefaultScaleDownDelayAfterFailure = 3 * time.Minute
 	// DefaultScanInterval is the default scan interval for CA
 	DefaultScanInterval = 10 * time.Second
+	// DefaultEstimatorName is the default resource estimator name used in scale up.
+	DefaultEstimatorName = "binpacking"
+	// DefaultExpanderName is the default node group expander name used in scale up.
+	DefaultExpanderName = "least-waste"
+	// DefaultMaxGracefulTerminationSec is the default maximum graceful termination time in seconds.
+	DefaultMaxGracefulTerminationSec = 600
 )

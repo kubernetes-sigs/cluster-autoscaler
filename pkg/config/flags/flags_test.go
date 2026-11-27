@@ -24,6 +24,8 @@ import (
 	"k8s.io/klog/v2"
 	kubelet_config "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
+	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
+	"sigs.k8s.io/cluster-autoscaler/pkg/expander"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -675,4 +677,9 @@ func TestAutoscalingFlagsValidationEdgeCases(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConfigConstantsMatchPluginNames(t *testing.T) {
+	assert.Equal(t, estimator.BinpackingEstimatorName, config.DefaultEstimatorName)
+	assert.Equal(t, expander.LeastWasteExpanderName, config.DefaultExpanderName)
 }
