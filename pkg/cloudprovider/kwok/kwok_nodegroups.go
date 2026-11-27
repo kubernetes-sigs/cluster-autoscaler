@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/rand"
 	klog "k8s.io/klog/v2"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
+	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/experimental"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 )
@@ -64,10 +65,19 @@ func (nodeGroup *NodeGroup) setTargetSize(size int) {
 	nodeGroup.targetSize = size
 }
 
+var _ experimental.InstanceCreator = (*NodeGroup)(nil)
+
 // IncreaseSize increases NodeGroup size.
 func (nodeGroup *NodeGroup) IncreaseSize(ctx context.Context, delta int) error {
+	_, err := nodeGroup.IncreaseSizeWithInstances(ctx, delta)
+	return err
+}
+
+// IncreaseSizeWithInstances increases NodeGroup size and returns the created instances.
+// If creating a node fails midway, all already-created instances are returned alongside the error.
+func (nodeGroup *NodeGroup) IncreaseSizeWithInstances(ctx context.Context, delta int) ([]cloudprovider.Instance, error) {
 	if delta <= 0 {
-		return fmt.Errorf(sizeIncreaseMustBePositiveErr)
+		return nil, fmt.Errorf(sizeIncreaseMustBePositiveErr)
 	}
 
 	// Hold the lock for the whole operation so that concurrent size changes
@@ -77,16 +87,17 @@ func (nodeGroup *NodeGroup) IncreaseSize(ctx context.Context, delta int) error {
 
 	size := nodeGroup.targetSize
 	newSize := int(size) + delta
-	if newSize > nodeGroup.MaxSize(context.TODO()) {
-		return fmt.Errorf("%s, desired: %d max: %d", maxSizeReachedErr, newSize, nodeGroup.MaxSize(context.TODO()))
+	if newSize > nodeGroup.MaxSize(ctx) {
+		return nil, fmt.Errorf("%s, desired: %d max: %d", maxSizeReachedErr, newSize, nodeGroup.MaxSize(ctx))
 	}
 
 	klog.V(5).Infof("increasing size of nodegroup '%s' to %v (old size: %v, delta: %v)", nodeGroup.name, newSize, size, delta)
 
 	if nodeGroup.nodeTemplate == nil {
-		return fmt.Errorf("couldn't create a template node for nodegroup %s", nodeGroup.name)
+		return nil, fmt.Errorf("couldn't create a template node for nodegroup %s", nodeGroup.name)
 	}
 
+	instances := make([]cloudprovider.Instance, 0, delta)
 	for i := 0; i < delta; i++ {
 		// Every new node must be built from a fresh copy of the template,
 		// otherwise the shared node group template would be mutated in place.
@@ -101,14 +112,21 @@ func (nodeGroup *NodeGroup) IncreaseSize(ctx context.Context, delta int) error {
 		node.Labels["kubernetes.io/hostname"] = node.Name
 		node.Annotations["metrics.k8s.io/resource-metrics-path"] = fmt.Sprintf("/metrics/nodes/%s/metrics/resource", node.Name)
 		node.Spec.ProviderID = getProviderID(node.Name)
-		_, err := nodeGroup.kubeClient.CoreV1().Nodes().Create(context.Background(), node, v1.CreateOptions{})
+		_, err := nodeGroup.kubeClient.CoreV1().Nodes().Create(ctx, node, v1.CreateOptions{})
 		if err != nil {
-			return fmt.Errorf("couldn't create new node '%s': %v", node.Name, err)
+			return instances, fmt.Errorf("couldn't create new node '%s': %w", node.Name, err)
 		}
 		nodeGroup.targetSize += 1
+		instances = append(instances, cloudprovider.Instance{
+			Id: node.Spec.ProviderID,
+			Status: &cloudprovider.InstanceStatus{
+				State:     cloudprovider.InstanceRunning,
+				ErrorInfo: nil,
+			},
+		})
 	}
 
-	return nil
+	return instances, nil
 }
 
 // AtomicIncreaseSize is not implemented.
