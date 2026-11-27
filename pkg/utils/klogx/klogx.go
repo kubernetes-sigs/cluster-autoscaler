@@ -41,11 +41,17 @@ func (q *Quota) Reset() {
 	q.left = q.limit
 }
 
-// V calls V from glog and wraps the result into glogx.Verbose.
+// V calls klog.V on behalf of the caller and wraps the result into Verbose.
 func V(n klog.Level) Verbose {
+	// Depth 1 skips this wrapper, so -vmodule is matched against the caller's
+	// file rather than klogx.go.
+	v := klog.VDepth(1, n)
 	return Verbose{
-		enabled: true,
-		v:       klog.V(n)}
+		// Warningf logs through klog.WarningfDepth, which does not check
+		// verbosity itself, so record the verbosity decision here.
+		enabled: v.Enabled(),
+		v:       v,
+	}
 }
 
 // Verbose is a wrapper for klog.Verbose that implements UpTo and Over.
@@ -84,7 +90,8 @@ func (v Verbose) Over(q *Quota) Verbose {
 // allows for it.
 func (v Verbose) Infof(format string, args ...interface{}) {
 	if v.enabled {
-		v.v.Infof(format, args...)
+		// Depth 1 skips this wrapper, so the header shows the caller.
+		v.v.InfofDepth(1, format, args...)
 	}
 }
 
@@ -92,14 +99,16 @@ func (v Verbose) Infof(format string, args ...interface{}) {
 // allows for it.
 func (v Verbose) Info(args ...interface{}) {
 	if v.enabled {
-		v.v.Info(args...)
+		// Depth 1 skips this wrapper, so the log header names the caller.
+		v.v.InfoDepth(1, args...)
 	}
 }
 
 // Warningf is a wrapper for klog.Warningf that logs if the Quota allows for it.
 func (v Verbose) Warningf(format string, args ...interface{}) {
 	if v.enabled {
-		// klog.Verbose does not implement Warningf
-		klog.Warningf(format, args...)
+		// klog.Verbose does not implement Warningf.
+		// Depth 1 skips this wrapper, so the log header names the caller.
+		klog.WarningfDepth(1, format, args...)
 	}
 }
