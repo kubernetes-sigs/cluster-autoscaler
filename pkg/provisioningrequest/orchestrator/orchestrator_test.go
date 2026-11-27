@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -40,12 +41,14 @@ import (
 	processorstest "sigs.k8s.io/cluster-autoscaler/pkg/processors/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/besteffortatomic"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/checkcapacity"
+	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/conditions"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/pods"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqclient"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqwrapper"
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/annotations"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
@@ -453,6 +456,191 @@ func TestScaleUp(t *testing.T) {
 				}
 			} else {
 				assert.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestScaleUpWaitForNodesReady(t *testing.T) {
+	// Set up a cluster with 100 high cpu, low memory nodes in an autoscaled group with max 150,
+	// and 100 high memory, low cpu nodes not in an autoscaled group.
+	now := time.Now()
+	allNodes := []*apiv1.Node{}
+	for i := 0; i < 100; i++ {
+		node := BuildTestNode(fmt.Sprintf("test-cpu-node-%d", i), 100, 10)
+		SetNodeReadyState(node, true, now.Add(-2*time.Minute))
+		allNodes = append(allNodes, node)
+	}
+	for i := 0; i < 100; i++ {
+		node := BuildTestNode(fmt.Sprintf("test-mem-node-%d", i), 1, 1000)
+		SetNodeReadyState(node, true, now.Add(-2*time.Minute))
+		allNodes = append(allNodes, node)
+	}
+
+	waitingForNodes := metav1.Condition{
+		Type:               v1.Provisioned,
+		Status:             metav1.ConditionFalse,
+		Reason:             conditions.WaitingForNodesReason,
+		LastTransitionTime: metav1.NewTime(now.Add(-2 * time.Minute)),
+	}
+	// Fits on the existing nodes.
+	smallProvReq := func(waitForNodesReady string, conds ...metav1.Condition) *provreqwrapper.ProvisioningRequest {
+		pr := provreqwrapper.BuildValidTestProvisioningRequestFromOptions(
+			provreqwrapper.TestProvReqOptions{
+				Name:     "smallAtomicScaleUpProvReq",
+				CPU:      "5m",
+				Memory:   "5",
+				PodCount: int32(5),
+				Class:    v1.ProvisioningClassBestEffortAtomicScaleUp,
+			})
+		if waitForNodesReady != "" {
+			pr.Spec.Parameters = map[string]v1.Parameter{besteffortatomic.WaitForNodesReadyParameterKey: v1.Parameter(waitForNodesReady)}
+		}
+		pr.SetConditions(conds)
+		return pr
+	}
+	// Needs 20 more high cpu nodes.
+	largeProvReq := func(waitForNodesReady string, conds ...metav1.Condition) *provreqwrapper.ProvisioningRequest {
+		pr := provreqwrapper.BuildValidTestProvisioningRequestFromOptions(
+			provreqwrapper.TestProvReqOptions{
+				Name:     "largeAtomicScaleUpProvReq",
+				CPU:      "100m",
+				Memory:   "1",
+				PodCount: int32(120),
+				Class:    v1.ProvisioningClassBestEffortAtomicScaleUp,
+			})
+		if waitForNodesReady != "" {
+			pr.Spec.Parameters = map[string]v1.Parameter{besteffortatomic.WaitForNodesReadyParameterKey: v1.Parameter(waitForNodesReady)}
+		}
+		pr.SetConditions(conds)
+		return pr
+	}
+
+	testCases := []struct {
+		name          string
+		provReq       *provreqwrapper.ProvisioningRequest
+		upcomingNodes int
+		newReadyNodes int
+		scaleUpResult status.ScaleUpResult
+		wantStatus    metav1.ConditionStatus
+		wantReason    string
+	}{
+		{
+			name:          "capacity is there, Provisioned=True without scale-up",
+			provReq:       smallProvReq("true"),
+			scaleUpResult: status.ScaleUpNotNeeded,
+			wantStatus:    metav1.ConditionTrue,
+			wantReason:    conditions.CapacityIsFoundReason,
+		},
+		{
+			name:          "successful scale-up, waits for nodes",
+			provReq:       largeProvReq("true"),
+			scaleUpResult: status.ScaleUpSuccessful,
+			wantStatus:    metav1.ConditionFalse,
+			wantReason:    conditions.WaitingForNodesReason,
+		},
+		{
+			name:          "capacity only on upcoming nodes, waits for nodes without scale-up",
+			provReq:       largeProvReq("true"),
+			upcomingNodes: 20,
+			scaleUpResult: status.ScaleUpNotNeeded,
+			wantStatus:    metav1.ConditionFalse,
+			wantReason:    conditions.WaitingForNodesReason,
+		},
+		{
+			name:          "waiting for nodes, nodes still upcoming, keeps waiting without scale-up",
+			provReq:       largeProvReq("true", waitingForNodes),
+			upcomingNodes: 20,
+			scaleUpResult: status.ScaleUpNotNeeded,
+			wantStatus:    metav1.ConditionFalse,
+			wantReason:    conditions.WaitingForNodesReason,
+		},
+		{
+			name:          "waiting for nodes, nodes are ready, Provisioned=True",
+			provReq:       largeProvReq("true", waitingForNodes),
+			newReadyNodes: 20,
+			scaleUpResult: status.ScaleUpNotNeeded,
+			wantStatus:    metav1.ConditionTrue,
+			wantReason:    conditions.CapacityIsProvisionedReason,
+		},
+		{
+			name:          "waiting for nodes, nodes are gone, backs off without scale-up",
+			provReq:       largeProvReq("true", waitingForNodes),
+			scaleUpResult: status.ScaleUpNotTried,
+			wantStatus:    metav1.ConditionFalse,
+			wantReason:    conditions.CapacityIsNotFoundReason,
+		},
+		{
+			name:          "parameter not set, capacity on upcoming nodes, Provisioned=True",
+			provReq:       largeProvReq(""),
+			upcomingNodes: 20,
+			scaleUpResult: status.ScaleUpNotNeeded,
+			wantStatus:    metav1.ConditionTrue,
+			wantReason:    conditions.CapacityIsFoundReason,
+		},
+		{
+			name:          "parameter set to false, successful scale-up, Provisioned=True",
+			provReq:       largeProvReq("false"),
+			scaleUpResult: status.ScaleUpSuccessful,
+			wantStatus:    metav1.ConditionTrue,
+			wantReason:    conditions.CapacityIsProvisionedReason,
+		},
+		{
+			name:          "invalid parameter value is ignored, successful scale-up, Provisioned=True",
+			provReq:       largeProvReq("yes"),
+			scaleUpResult: status.ScaleUpSuccessful,
+			wantStatus:    metav1.ConditionTrue,
+			wantReason:    conditions.CapacityIsProvisionedReason,
+		},
+	}
+	for _, tc := range testCases {
+		tc := tc
+
+		nodes := []*apiv1.Node{}
+		for _, n := range allNodes {
+			nodes = append(nodes, n.DeepCopy())
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			prPods, err := pods.PodsForProvisioningRequest(tc.provReq)
+			assert.NoError(t, err)
+
+			onScaleUpFunc := func(name string, n int) error {
+				if tc.scaleUpResult == status.ScaleUpSuccessful {
+					return nil
+				}
+				return fmt.Errorf("unexpected scale-up of %s by %d", name, n)
+			}
+
+			testProvReq := &provreqwrapper.ProvisioningRequest{ProvisioningRequest: tc.provReq.DeepCopy(), PodTemplates: tc.provReq.PodTemplates}
+			client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, testProvReq)
+			orchestrator, nodeInfos := setupTest(t, client, nodes, onScaleUpFunc, false, false, 0, 0)
+
+			for i := 0; i < tc.upcomingNodes; i++ {
+				node := BuildTestNode(fmt.Sprintf("upcoming-cpu-node-%d", i), 100, 10)
+				SetNodeReadyState(node, true, now)
+				node.Annotations = map[string]string{annotations.NodeUpcomingAnnotation: "true"}
+				assert.NoError(t, orchestrator.autoscalingCtx.ClusterSnapshot.AddNodeInfo(framework.NewTestNodeInfo(node)))
+			}
+			for i := 0; i < tc.newReadyNodes; i++ {
+				node := BuildTestNode(fmt.Sprintf("new-cpu-node-%d", i), 100, 10)
+				SetNodeReadyState(node, true, now)
+				assert.NoError(t, orchestrator.autoscalingCtx.ClusterSnapshot.AddNodeInfo(framework.NewTestNodeInfo(node)))
+			}
+
+			st, err := orchestrator.ScaleUp(context.Background(), prPods, []*apiv1.Node{}, []*appsv1.DaemonSet{}, nodeInfos, false)
+			assert.NoError(t, err)
+			assert.Equal(t, tc.scaleUpResult, st.Result)
+
+			provReqsAfterScaleUp, err := client.ProvisioningRequestsNoCache()
+			assert.NoError(t, err)
+			assert.Len(t, provReqsAfterScaleUp, 1)
+			provisioned := apimeta.FindStatusCondition(provReqsAfterScaleUp[0].Status.Conditions, v1.Provisioned)
+			if assert.NotNil(t, provisioned) {
+				assert.Equal(t, tc.wantStatus, provisioned.Status)
+				assert.Equal(t, tc.wantReason, provisioned.Reason)
 			}
 		})
 	}
