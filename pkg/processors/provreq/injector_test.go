@@ -23,6 +23,7 @@ import (
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
 	clock "k8s.io/utils/clock/testing"
 	"k8s.io/utils/lru"
@@ -174,7 +175,17 @@ func TestProvisioningRequestPodsInjector(t *testing.T) {
 		client := provreqclient.NewFakeProvisioningRequestClient(context.Background(), t, tc.provReqs...)
 		backoffTime := lru.New(100)
 		backoffTime.Add(key(notProvisionedRecentlyProvReqB), 2*time.Minute)
-		injector := ProvisioningRequestPodsInjector{1 * time.Minute, 10 * time.Minute, backoffTime, clock.NewFakePassiveClock(now), client, now, tc.checkCapacityBatchProcessing, tc.checkCapacityProcessorInstance}
+		injector := ProvisioningRequestPodsInjector{
+			initialRetryTime:                   1 * time.Minute,
+			maxBackoffTime:                     10 * time.Minute,
+			backoffDuration:                    backoffTime,
+			clock:                              clock.NewFakePassiveClock(now),
+			client:                             client,
+			lastProvisioningRequestProcessTime: now,
+			checkCapacityBatchProcessing:       tc.checkCapacityBatchProcessing,
+			checkCapacityProcessorInstance:     tc.checkCapacityProcessorInstance,
+			releasedPicks:                      lru.New(100),
+		}
 		getUnscheduledPods, err := injector.Process(context.Background(), nil, provreqwrapper.BuildTestPods("ns", "pod", tc.existingUnsUnschedulablePodCount))
 		if err != nil {
 			t.Errorf("%s failed: injector.Process return error %v", tc.name, err)
@@ -202,6 +213,262 @@ func TestProvisioningRequestPodsInjector(t *testing.T) {
 
 func testProvisioningRequestWithCondition(name string, podCount int, class string, conditions ...metav1.Condition) *provreqwrapper.ProvisioningRequest {
 	pr := provreqwrapper.BuildTestProvisioningRequest("ns", name, "10", "100", "", int32(podCount), false, time.Now(), class)
+	pr.Status.Conditions = conditions
+	return pr
+}
+
+func TestGetPodsFromNextRequestRepeatsUnevaluatedPick(t *testing.T) {
+	now := time.Now()
+	hourAgo := now.Add(-1 * time.Hour)
+	backoffTime := now.Add(-90 * time.Second)
+	failed := metav1.Condition{Type: v1.Failed, Status: metav1.ConditionTrue, LastTransitionTime: metav1.NewTime(now)}
+	provisioned := metav1.Condition{Type: v1.Provisioned, Status: metav1.ConditionTrue, LastTransitionTime: metav1.NewTime(now)}
+	provisionedAtBackoff := metav1.Condition{Type: v1.Provisioned, Status: metav1.ConditionTrue, LastTransitionTime: metav1.NewTime(backoffTime)}
+	notProvisioned := metav1.Condition{Type: v1.Provisioned, Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(now)}
+	notProvisionedBeforeBackoff := metav1.Condition{Type: v1.Provisioned, Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(backoffTime)}
+
+	testCases := []struct {
+		name                    string
+		class                   string
+		batch                   bool
+		firstPick               []metav1.Condition
+		firstPickAfter          []metav1.Condition
+		firstDeleted            bool
+		firstPodTemplateDeleted bool
+		loops                   int
+		wantPick                string
+		wantFirstFailed         bool
+	}{
+		{
+			name:     "first pick not evaluated - first pick injected again",
+			loops:    2,
+			wantPick: "first",
+		},
+		{
+			name:           "first pick got Provisioned=True - second injected",
+			firstPickAfter: []metav1.Condition{provisioned},
+			loops:          2,
+			wantPick:       "second",
+		},
+		{
+			name:           "first pick got Provisioned=False - second injected",
+			firstPickAfter: []metav1.Condition{notProvisioned},
+			loops:          2,
+			wantPick:       "second",
+		},
+		{
+			name:           "first pick failed - second injected",
+			firstPickAfter: []metav1.Condition{failed},
+			loops:          2,
+			wantPick:       "second",
+		},
+		{
+			name:         "first pick deleted - second injected",
+			firstDeleted: true,
+			loops:        2,
+			wantPick:     "second",
+		},
+		{
+			name:                    "first pick pod template deleted - first marked failed and second injected",
+			firstPodTemplateDeleted: true,
+			loops:                   2,
+			wantPick:                "second",
+			wantFirstFailed:         true,
+		},
+		{
+			name:           "retried first pick got Provisioned=False again - second injected",
+			firstPick:      []metav1.Condition{notProvisionedBeforeBackoff},
+			firstPickAfter: []metav1.Condition{notProvisioned},
+			loops:          2,
+			wantPick:       "second",
+		},
+		{
+			name:           "retried first pick got Provisioned=True at same transition time - second injected",
+			firstPick:      []metav1.Condition{notProvisionedBeforeBackoff},
+			firstPickAfter: []metav1.Condition{provisionedAtBackoff},
+			loops:          2,
+			wantPick:       "second",
+		},
+		{
+			name:           "retried first pick not evaluated - first pick injected again despite doubled backoff",
+			firstPick:      []metav1.Condition{notProvisionedBeforeBackoff},
+			firstPickAfter: []metav1.Condition{notProvisionedBeforeBackoff},
+			loops:          2,
+			wantPick:       "first",
+		},
+		{
+			name:                    "retried first pick pod template deleted - first marked failed and second injected",
+			firstPick:               []metav1.Condition{notProvisionedBeforeBackoff},
+			firstPickAfter:          []metav1.Condition{notProvisionedBeforeBackoff},
+			firstPodTemplateDeleted: true,
+			loops:                   2,
+			wantPick:                "second",
+			wantFirstFailed:         true,
+		},
+		{
+			name:     "first pick not evaluated for max loops - first pick injected again",
+			loops:    maxUnevaluatedPicks,
+			wantPick: "first",
+		},
+		{
+			name:     "first pick not evaluated over max loops - second injected",
+			loops:    maxUnevaluatedPicks + 1,
+			wantPick: "second",
+		},
+		{
+			name:     "check capacity batch processing over max loops - first pick not held, injected again as longest waiting",
+			class:    v1.ProvisioningClassCheckCapacity,
+			batch:    true,
+			loops:    maxUnevaluatedPicks + 1,
+			wantPick: "first",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			class := v1.ProvisioningClassBestEffortAtomicScaleUp
+			if tc.class != "" {
+				class = tc.class
+			}
+			first := testProvisioningRequestCreatedAt("first", hourAgo, class, tc.firstPick...)
+			second := testProvisioningRequestCreatedAt("second", now.Add(-1*time.Minute), class)
+			injector := NewFakePodsInjector(provreqclient.NewFakeProvisioningRequestClient(t.Context(), t, first, second), clock.NewFakePassiveClock(now))
+			injector.checkCapacityBatchProcessing = tc.batch
+			if got := pickedProvisioningRequest(t, injector); got != "first" {
+				t.Fatalf("first loop picked %q, want %q", got, "first")
+			}
+
+			firstAfter := testProvisioningRequestCreatedAt("first", hourAgo, class, tc.firstPickAfter...)
+			if tc.firstPodTemplateDeleted {
+				firstAfter.PodTemplates = nil
+			}
+			if tc.firstDeleted {
+				firstAfter = nil
+			}
+			injector.client = provreqclient.NewFakeProvisioningRequestClient(t.Context(), t, firstAfter, second)
+			var got string
+			for loop := 2; loop <= tc.loops; loop++ {
+				got = pickedProvisioningRequest(t, injector)
+			}
+			if got != tc.wantPick {
+				t.Errorf("loop %d picked %q, want %q", tc.loops, got, tc.wantPick)
+			}
+			if got == "first" {
+				updated, err := injector.client.ProvisioningRequestNoCache("ns", "first")
+				if err != nil {
+					t.Fatalf("ProvisioningRequestNoCache returned error: %v", err)
+				}
+				if apimeta.FindStatusCondition(updated.Status.Conditions, v1.Accepted) != nil {
+					t.Errorf("repeat pick rewrote Accepted condition on first ProvisioningRequest: %v", updated.Status.Conditions)
+				}
+			}
+			if tc.wantFirstFailed {
+				updated, err := injector.client.ProvisioningRequestNoCache("ns", "first")
+				if err != nil {
+					t.Fatalf("ProvisioningRequestNoCache returned error: %v", err)
+				}
+				if !apimeta.IsStatusConditionTrue(updated.Status.Conditions, v1.Failed) {
+					t.Errorf("first ProvisioningRequest was not marked Failed, conditions: %v", updated.Status.Conditions)
+				}
+			}
+		})
+	}
+}
+
+func TestGetPodsFromNextRequestPicksLongestWaiting(t *testing.T) {
+	now := time.Now()
+	hourAgo := now.Add(-1 * time.Hour)
+	twoHoursAgo := now.Add(-2 * time.Hour)
+	failed := metav1.Condition{Type: v1.Failed, Status: metav1.ConditionTrue, LastTransitionTime: metav1.NewTime(now)}
+	provisioned := metav1.Condition{Type: v1.Provisioned, Status: metav1.ConditionTrue, LastTransitionTime: metav1.NewTime(now)}
+	notProvisionedHalfHourAgo := metav1.Condition{Type: v1.Provisioned, Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(now.Add(-30 * time.Minute))}
+	notProvisionedTwoHoursAgo := metav1.Condition{Type: v1.Provisioned, Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(twoHoursAgo)}
+
+	testCases := []struct {
+		name                  string
+		older                 []metav1.Condition
+		newerAt               time.Time
+		releaseOld            bool
+		wantPick              string
+		wantOldReleaseRemoved bool
+	}{
+		{
+			name:     "never evaluated - older created injected",
+			newerAt:  now,
+			wantPick: "older",
+		},
+		{
+			name:     "evaluated after newer was created - newer injected",
+			older:    []metav1.Condition{notProvisionedHalfHourAgo},
+			newerAt:  hourAgo,
+			wantPick: "newer",
+		},
+		{
+			name:     "evaluated before newer was created - older injected",
+			older:    []metav1.Condition{notProvisionedTwoHoursAgo},
+			newerAt:  hourAgo,
+			wantPick: "older",
+		},
+		{
+			name:       "older pick released - newer injected",
+			newerAt:    hourAgo,
+			releaseOld: true,
+			wantPick:   "newer",
+		},
+		{
+			name:                  "older pick released and then provisioned - newer injected and release entry removed",
+			older:                 []metav1.Condition{provisioned},
+			newerAt:               hourAgo,
+			releaseOld:            true,
+			wantPick:              "newer",
+			wantOldReleaseRemoved: true,
+		},
+		{
+			name:                  "older pick released and then failed - newer injected and release entry removed",
+			older:                 []metav1.Condition{failed},
+			newerAt:               hourAgo,
+			releaseOld:            true,
+			wantPick:              "newer",
+			wantOldReleaseRemoved: true,
+		},
+		{
+			name:     "same waiting time - first by name injected",
+			newerAt:  twoHoursAgo,
+			wantPick: "newer",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			older := testProvisioningRequestCreatedAt("older", twoHoursAgo, v1.ProvisioningClassBestEffortAtomicScaleUp, tc.older...)
+			newer := testProvisioningRequestCreatedAt("newer", tc.newerAt, v1.ProvisioningClassBestEffortAtomicScaleUp)
+			injector := NewFakePodsInjector(provreqclient.NewFakeProvisioningRequestClient(t.Context(), t, newer, older), clock.NewFakePassiveClock(now))
+			if tc.releaseOld {
+				injector.releasedPicks.Add(key(older), now)
+			}
+			if got := pickedProvisioningRequest(t, injector); got != tc.wantPick {
+				t.Errorf("picked %q, want %q", got, tc.wantPick)
+			}
+			if _, found := injector.releasedPicks.Get(key(older)); tc.wantOldReleaseRemoved && found {
+				t.Errorf("older still in releasedPicks after becoming terminal")
+			}
+		})
+	}
+}
+
+func pickedProvisioningRequest(t *testing.T, injector *ProvisioningRequestPodsInjector) string {
+	t.Helper()
+	pods, err := injector.GetPodsFromNextRequest(t.Context())
+	if err != nil {
+		t.Fatalf("GetPodsFromNextRequest returned error: %v", err)
+	}
+	if len(pods) == 0 {
+		return ""
+	}
+	return pods[0].Annotations[v1.ProvisioningRequestPodAnnotationKey]
+}
+
+func testProvisioningRequestCreatedAt(name string, created time.Time, class string, conditions ...metav1.Condition) *provreqwrapper.ProvisioningRequest {
+	pr := provreqwrapper.BuildTestProvisioningRequest("ns", name, "10", "100", "", 1, false, created, class)
+	pr.UID = types.UID(name)
 	pr.Status.Conditions = conditions
 	return pr
 }
