@@ -394,6 +394,26 @@ type AutoscalingOptions struct {
 	CapacityQuotasEnabled             bool
 	// ScaleUpSimulationForSkippedNodeGroupsEnabled is used to enable/disable the scaleUpSimulation for the skipped node groups
 	ScaleUpSimulationForSkippedNodeGroupsEnabled bool
+	// LazySchedulablePodGroupsEnabled tells whether schedulable pod groups are computed lazily during
+	// scale-up, only for node groups reached by binpacking (and their similar node groups). Node
+	// groups not reached by binpacking are evaluated afterwards for reporting only, within
+	// MaxScaleUpReportingSimulationDuration. When disabled, schedulable pod groups are computed for
+	// all node groups valid for scale-up before binpacking, and
+	// MaxPerNodeGroupSchedulablePodGroupsDuration doesn't apply.
+	LazySchedulablePodGroupsEnabled bool
+	// MaxScaleUpReportingSimulationDuration is the maximum time spent in a single scale-up on scheduling
+	// simulations which only serve reporting the scale-up status: evaluating node groups which were not
+	// reached during binpacking and skipped node groups. Pods which were not evaluated against all node
+	// groups not reached by binpacking before the deadline are reported as awaiting evaluation. Skipped
+	// node groups which were not simulated before the deadline are reported as skipped. Zero means no
+	// limit.
+	MaxScaleUpReportingSimulationDuration time.Duration
+	// MaxPerNodeGroupSchedulablePodGroupsDuration is the maximum time spent computing which pod
+	// equivalence groups can be scheduled on a single node group. If it is exceeded, the result for
+	// the node group is dropped as if it was never computed: the node group is not considered for
+	// binpacking and pods are not evaluated against it. Only applies if LazySchedulablePodGroupsEnabled
+	// is set. Zero means no limit.
+	MaxPerNodeGroupSchedulablePodGroupsDuration time.Duration
 	// PendingPodsBatchingTimeout is the maximum time spends when running scheduling simulations when preparing the batch of pods passed to scale up logic. This timeout is used in core filter-out pod list processor.
 	PendingPodsBatchingTimeout time.Duration
 	// GracefulDegradationEnabled tells if graceful degradation for unschedulable pods is enabled.

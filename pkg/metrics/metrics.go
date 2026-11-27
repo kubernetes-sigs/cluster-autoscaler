@@ -131,6 +131,7 @@ const (
 	ScaleUp                    FunctionLabel = "scaleUp"
 	BuildPodEquivalenceGroups  FunctionLabel = "scaleUp:buildPodEquivalenceGroups"
 	SkipNodeGroupSimulation    FunctionLabel = "scaleUp:skippedNodeGroupsSimulation"
+	UnevaluatedNodeGroupsSim   FunctionLabel = "scaleUp:unevaluatedNodeGroupsSimulation"
 	Estimate                   FunctionLabel = "scaleUp:estimate"
 	FindUnneeded               FunctionLabel = "findUnneeded"
 	UpdateState                FunctionLabel = "updateClusterState"
@@ -144,6 +145,35 @@ const (
 	LoopWait                   FunctionLabel = "loopWait"
 	BulkListAllGceInstances    FunctionLabel = "bulkListInstances:listAllInstances"
 	BulkListMigInstances       FunctionLabel = "bulkListInstances:listMigInstances"
+)
+
+// TimeoutType identifies a timeout which made Cluster Autoscaler degrade gracefully.
+type TimeoutType string
+
+const (
+	// BinpackingTimeout means that binpacking was cut short because it exceeded the maximum binpacking time.
+	BinpackingTimeout TimeoutType = "binpacking"
+	// ScaleUpReportingSimulationTimeout means that the simulations run only to report the scale-up
+	// status (e.g. for node groups not evaluated during binpacking or for skipped node groups) were
+	// cut short because they exceeded their maximum duration.
+	ScaleUpReportingSimulationTimeout TimeoutType = "scale_up_reporting_simulation"
+	// SchedulablePodGroupsTimeout means that computing schedulable pod groups for a node group
+	// exceeded its maximum duration, so the result was discarded: during binpacking the node group
+	// is dropped, during reporting simulations pods are not evaluated against it.
+	SchedulablePodGroupsTimeout TimeoutType = "schedulable_pod_groups"
+)
+
+// SchedulablePodGroupsPhase identifies the scale-up phase in which schedulable pod groups were computed.
+type SchedulablePodGroupsPhase string
+
+const (
+	// SchedulablePodGroupsBinpacking means schedulable pod groups computed for binpacking: during
+	// binpacking, including the ones computed for similar node groups, or all of them upfront if lazy
+	// computation is disabled.
+	SchedulablePodGroupsBinpacking SchedulablePodGroupsPhase = "binpacking"
+	// SchedulablePodGroupsReporting means schedulable pod groups computed after binpacking, only to
+	// report the scale-up status for node groups which were not evaluated during binpacking.
+	SchedulablePodGroupsReporting SchedulablePodGroupsPhase = "reporting"
 )
 
 // ResourceMismatchType mismatch type discovered when comparing DRA resources
@@ -212,6 +242,8 @@ type caMetrics struct {
 	nodeTaintsCount                  *k8smetrics.GaugeVec
 	inconsistentInstancesMigsCount   *k8smetrics.Gauge
 	binpackingHeterogeneity          *k8smetrics.HistogramVec
+	timeoutsCount                    *k8smetrics.CounterVec
+	schedulablePodGroupsEvaluations  *k8smetrics.HistogramVec
 	maxNodeSkipEvalDurationSeconds   *k8smetrics.Gauge
 	scaleDownNodeRemovalLatency      *k8smetrics.HistogramVec
 
@@ -563,6 +595,23 @@ func newCaMetrics() *caMetrics {
 			}, []string{"instance_type", "cpu_count", "namespace_count"},
 		),
 
+		timeoutsCount: k8smetrics.NewCounterVec(
+			&k8smetrics.CounterOpts{
+				Namespace: caNamespace,
+				Name:      "timeouts_total",
+				Help:      "Number of times Cluster Autoscaler degraded gracefully because an operation exceeded its maximum duration.",
+			}, []string{"type"},
+		),
+
+		schedulablePodGroupsEvaluations: k8smetrics.NewHistogramVec(
+			&k8smetrics.HistogramOpts{
+				Namespace: caNamespace,
+				Name:      "scale_up_schedulable_pod_groups_node_group_evaluations",
+				Help:      "Number of node groups for which schedulable pod groups were computed in a single scale-up, per phase.",
+				Buckets:   []float64{0, 1, 2, 5, 10, 20, 40, 60, 80, 100, 150, 200, 300, 400, 600, 800, 1000},
+			}, []string{"phase"},
+		),
+
 		maxNodeSkipEvalDurationSeconds: k8smetrics.NewGauge(
 			&k8smetrics.GaugeOpts{
 				Namespace: caNamespace,
@@ -643,6 +692,8 @@ func (m *caMetrics) RegisterAll(emitPerNodeGroupMetrics bool) {
 	m.mustRegister(m.nodeTaintsCount)
 	m.mustRegister(m.inconsistentInstancesMigsCount)
 	m.mustRegister(m.binpackingHeterogeneity)
+	m.mustRegister(m.timeoutsCount)
+	m.mustRegister(m.schedulablePodGroupsEvaluations)
 	m.mustRegister(m.maxNodeSkipEvalDurationSeconds)
 	m.mustRegister(m.scaleDownNodeRemovalLatency)
 	m.mustRegister(m.nodeTemplateResourcesMismatch)
@@ -687,6 +738,9 @@ func (m *caMetrics) InitMetrics() {
 	m.skippedScaleEventsCount.WithLabelValues(DirectionScaleUp, CpuResourceLimit).Add(0)
 	m.skippedScaleEventsCount.WithLabelValues(DirectionScaleUp, MemoryResourceLimit).Add(0)
 
+	for _, timeoutType := range []TimeoutType{BinpackingTimeout, ScaleUpReportingSimulationTimeout, SchedulablePodGroupsTimeout} {
+		m.timeoutsCount.WithLabelValues(string(timeoutType)).Add(0)
+	}
 }
 
 // UpdateDurationFromStart records the duration of the step identified by the
@@ -985,6 +1039,18 @@ func (m *caMetrics) UpdateInconsistentInstancesMigsCount(migCount int) {
 // considered in a single binpacking estimation.
 func (m *caMetrics) ObserveBinpackingHeterogeneity(instanceType, cpuCount, namespaceCount string, pegCount int) {
 	m.binpackingHeterogeneity.WithLabelValues(instanceType, cpuCount, namespaceCount).Observe(float64(pegCount))
+}
+
+// RegisterTimeout records that an operation exceeded its maximum duration and Cluster Autoscaler
+// degraded gracefully.
+func (m *caMetrics) RegisterTimeout(timeoutType TimeoutType) {
+	m.timeoutsCount.WithLabelValues(string(timeoutType)).Inc()
+}
+
+// ObserveSchedulablePodGroupsEvaluations records the number of node groups for which schedulable
+// pod groups were computed in a single scale-up phase.
+func (m *caMetrics) ObserveSchedulablePodGroupsEvaluations(phase SchedulablePodGroupsPhase, nodeGroupCount int) {
+	m.schedulablePodGroupsEvaluations.WithLabelValues(string(phase)).Observe(float64(nodeGroupCount))
 }
 
 // UpdateScaleDownNodeRemovalLatency records the time after which node was deleted/needed

@@ -1026,6 +1026,7 @@ The following startup parameters are supported for cluster autoscaler:
 | `emit-per-nodegroup-metrics` | If true, emit per node group metrics. |  |
 | `enable-csi-node-aware-scheduling` | Whether logic for handling CSINode objects is enabled. | true |
 | `enable-dynamic-resource-allocation` | Handle DRA (Dynamic Resource Allocation) objects, locked to true. | true |
+| `enable-lazy-schedulable-pod-groups` | Whether to compute schedulable pod groups only for node groups reached by binpacking during scale-up. Node groups not reached by binpacking are only evaluated for reporting the scale-up status, within max-scale-up-reporting-simulation-duration. When disabled, all node groups are evaluated before binpacking. |  |
 | `enable-proactive-scaleup` | Whether to enable/disable proactive scale-ups, defaults to false |  |
 | `enable-provisioning-requests` | Whether the clusterautoscaler will be handling the ProvisioningRequest CRs. |  |
 | `enforce-node-group-min-size` | Should CA scale up the node group to the configured min size if needed. |  |
@@ -1085,8 +1086,10 @@ The following startup parameters are supported for cluster autoscaler:
 | `max-nodegroup-binpacking-duration` | Maximum time that will be spent in binpacking simulation for each NodeGroup. | 10s |
 | `max-nodes-per-scaleup` | Max nodes added in a single scale-up. This is intended strictly for optimizing CA algorithm latency and not a tool to rate-limit scale-up throughput. | 1000 |
 | `max-nodes-total` | Maximum number of nodes in all node groups. Cluster autoscaler will not grow the cluster beyond this number. |  |
+| `max-per-node-group-schedulable-pod-groups-duration` | Maximum time spent computing which pod equivalence groups can be scheduled on a single node group. If it is exceeded, the node group is not considered for the scale-up and pods are not evaluated against it. Requires enable-lazy-schedulable-pod-groups. Zero means no limit. | 0s |
 | `max-pod-eviction-time` | Maximum time CA tries to evict a pod before giving up | 2m0s |
 | `max-scale-down-parallelism` | Maximum number of nodes (both empty and needing drain) that can be deleted in parallel. | 10 |
+| `max-scale-up-reporting-simulation-duration` | Maximum time spent in a single scale-up on scheduling simulations which only serve reporting the scale-up status (node groups not evaluated during binpacking and skipped node groups). Pods not evaluated against all node groups which binpacking didn't reach are reported as awaiting evaluation; skipped node groups not simulated before the deadline are reported as skipped. Zero means no limit. | 0s |
 | `max-total-unready-percentage` | Maximum percentage of unready nodes in the cluster. After this is exceeded, CA halts operations | 45 |
 | `memory-difference-ratio` | Maximum difference in memory capacity between two similar node groups to be considered for balancing. Value is a ratio of the smaller node group's memory capacity. | 0.015 |
 | `memory-total` | Minimum and maximum number of gigabytes of memory in cluster, in the format <min>:<max>. Cluster autoscaler will not scale the cluster beyond these numbers. | "0:6400000" |
