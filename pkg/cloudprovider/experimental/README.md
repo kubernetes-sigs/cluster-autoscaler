@@ -119,4 +119,4 @@ To streamline iteration, the practices below are **recommended rather than hard 
 
 | Interface | Domain | Owner | Status | Graduation / Removal Criteria |
 |---|---|---|---|---|
-| *(none yet)* | — | — | — | — |
+| `InstanceCreator` | Scaling | @Choraden | Active | Validated in production and ready to promote to `pkg/cloudprovider/v2` (or remove if superseded) |
