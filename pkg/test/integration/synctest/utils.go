@@ -51,6 +51,15 @@ func MustRunOnceAfter(ctx context.Context, t *testing.T, autoscaler core.Autosca
 	assert.NoError(t, err)
 }
 
+// AdvanceTime advances the virtual clock by the specified duration without running a Cluster
+// Autoscaler cycle, and lets the background work that becomes due in the meantime (e.g. cloud
+// provider operations simulated with a delay) finish.
+func AdvanceTime(d time.Duration) {
+	synctest.Wait()
+	time.Sleep(d)
+	synctest.Wait()
+}
+
 // TearDown is a helper to tear down the context and drain the synctest bubble.
 func TearDown(cancel context.CancelFunc) {
 	cancel()

@@ -248,6 +248,24 @@ func WithOptions(opts *config.NodeGroupAutoscalingOptions) NodeGroupOption {
 	}
 }
 
+// WithCloudOperationDelay can be used to simulate the cloud provider taking some time to complete the operations changing the node group
+// (IncreaseSize, DeleteNodes, DecreaseTargetSize): the calls block for the delay before taking effect, like cloud provider implementations
+// that wait for the operation to complete do.
+func WithCloudOperationDelay(delay time.Duration) NodeGroupOption {
+	return func(n *NodeGroup) {
+		n.cloudOperationDelay = delay
+	}
+}
+
+// WithFailedInstances adds count instances that the cloud provider failed to create (e.g. because of a stockout) to the node group. Like in
+// real cloud providers, the failed instances count towards the target size of the node group, are reported with a create error and never
+// register as Nodes; they stay in the node group until deleted via DeleteNodes.
+func WithFailedInstances(count int) NodeGroupOption {
+	return func(n *NodeGroup) {
+		n.addFailedInstances(count)
+	}
+}
+
 // AddNodeGroup is a helper for tests to add a group with its template.
 func (c *CloudProvider) AddNodeGroup(id string, opts ...NodeGroupOption) *NodeGroup {
 	c.Lock()
@@ -258,7 +276,7 @@ func (c *CloudProvider) AddNodeGroup(id string, opts ...NodeGroupOption) *NodeGr
 		minSize:    defaultMinSize,
 		maxSize:    defaultMaxSize,
 		targetSize: 0,
-		instances:  make(map[string]cloudprovider.InstanceState),
+		instances:  make(map[string]cloudprovider.InstanceStatus),
 		provider:   c,
 	}
 
@@ -316,8 +334,8 @@ type NodeGroup struct {
 	maxSize    int
 	targetSize int
 	template   *framework.NodeInfo
-	// instances maps instanceID -> state.
-	instances map[string]cloudprovider.InstanceState
+	// instances maps instanceID -> status.
+	instances map[string]cloudprovider.InstanceStatus
 	provider  *CloudProvider
 
 	// nodeGarbageCollectionDelay can be used to simulate Node objects hanging around in the K8s API for some time after their VMs are deleted.
@@ -327,7 +345,10 @@ type NodeGroup struct {
 	// nodeReadinessDelay can be used to simulate Node objects taking some time to transition to Ready after they appear in the K8s API. If unset,
 	// the Nodes will appear as Ready immediately after registration.
 	nodeReadinessDelay time.Duration
-	opts               *config.NodeGroupAutoscalingOptions
+	// cloudOperationDelay can be used to simulate the cloud provider taking some time to complete the operations changing the node group
+	// (IncreaseSize, DeleteNodes, DecreaseTargetSize). The calls block for the delay before taking effect.
+	cloudOperationDelay time.Duration
+	opts                *config.NodeGroupAutoscalingOptions
 }
 
 // MaxSize returns the maximum size of the node group.
@@ -347,6 +368,7 @@ func (n *NodeGroup) AtomicIncreaseSize(ctx context.Context, delta int) error {
 
 // DeleteNodes removes specific nodes from the node group and updates the internal mapping.
 func (n *NodeGroup) DeleteNodes(ctx context.Context, nodes []*apiv1.Node) error {
+	n.simulateCloudOperationDelay()
 	n.Lock()
 	defer n.Unlock()
 
@@ -355,8 +377,16 @@ func (n *NodeGroup) DeleteNodes(ctx context.Context, nodes []*apiv1.Node) error 
 
 	deletedCount := 0
 	for _, node := range nodes {
-		if groupId, exists := n.provider.nodeToGroup[node.Name]; exists && groupId == n.id {
-			delete(n.provider.nodeToGroup, node.Name)
+		nodeName := node.Name
+		if _, known := n.provider.nodeToGroup[nodeName]; !known {
+			// CA identifies unregistered nodes by their instance ID only (their Node objects are synthetic, with the instance ID as the
+			// name), so fall back to the Node name encoded in the ProviderID set by cloneNodeForNodeGroup().
+			if _, name, err := parseNodeProviderId(node.Spec.ProviderID); err == nil {
+				nodeName = name
+			}
+		}
+		if groupId, exists := n.provider.nodeToGroup[nodeName]; exists && groupId == n.id {
+			delete(n.provider.nodeToGroup, nodeName)
 			delete(n.instances, node.Spec.ProviderID)
 			deletedCount++
 		} else {
@@ -393,11 +423,12 @@ func (n *NodeGroup) ForceDeleteNodes(ctx context.Context, nodes []*apiv1.Node) e
 	return n.DeleteNodes(ctx, nodes)
 }
 
-// DecreaseTargetSize reduces the target size of the node group by the specified delta.
+// DecreaseTargetSize reduces the target size of the node group by the specified delta, which is negative as per the cloudprovider.NodeGroup contract.
 func (n *NodeGroup) DecreaseTargetSize(ctx context.Context, delta int) error {
+	n.simulateCloudOperationDelay()
 	n.Lock()
 	defer n.Unlock()
-	n.targetSize -= delta
+	n.targetSize += delta
 	return nil
 }
 
@@ -417,12 +448,10 @@ func (n *NodeGroup) Nodes(ctx context.Context) ([]cloudprovider.Instance, error)
 	defer n.provider.Unlock()
 
 	var instances []cloudprovider.Instance
-	for id, state := range n.instances {
+	for id, status := range n.instances {
 		instances = append(instances, cloudprovider.Instance{
-			Id: id,
-			Status: &cloudprovider.InstanceStatus{
-				State: state,
-			},
+			Id:     id,
+			Status: &status,
 		})
 	}
 	return instances, nil
@@ -478,6 +507,7 @@ func (n *NodeGroup) TargetSize(ctx context.Context) (int, error) {
 
 // IncreaseSize adds nodes to the node group and updates internal instance mapping.
 func (n *NodeGroup) IncreaseSize(ctx context.Context, delta int) error {
+	n.simulateCloudOperationDelay()
 	n.Lock()
 	defer n.Unlock()
 
@@ -534,6 +564,15 @@ func (n *NodeGroup) GetTargetSize() int {
 	return n.targetSize
 }
 
+// simulateCloudOperationDelay blocks for the configured cloud operation delay, if any. It is called without holding the NodeGroup mutex, so that
+// only the caller of the delayed operation is blocked. (Under testing/synctest the sleep uses the bubble's fake clock, which only advances
+// while every goroutine in the bubble is durably blocked, and waiting for a mutex doesn't count as durably blocked.)
+func (n *NodeGroup) simulateCloudOperationDelay() {
+	if n.cloudOperationDelay > 0 {
+		time.Sleep(n.cloudOperationDelay)
+	}
+}
+
 // setTemplateFromNodeAndPods configures the result of TemplateNodeInfo() based on a copy of the provided Node and the provided Pods.
 // Should be called with the NodeGroup mutex already locked, or during NodeGroup object initialization without the lock.
 func (n *NodeGroup) setTemplateFromNodeAndPods(node *apiv1.Node, pods ...*apiv1.Pod) {
@@ -545,10 +584,28 @@ func (n *NodeGroup) setTemplateFromNodeAndPods(node *apiv1.Node, pods ...*apiv1.
 // Should be called with the NodeGroup mutex already locked, or during NodeGroup object initialization without the lock.
 func (n *NodeGroup) addNodeFromTemplate(nodeName string) *apiv1.Node {
 	node := cloneNodeForNodeGroup(n.template.Node(), n.id, nodeName)
-	n.instances[node.Spec.ProviderID] = cloudprovider.InstanceRunning
+	n.instances[node.Spec.ProviderID] = cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}
 	n.provider.nodeToGroup[node.Name] = n.id
 	n.targetSize += 1
 	return node
+}
+
+// addFailedInstances adds count instances that the cloud provider failed to create to the node group, see WithFailedInstances.
+// Should be called during NodeGroup object initialization without the locks, or with the NodeGroup and CloudProvider mutexes already locked.
+func (n *NodeGroup) addFailedInstances(count int) {
+	for i := range count {
+		nodeName := fmt.Sprintf("%s-failed-%d", n.id, i)
+		n.instances[providerIdForNode(n.id, nodeName)] = cloudprovider.InstanceStatus{
+			State: cloudprovider.InstanceCreating,
+			ErrorInfo: &cloudprovider.InstanceErrorInfo{
+				ErrorClass:   cloudprovider.OutOfResourcesErrorClass,
+				ErrorCode:    "STOCKOUT",
+				ErrorMessage: "the cloud provider failed to create the instance",
+			},
+		}
+		n.provider.nodeToGroup[nodeName] = n.id
+		n.targetSize += 1
+	}
 }
 
 // cloneNodeForNodeGroup returns a deep-copy of the provided templateNode, to be tracked by the fake CloudProvider/NodeGroup.
@@ -556,17 +613,28 @@ func (n *NodeGroup) addNodeFromTemplate(nodeName string) *apiv1.Node {
 func cloneNodeForNodeGroup(templateNode *apiv1.Node, ngName, nodeName string) *apiv1.Node {
 	node := templateNode.DeepCopy()
 	node.Name = nodeName
-	node.Spec.ProviderID = fmt.Sprintf("fake-provider/%s/%s", ngName, node.Name)
+	node.Spec.ProviderID = providerIdForNode(ngName, nodeName)
 	return node
+}
+
+// providerIdForNode returns the Spec.ProviderID (and the instance ID) of the given Node of the given NodeGroup.
+func providerIdForNode(ngName, nodeName string) string {
+	return fmt.Sprintf("fake-provider/%s/%s", ngName, nodeName)
 }
 
 // groupIdFromNodeProviderId parses the Spec.ProviderID set by cloneNodeForNodeGroup() and extracts the NodeGroup id from it.
 func groupIdFromNodeProviderId(nodeProviderId string) (string, error) {
+	groupId, _, err := parseNodeProviderId(nodeProviderId)
+	return groupId, err
+}
+
+// parseNodeProviderId parses the Spec.ProviderID set by cloneNodeForNodeGroup() and extracts the NodeGroup id and the Node name from it.
+func parseNodeProviderId(nodeProviderId string) (groupId string, nodeName string, err error) {
 	parts := strings.Split(nodeProviderId, "/")
 	if len(parts) != 3 {
-		return "", fmt.Errorf("ngIdFromNodeProviderId(): nodeProviderId should be in the format <provider_name>/<ng_id>/<node_name>, got %s", nodeProviderId)
+		return "", "", fmt.Errorf("parseNodeProviderId(): nodeProviderId should be in the format <provider_name>/<ng_id>/<node_name>, got %s", nodeProviderId)
 	}
-	return parts[1], nil
+	return parts[1], parts[2], nil
 }
 
 func simulateK8sApiNodeDeletion(k8s *fakek8s.Kubernetes, nodes []*apiv1.Node, garbageCollectionDelay time.Duration) {
