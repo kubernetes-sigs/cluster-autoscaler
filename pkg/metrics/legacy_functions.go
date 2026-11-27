@@ -256,6 +256,18 @@ func ObserveBinpackingHeterogeneity(instanceType, cpuCount, namespaceCount strin
 	DefaultMetrics.ObserveBinpackingHeterogeneity(instanceType, cpuCount, namespaceCount, pegCount)
 }
 
+// RegisterTimeout records that an operation exceeded its maximum duration and Cluster Autoscaler
+// degraded gracefully.
+func RegisterTimeout(timeoutType TimeoutType) {
+	DefaultMetrics.RegisterTimeout(timeoutType)
+}
+
+// ObserveSchedulablePodGroupsEvaluations records the number of node groups for which schedulable
+// pod groups were computed in a single scale-up phase.
+func ObserveSchedulablePodGroupsEvaluations(phase SchedulablePodGroupsPhase, nodeGroupCount int) {
+	DefaultMetrics.ObserveSchedulablePodGroupsEvaluations(phase, nodeGroupCount)
+}
+
 // UpdateScaleDownNodeRemovalLatency records the time after which node was deleted/needed
 // again after being marked unneeded
 func UpdateScaleDownNodeRemovalLatency(deleted bool, delayReason string, scaleDownReason NodeScaleDownReason, duration time.Duration) {

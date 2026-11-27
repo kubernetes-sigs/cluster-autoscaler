@@ -1026,6 +1026,7 @@ The following startup parameters are supported for cluster autoscaler:
 | `emit-per-nodegroup-metrics` | If true, emit per node group metrics. |  |
 | `enable-csi-node-aware-scheduling` | Whether logic for handling CSINode objects is enabled. | true |
 | `enable-dynamic-resource-allocation` | Handle DRA (Dynamic Resource Allocation) objects, locked to true. | true |
+| `enable-lazy-schedulable-pod-groups` | Whether to compute schedulable pod groups only for node groups reached by binpacking during scale-up. Node groups not reached by binpacking are only evaluated for reporting the scale-up status. When disabled, all node groups are evaluated before binpacking. |  |
 | `enable-proactive-scaleup` | Whether to enable/disable proactive scale-ups, defaults to false |  |
 | `enable-provisioning-requests` | Whether the clusterautoscaler will be handling the ProvisioningRequest CRs. |  |
 | `enforce-node-group-min-size` | Should CA scale up the node group to the configured min size if needed. |  |
