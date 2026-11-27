@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -83,7 +84,7 @@ func TestPodTemplateBufferTranslator(t *testing.T) {
 				testutil.GetPodTemplateRefBuffer(&v1.LocalObjectRef{Name: registeredPodTemplate.Name}, &testutil.SomeNumberOfReplicas),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, &testutil.SomeNumberOfReplicas, &zero, &testutil.ProvisioningStrategy, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, &testutil.SomeNumberOfReplicas, &zero, &testutil.ProvisioningStrategy, testutil.GetConditionReady()),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -94,8 +95,8 @@ func TestPodTemplateBufferTranslator(t *testing.T) {
 				testutil.GetPodTemplateRefBuffer(&v1.LocalObjectRef{Name: anotherRegisteredPodTemplate.Name}, &testutil.AnotherNumberOfReplicas),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, &testutil.SomeNumberOfReplicas, &zero, &testutil.ProvisioningStrategy, testutil.GetConditionReady()),
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, &testutil.AnotherNumberOfReplicas, &zero, &testutil.ProvisioningStrategy, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, &testutil.SomeNumberOfReplicas, &zero, &testutil.ProvisioningStrategy, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, &testutil.AnotherNumberOfReplicas, &zero, &testutil.ProvisioningStrategy, testutil.GetConditionReady()),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -106,7 +107,7 @@ func TestPodTemplateBufferTranslator(t *testing.T) {
 				testutil.GetPodTemplateRefBuffer(&v1.LocalObjectRef{Name: "randomRef"}, &testutil.AnotherNumberOfReplicas),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, &testutil.SomeNumberOfReplicas, &zero, &testutil.ProvisioningStrategy, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, &testutil.SomeNumberOfReplicas, &zero, &testutil.ProvisioningStrategy, testutil.GetConditionReady()),
 				testutil.GetBufferStatus(nil, nil, nil, &testutil.ProvisioningStrategy, testutil.GetConditionNotReadyWithMessage(fmt.Sprintf(podTemplateNotFoundMsg, "randomRef"))),
 			},
 			expectedNumberOfErrors: 1,
@@ -118,8 +119,8 @@ func TestPodTemplateBufferTranslator(t *testing.T) {
 				testutil.GetPodTemplateRefBuffer(&v1.LocalObjectRef{Name: anotherRegisteredPodTemplate.Name}, nil),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, &testutil.SomeNumberOfReplicas, &zero, &testutil.ProvisioningStrategy, testutil.GetConditionReady()),
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, nil, &zero, &testutil.ProvisioningStrategy, testutil.GetConditionNotReadyWithMessage(noReplicasMsg)),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, &testutil.SomeNumberOfReplicas, &zero, &testutil.ProvisioningStrategy, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, nil, &zero, &testutil.ProvisioningStrategy, testutil.GetConditionNotReadyWithMessage(noReplicasMsg)),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -130,7 +131,7 @@ func TestPodTemplateBufferTranslator(t *testing.T) {
 				testutil.GetPodTemplateRefBuffer(nil, &testutil.AnotherNumberOfReplicas),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, &testutil.SomeNumberOfReplicas, &zero, &testutil.ProvisioningStrategy, testutil.GetConditionReady()),
+				testutil.GetBufferStatus(&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, &testutil.SomeNumberOfReplicas, &zero, &testutil.ProvisioningStrategy, testutil.GetConditionReady()),
 				testutil.GetBufferStatus(nil, nil, nil, nil, nil),
 			},
 			expectedNumberOfErrors: 0,
@@ -145,7 +146,7 @@ func TestPodTemplateBufferTranslator(t *testing.T) {
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
 
-				getTestBufferStatusWithReplicas(&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, 1),
+				getTestBufferStatusWithReplicas(&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, 1),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -158,7 +159,7 @@ func TestPodTemplateBufferTranslator(t *testing.T) {
 				}),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				getTestBufferStatusWithReplicas(&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, 2),
+				getTestBufferStatusWithReplicas(&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, 2),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -171,7 +172,7 @@ func TestPodTemplateBufferTranslator(t *testing.T) {
 				}),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				getTestBufferStatusWithReplicas(&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, 1),
+				getTestBufferStatusWithReplicas(&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, 1),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -185,7 +186,7 @@ func TestPodTemplateBufferTranslator(t *testing.T) {
 				}),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				getTestBufferStatusWithReplicas(&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, 2),
+				getTestBufferStatusWithReplicas(&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, 2),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -202,8 +203,8 @@ func TestPodTemplateBufferTranslator(t *testing.T) {
 				}),
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
-				getTestBufferStatusWithReplicas(&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, 0),
-				getTestBufferStatusWithReplicas(&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, 0),
+				getTestBufferStatusWithReplicas(&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, 0),
+				getTestBufferStatusWithReplicas(&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, 0),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -216,7 +217,7 @@ func TestPodTemplateBufferTranslator(t *testing.T) {
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
 				testutil.GetBufferStatus(
-					&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, nil, ptr.To[int64](0), &testutil.ProvisioningStrategy, testutil.GetConditionNotReadyWithMessage(resourcesNotFoundMsg)),
+					&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, nil, ptr.To[int64](0), &testutil.ProvisioningStrategy, testutil.GetConditionNotReadyWithMessage(resourcesNotFoundMsg)),
 			},
 			expectedNumberOfErrors: 0,
 		},
@@ -227,7 +228,7 @@ func TestPodTemplateBufferTranslator(t *testing.T) {
 			},
 			expectedStatus: []*v1.CapacityBufferStatus{
 				testutil.GetBufferStatus(
-					&v1.LocalObjectRef{Name: "capacitybuffer--pod-template"}, ptr.To[int32](math.MaxInt32), ptr.To[int64](0), &testutil.ProvisioningStrategy, testutil.GetConditionReady(),
+					&v1.LocalObjectRef{Name: "capacitybuffer-default-buffer-uid-managed-pod-template"}, ptr.To[int32](math.MaxInt32), ptr.To[int64](0), &testutil.ProvisioningStrategy, testutil.GetConditionReady(),
 				),
 			},
 			expectedNumberOfErrors: 0,
@@ -258,11 +259,12 @@ func TestPodTemplateBufferTranslator_ManagedPodTemplate(t *testing.T) {
 	)
 	buffer := testutil.NewBuffer(
 		testutil.WithName("test-buffer"),
+		testutil.WithUID[*v1.CapacityBuffer]("test-buffer-uid"),
 		testutil.WithPodTemplateRef("test-pod-template"),
 	)
 
 	wantManagedTemplate := testutil.NewPodTemplate(
-		testutil.WithPodTemplateName("capacitybuffer-test-buffer-pod-template"),
+		testutil.WithPodTemplateName("capacitybuffer-test-buffer-uid-managed-pod-template"),
 		withResources(
 			corev1.ResourceList{
 				"cpu": resource.MustParse("1000m"),
@@ -291,10 +293,129 @@ func TestPodTemplateBufferTranslator_ManagedPodTemplate(t *testing.T) {
 	errors := podTemplateBufferTranslator.Translate(buffers)
 	assert.Equal(t, 0, len(errors))
 
-	gotManagedPodTemplate, err := fakeClient.CoreV1().PodTemplates("default").Get(t.Context(), "capacitybuffer-test-buffer-pod-template", metav1.GetOptions{})
+	gotManagedPodTemplate, err := fakeClient.CoreV1().PodTemplates("default").Get(t.Context(), "capacitybuffer-test-buffer-uid-managed-pod-template", metav1.GetOptions{})
 	assert.NoError(t, err)
 	if diff := cmp.Diff(wantManagedTemplate, gotManagedPodTemplate, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("managed pod template mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestPodTemplateBufferTranslator_SkipsTerminatingBuffer(t *testing.T) {
+	sourcePodTemplate := testutil.NewPodTemplate(
+		testutil.WithPodTemplateName("source-pt"),
+		withResources(corev1.ResourceList{"cpu": resource.MustParse("500m")}, nil),
+	)
+	fakeK8s := fakeClient.NewSimpleClientset(sourcePodTemplate)
+	cbClient, err := cbclient.NewCapacityBufferClient(nil, fakeK8s, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewCapacityBufferClient() unexpected error: %v", err)
+	}
+	translator := NewPodTemplateBufferTranslator(cbClient, fakepods.NewDefaultingResolver())
+
+	now := metav1.NewTime(time.Unix(1700000000, 0))
+	terminatingBuf := testutil.NewBuffer(
+		testutil.WithName("terminating-buffer"),
+		testutil.WithUID[*v1.CapacityBuffer]("terminating-uid"),
+		testutil.WithPodTemplateRef("source-pt"),
+		testutil.WithReplicas(1),
+		testutil.WithActiveProvisioningStrategy(),
+		func(b *v1.CapacityBuffer) { b.DeletionTimestamp = &now },
+	)
+	if errs := translator.Translate([]*v1.CapacityBuffer{terminatingBuf}); len(errs) != 0 {
+		t.Fatalf("Translate(terminatingBuf) unexpected errors: %v", errs)
+	}
+	if _, err := fakeK8s.CoreV1().PodTemplates("default").Get(t.Context(), "capacitybuffer-terminating-uid-managed-pod-template", metav1.GetOptions{}); err == nil {
+		t.Errorf("Translate(terminatingBuf) unexpectedly created managed PodTemplate for terminating CapacityBuffer")
+	}
+}
+
+func TestPodTemplateBufferTranslator_PodTemplateRefValidation(t *testing.T) {
+	siblingManaged := testutil.NewPodTemplate(
+		testutil.WithPodTemplateName("capacitybuffer-other-uid-managed-pod-template"),
+		func(pt *corev1.PodTemplate) {
+			pt.OwnerReferences = []metav1.OwnerReference{
+				{
+					APIVersion: capacitybuffer.CapacityBufferApiVersion,
+					Kind:       capacitybuffer.CapacityBufferKind,
+					Name:       "other-buffer",
+					UID:        "other-uid",
+					Controller: ptr.To(true),
+				},
+			}
+		},
+	)
+	orphanedManaged := testutil.NewPodTemplate(
+		testutil.WithPodTemplateName("capacitybuffer-orphaned-uid-managed-pod-template"),
+	)
+	userOwnedSource := testutil.NewPodTemplate(
+		testutil.WithPodTemplateName("user-source-pt"),
+		func(pt *corev1.PodTemplate) {
+			pt.OwnerReferences = []metav1.OwnerReference{
+				{
+					APIVersion: capacitybuffer.CapacityBufferApiVersion,
+					Kind:       capacitybuffer.CapacityBufferKind,
+					Name:       "buf-1",
+					UID:        "buf-uid",
+					Controller: ptr.To(true),
+				},
+			}
+		},
+	)
+
+	testCases := []struct {
+		name           string
+		podTemplateRef string
+		wantReady      metav1.ConditionStatus
+		wantManagedRef *v1.LocalObjectRef
+	}{
+		{
+			name:           "rejects_self_reference_to_uid_target",
+			podTemplateRef: "capacitybuffer-buf-uid-managed-pod-template",
+			wantReady:      metav1.ConditionFalse,
+		},
+		{
+			name:           "rejects_sibling_managed_template",
+			podTemplateRef: "capacitybuffer-other-uid-managed-pod-template",
+			wantReady:      metav1.ConditionFalse,
+		},
+		{
+			name:           "rejects_orphaned_managed_template",
+			podTemplateRef: "capacitybuffer-orphaned-uid-managed-pod-template",
+			wantReady:      metav1.ConditionFalse,
+		},
+		{
+			name:           "allows_user_named_template_with_buffer_owner_ref",
+			podTemplateRef: "user-source-pt",
+			wantReady:      metav1.ConditionTrue,
+			wantManagedRef: &v1.LocalObjectRef{Name: "capacitybuffer-buf-uid-managed-pod-template"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeK8s := fakeClient.NewSimpleClientset(siblingManaged.DeepCopy(), orphanedManaged.DeepCopy(), userOwnedSource.DeepCopy())
+			cbClient, err := cbclient.NewCapacityBufferClient(nil, fakeK8s, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+			if err != nil {
+				t.Fatalf("NewCapacityBufferClient() unexpected error: %v", err)
+			}
+			buffer := testutil.NewBuffer(
+				testutil.WithName("buf-1"),
+				testutil.WithUID[*v1.CapacityBuffer]("buf-uid"),
+				testutil.WithPodTemplateRef(tc.podTemplateRef),
+				testutil.WithReplicas(2),
+				testutil.WithActiveProvisioningStrategy(),
+			)
+			translator := NewPodTemplateBufferTranslator(cbClient, fakepods.NewDefaultingResolver())
+			if errs := translator.Translate([]*v1.CapacityBuffer{buffer}); len(errs) != 0 {
+				t.Fatalf("Translate(%q) unexpected errors: %v", tc.podTemplateRef, errs)
+			}
+			if diff := cmp.Diff(tc.wantManagedRef, buffer.Status.PodTemplateRef); diff != "" {
+				t.Errorf("Translate(%q) status.podTemplateRef diff (-want +got):\n%s", tc.podTemplateRef, diff)
+			}
+			if len(buffer.Status.Conditions) != 1 || buffer.Status.Conditions[0].Status != tc.wantReady {
+				t.Errorf("Translate(%q) conditions = %+v, want ReadyForProvisioning=%s", tc.podTemplateRef, buffer.Status.Conditions, tc.wantReady)
+			}
+		})
 	}
 }
 
@@ -314,7 +435,10 @@ func withResources(requests, limits corev1.ResourceList) func(*corev1.PodTemplat
 }
 
 func getTestBufferWithLimits(podTemplateRef *v1.LocalObjectRef, replicas *int32, limits *v1.ResourceList) *v1.CapacityBuffer {
-	opts := []testutil.BufferOption{testutil.WithActiveProvisioningStrategy()}
+	opts := []testutil.BufferOption{
+		testutil.WithActiveProvisioningStrategy(),
+		testutil.WithUID[*v1.CapacityBuffer]("default-buffer-uid"),
+	}
 	if podTemplateRef != nil {
 		opts = append(opts, testutil.WithPodTemplateRef(podTemplateRef.Name))
 	}

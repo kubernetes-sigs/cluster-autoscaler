@@ -44,12 +44,17 @@ func NewPodTemplateBufferTranslator(client *cbclient.CapacityBufferClient, resol
 // Translate translates buffers podTemplateRef specs to fill their status.
 func (t *podTemplateBufferTranslator) Translate(buffers []*v1.CapacityBuffer) []error {
 	var errs []error
-	var podTemplateRef *v1.LocalObjectRef
 	for _, buffer := range buffers {
-		if !isPodTemplateBasedBuffer(buffer) {
+		if !isPodTemplateBasedBuffer(buffer) || buffer.DeletionTimestamp != nil {
 			continue
 		}
-		podTemplateRef = buffer.Spec.PodTemplateRef
+		podTemplateRef := buffer.Spec.PodTemplateRef
+		if common.HasManagedPodTemplateName(podTemplateRef.Name) {
+			conditionErr := fmt.Errorf("podTemplateRef %q cannot reference a CapacityBuffer-managed pod template", podTemplateRef.Name)
+			common.SetBufferAsNotReadyForProvisioning(buffer, nil, nil, nil, buffer.Spec.ProvisioningStrategy, conditionErr)
+			continue
+		}
+
 		sourcePodTemplate, err := t.client.GetPodTemplate(buffer.Namespace, podTemplateRef.Name)
 		if err != nil {
 			common.SetBufferAsNotReadyForProvisioning(buffer, nil, nil, nil, buffer.Spec.ProvisioningStrategy, err)
@@ -85,7 +90,7 @@ func (t *podTemplateBufferTranslator) ensureManagedPodTemplate(ctx context.Conte
 	}
 
 	newSpec := getPodTemplateSpecFromPod(fakePod)
-	targetPodTemplate := getPodTemplateFromSpec(newSpec, buffer)
+	targetPodTemplate := podTemplateFromSpec(newSpec, buffer)
 	managedPodTemplate, err := t.client.EnsurePodTemplate(ctx, targetPodTemplate)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create or update managed pod template: %v", err)

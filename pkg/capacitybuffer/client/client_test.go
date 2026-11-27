@@ -18,12 +18,15 @@ package client
 
 import (
 	"testing"
+	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
+	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	buffersfake "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/client/clientset/versioned/fake"
 	fakeclient "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
@@ -165,7 +168,7 @@ func TestEnsurePodTemplate_OwnerReferences(t *testing.T) {
 		},
 	}
 	desired := testutil.NewPodTemplate(
-		testutil.WithPodTemplateName("capacitybuffer-b1-pod-template"),
+		testutil.WithPodTemplateName("capacitybuffer-uid-1-managed-pod-template"),
 		func(pt *corev1.PodTemplate) {
 			pt.OwnerReferences = ownerRefs
 		},
@@ -184,7 +187,9 @@ func TestEnsurePodTemplate_OwnerReferences(t *testing.T) {
 		if err != nil {
 			t.Fatalf("EnsurePodTemplate() unexpected error: %v", err)
 		}
-		assert.Equal(t, ownerRefs, got.OwnerReferences)
+		if diff := cmp.Diff(ownerRefs, got.OwnerReferences); diff != "" {
+			t.Errorf("EnsurePodTemplate() OwnerReferences diff (-want +got):\n%s", diff)
+		}
 	})
 
 	t.Run("skips_update_when_template_and_owner_references_match", func(t *testing.T) {
@@ -205,4 +210,152 @@ func TestEnsurePodTemplate_OwnerReferences(t *testing.T) {
 			}
 		}
 	})
+
+	activeBuf := testutil.NewBuffer(
+		testutil.WithName("b1"),
+		testutil.WithUID[*v1.CapacityBuffer]("uid-1"),
+	)
+
+	t.Run("creates_when_not_found", func(t *testing.T) {
+		fakeBuffers := buffersfake.NewSimpleClientset(activeBuf.DeepCopy())
+		fakeK8s := fakeclient.NewSimpleClientset()
+		cbClient, err := NewCapacityBufferClientFromClients(fakeBuffers, fakeK8s, nil, nil)
+		if err != nil {
+			t.Fatalf("NewCapacityBufferClientFromClients() unexpected error: %v", err)
+		}
+		fakeK8s.ClearActions()
+
+		got, err := cbClient.EnsurePodTemplate(t.Context(), desired.DeepCopy())
+		if err != nil {
+			t.Fatalf("EnsurePodTemplate() unexpected error: %v", err)
+		}
+		if diff := cmp.Diff(ownerRefs, got.OwnerReferences); diff != "" {
+			t.Errorf("EnsurePodTemplate() OwnerReferences diff (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("adopts_when_live_buffer_is_active_and_preserves_metadata", func(t *testing.T) {
+		existing := testutil.NewPodTemplate(
+			testutil.WithPodTemplateName("capacitybuffer-uid-1-managed-pod-template"),
+			func(pt *corev1.PodTemplate) {
+				pt.Labels = map[string]string{"env": "prod"}
+				pt.Annotations = map[string]string{"note": "keep"}
+				pt.Template.Spec.Containers[0].Image = "stale-image"
+				pt.OwnerReferences = []metav1.OwnerReference{
+					{APIVersion: "apps/v1", Kind: "Deployment", Name: "foreign", UID: "foreign-uid", Controller: ptr.To(true)},
+				}
+			},
+		)
+		fakeBuffers := buffersfake.NewSimpleClientset(activeBuf.DeepCopy())
+		fakeK8s := fakeclient.NewSimpleClientset(existing)
+		cbClient, err := NewCapacityBufferClientFromClients(fakeBuffers, fakeK8s, nil, nil)
+		if err != nil {
+			t.Fatalf("NewCapacityBufferClientFromClients() unexpected error: %v", err)
+		}
+
+		got, err := cbClient.EnsurePodTemplate(t.Context(), desired.DeepCopy())
+		if err != nil {
+			t.Fatalf("EnsurePodTemplate() unexpected error: %v", err)
+		}
+		if diff := cmp.Diff(ownerRefs, got.OwnerReferences); diff != "" {
+			t.Errorf("EnsurePodTemplate() OwnerReferences diff (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(desired.Template, got.Template); diff != "" {
+			t.Errorf("EnsurePodTemplate() Template diff (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(map[string]string{"env": "prod"}, got.Labels); diff != "" {
+			t.Errorf("EnsurePodTemplate() Labels diff (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(map[string]string{"note": "keep"}, got.Annotations); diff != "" {
+			t.Errorf("EnsurePodTemplate() Annotations diff (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestEnsurePodTemplate_ValidationErrors(t *testing.T) {
+	now := metav1.NewTime(time.Unix(1700000000, 0))
+	ownerRefs := []metav1.OwnerReference{
+		{
+			APIVersion: "autoscaling.x-k8s.io/v1beta1",
+			Kind:       "CapacityBuffer",
+			Name:       "b1",
+			UID:        "uid-1",
+			Controller: ptr.To(true),
+		},
+	}
+	desired := testutil.NewPodTemplate(
+		testutil.WithPodTemplateName("capacitybuffer-uid-1-managed-pod-template"),
+		func(pt *corev1.PodTemplate) {
+			pt.OwnerReferences = ownerRefs
+		},
+	)
+	missingUID := desired.DeepCopy()
+	missingUID.OwnerReferences = []metav1.OwnerReference{
+		{APIVersion: "autoscaling.x-k8s.io/v1beta1", Kind: "CapacityBuffer", Name: "b1", Controller: ptr.To(true)},
+	}
+
+	legacyUnowned := testutil.NewPodTemplate(testutil.WithPodTemplateName("capacitybuffer-b1-pod-template"))
+	legacyDesired := legacyUnowned.DeepCopy()
+	legacyDesired.OwnerReferences = ownerRefs
+
+	unownedUIDPT := desired.DeepCopy()
+	unownedUIDPT.OwnerReferences = nil
+	terminatingBuf := testutil.NewBuffer(
+		testutil.WithName("b1"),
+		testutil.WithUID[*v1.CapacityBuffer]("uid-1"),
+		func(b *v1.CapacityBuffer) { b.DeletionTimestamp = &now },
+	)
+
+	testCases := []struct {
+		name      string
+		k8sObjs   []runtime.Object
+		bufObjs   []runtime.Object
+		desiredPT *corev1.PodTemplate
+	}{
+		{
+			name:      "rejects_missing_desired_controller_uid",
+			desiredPT: missingUID,
+		},
+		{
+			name:      "rejects_non_uid_named_template",
+			k8sObjs:   []runtime.Object{legacyUnowned},
+			desiredPT: legacyDesired,
+		},
+		{
+			name:      "rejects_adoption_when_owning_buffer_is_terminating",
+			k8sObjs:   []runtime.Object{unownedUIDPT},
+			bufObjs:   []runtime.Object{terminatingBuf},
+			desiredPT: desired,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeK8s := fakeclient.NewSimpleClientset(tc.k8sObjs...)
+			var fakeBufs *buffersfake.Clientset
+			if len(tc.bufObjs) > 0 {
+				fakeBufs = buffersfake.NewSimpleClientset(tc.bufObjs...)
+			}
+			var cbClient *CapacityBufferClient
+			var err error
+			if fakeBufs != nil {
+				cbClient, err = NewCapacityBufferClientFromClients(fakeBufs, fakeK8s, nil, nil)
+			} else {
+				cbClient, err = NewCapacityBufferClient(nil, fakeK8s, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+			}
+			if err != nil {
+				t.Fatalf("creating CapacityBufferClient: %v", err)
+			}
+			fakeK8s.ClearActions()
+
+			if _, err := cbClient.EnsurePodTemplate(t.Context(), tc.desiredPT.DeepCopy()); err == nil {
+				t.Fatalf("EnsurePodTemplate(%s) = nil, want error", tc.desiredPT.Name)
+			}
+			for _, action := range fakeK8s.Actions() {
+				if action.GetVerb() == "update" || action.GetVerb() == "create" {
+					t.Errorf("EnsurePodTemplate(%s) performed unexpected write action: %+v", tc.desiredPT.Name, action)
+				}
+			}
+		})
+	}
 }

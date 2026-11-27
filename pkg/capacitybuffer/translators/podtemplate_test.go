@@ -17,8 +17,10 @@ limitations under the License.
 package translator
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,7 +29,8 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer"
 )
 
-func TestGetPodTemplateFromSpec(t *testing.T) {
+func TestPodTemplateFromSpec(t *testing.T) {
+	longBufferName := strings.Repeat("a", 253)
 	testCases := []struct {
 		name   string
 		pts    *corev1.PodTemplateSpec
@@ -35,7 +38,7 @@ func TestGetPodTemplateFromSpec(t *testing.T) {
 		want   *corev1.PodTemplate
 	}{
 		{
-			name: "basic pod template spec",
+			name: "basic_pod_template_spec",
 			pts: &corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      map[string]string{"app": "foo"},
@@ -54,7 +57,7 @@ func TestGetPodTemplateFromSpec(t *testing.T) {
 			},
 			want: &corev1.PodTemplate{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "capacitybuffer-test-buffer-pod-template",
+					Name:      "capacitybuffer-123-uid-managed-pod-template",
 					Namespace: "test-ns",
 					OwnerReferences: []metav1.OwnerReference{
 						{
@@ -78,7 +81,7 @@ func TestGetPodTemplateFromSpec(t *testing.T) {
 			},
 		},
 		{
-			name: "long buffer name",
+			name: "max_length_buffer_name_uses_uid",
 			pts: &corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{"app": "foo"},
@@ -89,21 +92,21 @@ func TestGetPodTemplateFromSpec(t *testing.T) {
 			},
 			buffer: &apiv1.CapacityBuffer{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "this-is-a-very-long-buffer-name-that-will-exceed-the-maximum-allowed-length-for-a-pod-template-name-which-is-two-hundred-and-fifty-three-characters-in-total-so-it-will-be-truncated-to-fit-the-limit-and-we-need-to-make-sure-it-does-not-exceed-the-limit-whatsoever",
+					Name:      longBufferName,
 					Namespace: "test-ns",
-					UID:       "123-uid",
+					UID:       "11111111-2222-3333-4444-555555555555",
 				},
 			},
 			want: &corev1.PodTemplate{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "capacitybuffer-this-is-a-very-long-buffer-name-that-will-exceed-the-maximum-allowed-length-for-a-pod-template-name-which-is-two-hundred-and-fifty-three-characters-in-total-so-it-will-be-truncated-to-fit-the-limit-and-we-need-to-make-sure-it-pod-template",
+					Name:      "capacitybuffer-11111111-2222-3333-4444-555555555555-managed-pod-template",
 					Namespace: "test-ns",
 					OwnerReferences: []metav1.OwnerReference{
 						{
 							APIVersion: capacitybuffer.CapacityBufferApiVersion,
 							Kind:       capacitybuffer.CapacityBufferKind,
-							Name:       "this-is-a-very-long-buffer-name-that-will-exceed-the-maximum-allowed-length-for-a-pod-template-name-which-is-two-hundred-and-fifty-three-characters-in-total-so-it-will-be-truncated-to-fit-the-limit-and-we-need-to-make-sure-it-does-not-exceed-the-limit-whatsoever",
-							UID:        "123-uid",
+							Name:       longBufferName,
+							UID:        "11111111-2222-3333-4444-555555555555",
 							Controller: ptr.To(true),
 						},
 					},
@@ -122,8 +125,10 @@ func TestGetPodTemplateFromSpec(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := getPodTemplateFromSpec(tc.pts, tc.buffer)
-			assert.Equal(t, tc.want, got)
+			got := podTemplateFromSpec(tc.pts, tc.buffer)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("podTemplateFromSpec() diff (-want +got):\n%s", diff)
+			}
 		})
 	}
 }

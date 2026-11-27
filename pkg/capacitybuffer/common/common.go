@@ -22,11 +22,27 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+const (
+	podTemplateNamePrefix = "capacitybuffer-"
+	podTemplateNameSuffix = "-managed-pod-template"
+)
+
+// ManagedPodTemplateName returns the deterministic managed PodTemplate name for a CapacityBuffer UID.
+func ManagedPodTemplateName(bufferUID types.UID) string {
+	return podTemplateNamePrefix + string(bufferUID) + podTemplateNameSuffix
+}
+
+// HasManagedPodTemplateName reports whether name matches the reserved managed PodTemplate pattern.
+func HasManagedPodTemplateName(name string) bool {
+	minLen := len(podTemplateNamePrefix) + len(podTemplateNameSuffix)
+	return len(name) >= minLen && strings.HasPrefix(name, podTemplateNamePrefix) && strings.HasSuffix(name, podTemplateNameSuffix)
+}
 
 // SetBufferAsReadyForProvisioning updates the passed buffer object with the rest of the attributes and sets its condition to ready
 func SetBufferAsReadyForProvisioning(buffer *v1.CapacityBuffer, PodTemplateRef *v1.LocalObjectRef, podTemplateGeneration *int64, replicas *int32, provStrategy *string) {

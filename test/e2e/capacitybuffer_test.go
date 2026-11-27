@@ -26,10 +26,12 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	cbv1beta1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer"
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/testutil"
 	"sigs.k8s.io/e2e-framework/klient"
@@ -255,8 +257,21 @@ func TestCapacityBufferManagedPodTemplateReconciliation(t *testing.T) {
 
 			managedPT.Template.Spec.Containers[0].Image = "modified-image"
 			managedPT.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU] = resource.MustParse(testCfg.CalculateCPURequest(0.05))
-			if err := client.Resources().Update(ctx, managedPT); err != nil {
-				t.Fatalf("failed to update managed pod template %q: %v", managedPodTemplateName, err)
+			if err := client.Resources().Update(ctx, managedPT); !k8serrors.IsForbidden(err) {
+				t.Fatalf("Update(%q) without system:masters = %v, want Forbidden error from ValidatingAdmissionPolicy", managedPodTemplateName, err)
+			}
+
+			breakGlassCfg := rest.CopyConfig(client.RESTConfig())
+			breakGlassCfg.Impersonate = rest.ImpersonationConfig{
+				UserName: "break-glass-admin",
+				Groups:   []string{"system:masters"},
+			}
+			breakGlassClient, err := klient.New(breakGlassCfg)
+			if err != nil {
+				t.Fatalf("failed to create system:masters client: %v", err)
+			}
+			if err := breakGlassClient.Resources().Update(ctx, managedPT); err != nil {
+				t.Fatalf("failed to update managed pod template %q via system:masters: %v", managedPodTemplateName, err)
 			}
 			modifiedGen := managedPT.Generation
 

@@ -51,6 +51,7 @@ func GetPodTemplateRefBuffer(podTemplateRef *v1.LocalObjectRef, replicas *int32)
 	return &v1.CapacityBuffer{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default",
+			UID:       "default-buffer-uid",
 		},
 		Spec: v1.CapacityBufferSpec{
 			ProvisioningStrategy: &ProvisioningStrategy,

@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer"
@@ -165,6 +166,32 @@ func TestConditionUpdates(t *testing.T) {
 
 			if diff := cmp.Diff(tc.wantConditions, tc.initialBuffer.Status.Conditions, sortOpt, ignoreTime); diff != "" {
 				t.Errorf("Conditions mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestManagedPodTemplateName(t *testing.T) {
+	if got, want := ManagedPodTemplateName(types.UID("uid-1")), "capacitybuffer-uid-1-managed-pod-template"; got != want {
+		t.Errorf("ManagedPodTemplateName() = %q, want %q", got, want)
+	}
+
+	testCases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "uid_named", in: "capacitybuffer-uid-1-managed-pod-template", want: true},
+		{name: "empty_middle", in: "capacitybuffer--managed-pod-template", want: true},
+		{name: "overlapping_prefix_suffix_too_short", in: "capacitybuffer-managed-pod-template", want: false},
+		{name: "legacy_named", in: "capacitybuffer-b1-pod-template", want: false},
+		{name: "user_named", in: "my-source-pt", want: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HasManagedPodTemplateName(tc.in); got != tc.want {
+				t.Errorf("HasManagedPodTemplateName(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
 	}

@@ -1,0 +1,74 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ .Release.Name }}-capacitybuffer-managed-podtemplate-protection
+  labels:
+    {{- toYaml .Values.commonLabels | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:   [""]
+      apiVersions: ["v1"]
+      operations:  ["CREATE", "UPDATE", "DELETE"]
+      resources:   ["podtemplates"]
+  variables:
+  - name: managedNameRegex
+    expression: "'^capacitybuffer-.*-managed-pod-template$'"
+  - name: isSystemMasters
+    expression: "has(request.userInfo.groups) && 'system:masters' in request.userInfo.groups"
+  - name: createAllowedUsers
+    expression: >-
+      ['system:serviceaccount:{{ .Release.Namespace }}:{{ .Release.Name }}']
+  - name: modifyAllowedUsers
+    expression: >-
+      ['system:serviceaccount:{{ .Release.Namespace }}:{{ .Release.Name }}',
+       'system:kube-controller-manager',
+       'system:serviceaccount:kube-system:generic-garbage-collector',
+       'system:serviceaccount:kube-system:namespace-controller']
+  - name: isManagedNameOldPodTemplate
+    expression: >-
+      oldObject != null &&
+      has(oldObject.metadata) &&
+      has(oldObject.metadata.name) &&
+      oldObject.metadata.name.matches(variables.managedNameRegex)
+  - name: isManagedOwnedOldPodTemplate
+    expression: >-
+      variables.isManagedNameOldPodTemplate &&
+      has(oldObject.metadata.ownerReferences) &&
+      oldObject.metadata.ownerReferences.exists(ref,
+        ref.kind == 'CapacityBuffer' &&
+        ref.apiVersion.startsWith('autoscaling.x-k8s.io/') &&
+        has(ref.controller) &&
+        ref.controller)
+  validations:
+  - expression: >-
+      request.operation != 'CREATE' ||
+      !(object != null && has(object.metadata) && has(object.metadata.name) && object.metadata.name.matches(variables.managedNameRegex)) ||
+      request.userInfo.username in variables.createAllowedUsers ||
+      variables.isSystemMasters
+    reason: Forbidden
+    message: >-
+      PodTemplates matching 'capacitybuffer-*-managed-pod-template' are reserved
+      for Cluster Autoscaler CapacityBuffers and cannot be created directly.
+  - expression: >-
+      !(
+        (request.operation == 'UPDATE' && variables.isManagedNameOldPodTemplate) ||
+        (request.operation == 'DELETE' && variables.isManagedOwnedOldPodTemplate)
+      ) ||
+      request.userInfo.username in variables.modifyAllowedUsers ||
+      variables.isSystemMasters
+    reason: Forbidden
+    message: >-
+      PodTemplates managed by a CapacityBuffer cannot be modified or deleted
+      directly. Update or delete the owning CapacityBuffer instead.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ .Release.Name }}-capacitybuffer-managed-podtemplate-protection-binding
+  labels:
+    {{- toYaml .Values.commonLabels | nindent 4 }}
+spec:
+  policyName: {{ .Release.Name }}-capacitybuffer-managed-podtemplate-protection
+  validationActions: [Deny]
