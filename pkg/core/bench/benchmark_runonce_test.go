@@ -52,8 +52,6 @@ import (
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core"
 	"sigs.k8s.io/cluster-autoscaler/pkg/debuggingsnapshot"
-	"sigs.k8s.io/cluster-autoscaler/pkg/estimator"
-	"sigs.k8s.io/cluster-autoscaler/pkg/expander"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/test/integration"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
@@ -304,28 +302,24 @@ func (n *noOpRecorder) AnnotatedEventf(_ apimachineryruntime.Object, _ map[strin
 
 // defaultCAOptions returns the standard autoscaling configuration used as a baseline for benchmarks.
 func defaultCAOptions() config.AutoscalingOptions {
-	return config.AutoscalingOptions{
-		NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
-			ScaleDownUnneededTime:         1 * time.Minute,
-			ScaleDownUnreadyTime:          1 * time.Minute,
-			ScaleDownUtilizationThreshold: 0.5,
-			MaxNodeProvisionTime:          10 * time.Minute,
-		},
-		EstimatorName:                  estimator.BinpackingEstimatorName,
-		ExpanderNames:                  expander.LeastWasteExpanderName,
-		MaxBinpackingTime:              60 * time.Second,
-		MaxNodeGroupBinpackingDuration: 60 * time.Second,
-		MaxCoresTotal:                  maxCores,
-		MaxMemoryTotal:                 maxMem,
-		MaxNodesTotal:                  maxNGSize,
+	return config.DefaultAutoscalingOptions(func(o *config.AutoscalingOptions) {
+		o.NodeGroupDefaults.ScaleDownUnneededTime = 1 * time.Minute
+		o.NodeGroupDefaults.ScaleDownUnreadyTime = 1 * time.Minute
+		o.MaxBinpackingTime = 60 * time.Second
+		o.MaxNodeGroupBinpackingDuration = 60 * time.Second
+		o.MaxCoresTotal = maxCores
+		o.MaxMemoryTotal = maxMem
+		o.MaxNodesTotal = maxNGSize
 		// In a homogeneous benchmark environment, any node is a valid fit.
 		// Higher parallelism causes a race condition where multiple workers perform
 		// redundant Filter checks before the first success can trigger cancellation.
 		// This introduces lock contention on CycleState and massive variance (±20%)
 		// depending on Go scheduler non-determinism. We set it to 1 to ensure
 		// deterministic, sequential evaluation and stable profiling results.
-		PredicateParallelism: 1,
-	}
+		o.PredicateParallelism = 1
+		o.WriteStatusConfigMap = false
+	})
+
 }
 
 // fastScaleUpNodeGroup does not simulate a real scale up by creating new Node objects.
@@ -912,7 +906,6 @@ func BenchmarkRunOnceScaleUp(b *testing.B) {
 		verify: verifyTargetSize(1000),
 		config: func(opts *config.AutoscalingOptions) {
 			opts.MaxNodesPerScaleUp = maxNGSize
-			opts.ScaleUpFromZero = true
 		},
 	}
 	s.run(b)
@@ -924,8 +917,6 @@ func BenchmarkRunOnceScaleUpDRA(b *testing.B) {
 		verify: verifyTargetSize(500),
 		config: func(opts *config.AutoscalingOptions) {
 			opts.MaxNodesPerScaleUp = maxNGSize
-			opts.ScaleUpFromZero = true
-			opts.DynamicResourceAllocationEnabled = true
 		},
 	}
 	s.run(b)
@@ -954,11 +945,8 @@ func BenchmarkRunOnceScaleDown(b *testing.B) {
 			opts.NodeGroupDefaults.ScaleDownUnneededTime = 0
 			opts.MaxScaleDownParallelism = 2000
 			opts.MaxDrainParallelism = 2000
-			opts.MaxConcurrentNodesTainting = 5
 			opts.ScaleDownDelayAfterAdd = 0
-			opts.ScaleDownEnabled = true
 			opts.ScaleDownNonEmptyCandidatesCount = 2000
-			opts.ScaleDownUnreadyEnabled = true
 			opts.ScaleDownSimulationTimeout = 60 * time.Second
 		},
 	}
@@ -975,11 +963,8 @@ func BenchmarkRunOnceScaleDownAntiAffinity(b *testing.B) {
 			opts.NodeGroupDefaults.ScaleDownUnneededTime = 0
 			opts.MaxScaleDownParallelism = 2000
 			opts.MaxDrainParallelism = 2000
-			opts.MaxConcurrentNodesTainting = 5
 			opts.ScaleDownDelayAfterAdd = 0
-			opts.ScaleDownEnabled = true
 			opts.ScaleDownNonEmptyCandidatesCount = 2000
-			opts.ScaleDownUnreadyEnabled = true
 			opts.ScaleDownSimulationTimeout = 60 * time.Second
 			opts.InterPodAffinityHostnameFastPath = true
 		},
@@ -995,13 +980,9 @@ func BenchmarkRunOnceScaleDownDRA(b *testing.B) {
 			opts.NodeGroupDefaults.ScaleDownUnneededTime = 0
 			opts.MaxScaleDownParallelism = 2000
 			opts.MaxDrainParallelism = 2000
-			opts.MaxConcurrentNodesTainting = 5
 			opts.ScaleDownDelayAfterAdd = 0
-			opts.ScaleDownEnabled = true
 			opts.ScaleDownNonEmptyCandidatesCount = 2000
-			opts.ScaleDownUnreadyEnabled = true
 			opts.ScaleDownSimulationTimeout = 60 * time.Second
-			opts.DynamicResourceAllocationEnabled = true
 		},
 	}
 	s.run(b)

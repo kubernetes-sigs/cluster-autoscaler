@@ -60,16 +60,12 @@ type scaleDownDependencies struct {
 }
 
 func defaultAutoscalingOptions() config.AutoscalingOptions {
-	return config.AutoscalingOptions{
-		ScaleDownEnabled:           true,
-		MaxScaleDownParallelism:    1,
-		MaxDrainParallelism:        1,
-		ScaleDownSimulationTimeout: 10 * time.Second,
-		NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
-			ScaleDownUtilizationThreshold: 1.0,
-			ScaleDownUnneededTime:         0,
-		},
-	}
+	return config.DefaultAutoscalingOptions(func(o *config.AutoscalingOptions) {
+		o.NodeGroupDefaults.ScaleDownUnneededTime = 0
+		o.NodeGroupDefaults.ScaleDownUtilizationThreshold = 1.0
+		o.MaxScaleDownParallelism = 1
+		o.ScaleDownSimulationTimeout = 10 * time.Second
+	})
 }
 
 func buildScaleDownDependencies(b *testing.B, cs *initialClusterState, autoscalingOpts config.AutoscalingOptions) scaleDownDependencies {
