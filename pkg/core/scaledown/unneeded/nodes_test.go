@@ -19,9 +19,11 @@ package unneeded
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -30,6 +32,7 @@ import (
 	testprovider "sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	ca_context "sigs.k8s.io/cluster-autoscaler/pkg/context"
+	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core/scaledown/status"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/core/test"
 	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
@@ -614,6 +617,258 @@ func TestNodeLoadFromExistingTaints(t *testing.T) {
 		})
 	}
 
+}
+
+func TestAsListPreservesOrder(t *testing.T) {
+	const nodeCount = 20
+	forward := make([]string, nodeCount)
+	reversed := make([]string, nodeCount)
+	for i := range nodeCount {
+		name := fmt.Sprintf("n-%02d", i)
+		forward[i] = name
+		reversed[nodeCount-1-i] = name
+	}
+
+	testCases := []struct {
+		name    string
+		updates [][]string
+		want    []string
+	}{
+		{
+			name:    "single_update",
+			updates: [][]string{forward},
+			want:    forward,
+		},
+		{
+			name:    "subsequent_update_replaces_order",
+			updates: [][]string{forward, reversed},
+			want:    reversed,
+		},
+		{
+			name:    "duplicate_node_keeps_first_position",
+			updates: [][]string{{"n-00", "n-01", "n-00", "n-02"}},
+			want:    []string{"n-00", "n-01", "n-02"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			provider := testprovider.NewTestCloudProviderBuilder().Build()
+			provider.InsertNodeGroup(testprovider.NewTestNodeGroup("ng1", defaultNodeGroupMaxSize, 0, nodeCount, true, false, "", nil, nil))
+			for _, name := range forward {
+				provider.AddNode("ng1", BuildTestNode(name, defaultNodeCpu, defaultNodeMem))
+			}
+
+			n := NewNodes(&fakeScaleDownTimeGetter{unneededTime: defaultUnneededTime, unreadyTime: defaultUnreadyTime})
+			autoscalingCtx := &ca_context.AutoscalingContext{CloudProvider: provider}
+			ts := time.Now()
+			for i, names := range tc.updates {
+				batch := make([]simulator.NodeToBeRemoved, len(names))
+				for j, name := range names {
+					batch[j] = makeNode(name, fmt.Sprintf("v%d", i))
+				}
+				n.Update(t.Context(), autoscalingCtx, batch, ts.Add(time.Duration(i)*time.Minute))
+			}
+
+			if diff := cmp.Diff(tc.want, unneededNames(n.AsList())); diff != "" {
+				t.Errorf("Nodes.AsList() after updates %v diff (-want +got):\n%s", tc.updates, diff)
+			}
+		})
+	}
+}
+
+func TestDropPreservesOrder(t *testing.T) {
+	t.Parallel()
+
+	const nodeCount = 20
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	provider.InsertNodeGroup(testprovider.NewTestNodeGroup("ng1", defaultNodeGroupMaxSize, 0, nodeCount, true, false, "", nil, nil))
+	batch := make([]simulator.NodeToBeRemoved, nodeCount)
+	want := make([]string, 0, nodeCount-1)
+	for i := range nodeCount {
+		name := fmt.Sprintf("n-%02d", i)
+		nn := makeNode(name, "v1")
+		provider.AddNode("ng1", nn.Node)
+		batch[i] = nn
+		if name != "n-07" {
+			want = append(want, name)
+		}
+	}
+
+	n := NewNodes(&fakeScaleDownTimeGetter{unneededTime: defaultUnneededTime, unreadyTime: defaultUnreadyTime})
+	autoscalingCtx := &ca_context.AutoscalingContext{CloudProvider: provider}
+	n.Update(t.Context(), autoscalingCtx, batch, time.Now())
+	_ = n.AsList()
+
+	n.Drop("n-07")
+	n.Drop("missing-node")
+
+	if n.Contains("n-07") {
+		t.Errorf("Nodes.Contains(%q) after Drop(%q) = true, want false", "n-07", "n-07")
+	}
+	if diff := cmp.Diff(want, unneededNames(n.AsList())); diff != "" {
+		t.Errorf("Nodes.AsList() after Drop(%q) diff (-want +got):\n%s", "n-07", diff)
+	}
+}
+
+func TestClearEmptiesList(t *testing.T) {
+	t.Parallel()
+
+	provider := testprovider.NewTestCloudProviderBuilder().Build()
+	provider.InsertNodeGroup(testprovider.NewTestNodeGroup("ng1", defaultNodeGroupMaxSize, 0, 2, true, false, "", nil, nil))
+	nn := makeNode("n-00", "v1")
+	provider.AddNode("ng1", nn.Node)
+
+	n := NewNodes(&fakeScaleDownTimeGetter{unneededTime: defaultUnneededTime, unreadyTime: defaultUnreadyTime})
+	n.Update(t.Context(), &ca_context.AutoscalingContext{CloudProvider: provider}, []simulator.NodeToBeRemoved{nn}, time.Now())
+	_ = n.AsList()
+
+	n.Clear(t.Context())
+
+	if got := len(n.AsList()); got != 0 {
+		t.Errorf("len(Nodes.AsList()) after Clear() = %d, want 0", got)
+	}
+	if n.Contains("n-00") {
+		t.Errorf("Nodes.Contains(%q) after Clear() = true, want false", "n-00")
+	}
+}
+
+func TestRemovableAtPreservesOrder(t *testing.T) {
+	const nodesPerBucket = 15
+	emptyNames := make([]string, nodesPerBucket)
+	drainNames := make([]string, nodesPerBucket)
+	for i := range nodesPerBucket {
+		emptyNames[i] = fmt.Sprintf("empty-%02d", i)
+		drainNames[i] = fmt.Sprintf("drain-%02d", i)
+	}
+
+	testCases := []struct {
+		name            string
+		minSize         int
+		wantEmpty       []string
+		wantNeedDrain   []string
+		wantUnremovable []string
+	}{
+		{
+			name:            "all_removable",
+			minSize:         0,
+			wantEmpty:       emptyNames,
+			wantNeedDrain:   drainNames,
+			wantUnremovable: nil,
+		},
+		{
+			name:            "min_size_keeps_earlier_drain_nodes",
+			minSize:         10,
+			wantEmpty:       emptyNames,
+			wantNeedDrain:   drainNames[:5],
+			wantUnremovable: drainNames[5:],
+		},
+		{
+			name:            "min_size_keeps_earlier_empty_nodes",
+			minSize:         20,
+			wantEmpty:       emptyNames[:10],
+			wantNeedDrain:   nil,
+			wantUnremovable: slices.Concat(emptyNames[10:], drainNames),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			now := time.Now()
+			provider := testprovider.NewTestCloudProviderBuilder().Build()
+			provider.InsertNodeGroup(testprovider.NewTestNodeGroup("ng", defaultNodeGroupMaxSize, tc.minSize, 2*nodesPerBucket, true, false, "", nil, nil))
+
+			// Interleave empty and drain candidates to verify each bucket keeps its Update order.
+			candidates := make([]simulator.NodeToBeRemoved, 0, 2*nodesPerBucket)
+			allNodes := make([]*apiv1.Node, 0, 2*nodesPerBucket)
+			for i := range nodesPerBucket {
+				en := BuildTestNode(emptyNames[i], defaultNodeCpu, defaultNodeMem)
+				SetNodeReadyState(en, true, now.Add(-10*time.Minute))
+				provider.AddNode("ng", en)
+				allNodes = append(allNodes, en)
+				candidates = append(candidates, simulator.NodeToBeRemoved{Node: en})
+
+				dn := BuildTestNode(drainNames[i], defaultNodeCpu, defaultNodeMem)
+				SetNodeReadyState(dn, true, now.Add(-10*time.Minute))
+				provider.AddNode("ng", dn)
+				allNodes = append(allNodes, dn)
+				candidates = append(candidates, simulator.NodeToBeRemoved{
+					Node:             dn,
+					PodsToReschedule: []*apiv1.Pod{BuildTestPod(fmt.Sprintf("pod-%02d", i), 1, 1)},
+				})
+			}
+
+			autoscalingCtx := ca_context.AutoscalingContext{
+				CloudProvider: provider,
+				AutoscalingOptions: config.AutoscalingOptions{
+					ScaleDownSimulationTimeout: testScaleDownTimeout,
+				},
+			}
+			n := NewNodes(&fakeScaleDownTimeGetter{unneededTime: 5 * time.Minute, unreadyTime: 5 * time.Minute})
+			n.Update(t.Context(), &autoscalingCtx, candidates, now.Add(-10*time.Minute))
+
+			factory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{
+				QuotaProvider:            resourcequotas.NewFakeProvider(nil),
+				CustomResourcesProcessor: customresources.NewDefaultCustomResourcesProcessor(false, false),
+			})
+			tracker, err := factory.NewMinQuotasTracker(t.Context(), &autoscalingCtx, allNodes)
+			if err != nil {
+				t.Fatalf("NewMinQuotasTracker() failed: %v", err)
+			}
+
+			gotEmpty, gotNeedDrain, gotUnremovable := n.RemovableAt(t.Context(), &autoscalingCtx, nodeprocessors.ScaleDownContext{
+				ActuationStatus: &fakeActuationStatus{},
+				Tracker:         tracker,
+			}, now)
+
+			if diff := cmp.Diff(tc.wantEmpty, removableNames(gotEmpty)); diff != "" {
+				t.Errorf("Nodes.RemovableAt() (minSize=%d) empty diff (-want +got):\n%s", tc.minSize, diff)
+			}
+			if diff := cmp.Diff(tc.wantNeedDrain, removableNames(gotNeedDrain)); diff != "" {
+				t.Errorf("Nodes.RemovableAt() (minSize=%d) needDrain diff (-want +got):\n%s", tc.minSize, diff)
+			}
+			if diff := cmp.Diff(tc.wantUnremovable, unremovableNames(gotUnremovable)); diff != "" {
+				t.Errorf("Nodes.RemovableAt() (minSize=%d) unremovable diff (-want +got):\n%s", tc.minSize, diff)
+			}
+		})
+	}
+}
+
+func unneededNames(nodes []*scaledown.UnneededNode) []string {
+	if len(nodes) == 0 {
+		return nil
+	}
+	names := make([]string, len(nodes))
+	for i, n := range nodes {
+		names[i] = n.Node.Name
+	}
+	return names
+}
+
+func removableNames(nodes []simulator.NodeToBeRemoved) []string {
+	if len(nodes) == 0 {
+		return nil
+	}
+	names := make([]string, len(nodes))
+	for i, n := range nodes {
+		names[i] = n.Node.Name
+	}
+	return names
+}
+
+func unremovableNames(nodes []simulator.UnremovableNode) []string {
+	if len(nodes) == 0 {
+		return nil
+	}
+	names := make([]string, len(nodes))
+	for i, n := range nodes {
+		names[i] = n.Node.Name
+	}
+	return names
 }
 
 type fakeActuationStatus struct {

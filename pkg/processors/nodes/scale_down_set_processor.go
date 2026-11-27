@@ -79,7 +79,11 @@ func (p *CompositeScaleDownSetProcessor) CleanUp() {
 type AtomicResizeFilteringProcessor struct {
 }
 
-// FilterUnremovableNodes marks all candidate nodes as unremovable if ZeroOrMaxNodeScaling is enabled and number of nodes to remove are not equal to target or current size
+// FilterUnremovableNodes marks all candidate nodes as unremovable if
+// ZeroOrMaxNodeScaling is enabled and the number of nodes to remove is not
+// equal to target or current size. Removable standard nodes are returned first
+// in candidate order, followed by removable atomic node groups ordered by their
+// first candidate, with nodes within each group in candidate order.
 func (p *AtomicResizeFilteringProcessor) FilterUnremovableNodes(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, scaleDownCtx *ScaleDownContext, candidates []simulator.NodeToBeRemoved) ([]simulator.NodeToBeRemoved, []simulator.UnremovableNode) {
 	logger := klog.FromContext(ctx)
 	nodesToBeRemoved := []simulator.NodeToBeRemoved{}
@@ -88,6 +92,7 @@ func (p *AtomicResizeFilteringProcessor) FilterUnremovableNodes(ctx context.Cont
 	atomicQuota := klogx.NodesLoggingQuota()
 	standardQuota := klogx.NodesLoggingQuota()
 	nodesByGroup := map[cloudprovider.NodeGroup][]simulator.NodeToBeRemoved{}
+	var atomicGroups []cloudprovider.NodeGroup
 	allNodes, err := allNodes(autoscalingCtx.ClusterSnapshot)
 	if err != nil {
 		logger.Error(err, "Failed to read all nodes from the cluster snapshot for filtering unremovable nodes")
@@ -113,6 +118,9 @@ func (p *AtomicResizeFilteringProcessor) FilterUnremovableNodes(ctx context.Cont
 		}
 		if autoscalingOptions != nil && autoscalingOptions.ZeroOrMaxNodeScaling {
 			klogx.V(2).UpTo(atomicQuota).Infof("Considering node %s for atomic scale down", node.Node.Name)
+			if _, seen := nodesByGroup[nodeGroup]; !seen {
+				atomicGroups = append(atomicGroups, nodeGroup)
+			}
 			nodesByGroup[nodeGroup] = append(nodesByGroup[nodeGroup], node)
 		} else {
 			klogx.V(2).UpTo(standardQuota).Infof("Considering node %s for standard scale down", node.Node.Name)
@@ -121,7 +129,8 @@ func (p *AtomicResizeFilteringProcessor) FilterUnremovableNodes(ctx context.Cont
 	}
 	klogx.V(2).Over(atomicQuota).Infof("Considering %d other nodes for atomic scale down", -atomicQuota.Left())
 	klogx.V(2).Over(standardQuota).Infof("Considering %d other nodes for standard scale down", -atomicQuota.Left())
-	for nodeGroup, consideredNodes := range nodesByGroup {
+	for _, nodeGroup := range atomicGroups {
+		consideredNodes := nodesByGroup[nodeGroup]
 		ngSize, err := nodeGroup.TargetSize(ctx)
 		if err != nil {
 			logger.Error(err, "Nodes from group will not scale down, failed to get target size", "nodeGroupId", nodeGroup.Id())
