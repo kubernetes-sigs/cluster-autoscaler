@@ -38,6 +38,7 @@ const (
 type TestConfig struct {
 	Provider             ProviderType
 	NodeGroup            string
+	DRANodeGroup         string
 	NodeGroupLabelKey    string
 	NodeCPU              resource.Quantity
 	NodeMemory           resource.Quantity
@@ -64,6 +65,7 @@ func KwokTestConfig() *TestConfig {
 	return &TestConfig{
 		Provider:          ProviderKWOK,
 		NodeGroup:         "kind-worker",
+		DRANodeGroup:      "kind-worker2",
 		NodeGroupLabelKey: "kwok-nodegroup",
 		NodeCPU:           resource.MustParse("12"),
 		NodeMemory:        resource.MustParse("32Gi"),
