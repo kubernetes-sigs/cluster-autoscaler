@@ -142,7 +142,7 @@ func NewDefaultBufferController(
 
 func (c *bufferController) configureEventHandlers() {
 	// CapacityBuffer Informer
-	c.client.GetBufferInformer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	addEventHandler(c.client.GetBufferInformer(), cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			c.enqueueNamespace(obj)
 		},
@@ -170,7 +170,7 @@ func (c *bufferController) configureEventHandlers() {
 	})
 
 	// ResourceQuota Informer
-	c.client.GetResourceQuotaInformer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	addEventHandler(c.client.GetResourceQuotaInformer(), cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			c.enqueueNamespace(obj)
 		},
@@ -191,7 +191,7 @@ func (c *bufferController) configureEventHandlers() {
 	})
 
 	// PodTemplate Informer
-	c.client.GetPodTemplateInformer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	addEventHandler(c.client.GetPodTemplateInformer(), cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			c.enqueueBuffersReferencingPodTemplate(obj)
 		},
@@ -218,19 +218,26 @@ func (c *bufferController) configureEventHandlers() {
 	})
 
 	// Deployment Informer
-	c.client.GetDeploymentInformer().AddEventHandler(c.scalableObjectHandlerFuncs(scalableobject.ApiGroupApps, scalableobject.DeploymentKind))
+	addEventHandler(c.client.GetDeploymentInformer(), c.scalableObjectHandlerFuncs(scalableobject.ApiGroupApps, scalableobject.DeploymentKind))
 
 	// ReplicaSet Informer
-	c.client.GetReplicaSetInformer().AddEventHandler(c.scalableObjectHandlerFuncs(scalableobject.ApiGroupApps, scalableobject.ReplicaSetKind))
+	addEventHandler(c.client.GetReplicaSetInformer(), c.scalableObjectHandlerFuncs(scalableobject.ApiGroupApps, scalableobject.ReplicaSetKind))
 
 	// StatefulSet Informer
-	c.client.GetStatefulSetInformer().AddEventHandler(c.scalableObjectHandlerFuncs(scalableobject.ApiGroupApps, scalableobject.StatefulSetKind))
+	addEventHandler(c.client.GetStatefulSetInformer(), c.scalableObjectHandlerFuncs(scalableobject.ApiGroupApps, scalableobject.StatefulSetKind))
 
 	// Job Informer
-	c.client.GetJobInformer().AddEventHandler(c.scalableObjectHandlerFuncs(scalableobject.ApiGroupBatch, scalableobject.JobKind))
+	addEventHandler(c.client.GetJobInformer(), c.scalableObjectHandlerFuncs(scalableobject.ApiGroupBatch, scalableobject.JobKind))
 
 	// ReplicationController Informer
-	c.client.GetReplicationControllerInformer().AddEventHandler(c.scalableObjectHandlerFuncs(scalableobject.ApiGroupCore, scalableobject.ReplicationControllerKind))
+	addEventHandler(c.client.GetReplicationControllerInformer(), c.scalableObjectHandlerFuncs(scalableobject.ApiGroupCore, scalableobject.ReplicationControllerKind))
+}
+
+// addEventHandler registers the handler on the informer and reports a failed registration.
+func addEventHandler(informer cache.SharedIndexInformer, handler cache.ResourceEventHandler) {
+	if _, err := informer.AddEventHandler(handler); err != nil {
+		runtime.HandleError(fmt.Errorf("capacity buffer controller: failed to add event handler: %w", err))
+	}
 }
 
 func (c *bufferController) scalableObjectHandlerFuncs(apiGroup, kind string) cache.ResourceEventHandlerFuncs {

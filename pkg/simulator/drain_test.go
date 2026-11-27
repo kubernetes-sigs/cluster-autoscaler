@@ -507,7 +507,7 @@ func TestGetPodsToMove(t *testing.T) {
 				MinAvailable: &one,
 				Selector: &metav1.LabelSelector{
 					MatchLabels: map[string]string{
-						"k8s-app": "PDB-managed pod",
+						"k8s-app": "bar",
 					},
 				},
 			},
@@ -837,7 +837,7 @@ func TestGetPodsToMove(t *testing.T) {
 			}
 			rules := append(tc.rules, rules.Default(deleteOptions)...)
 			tracker := pdb.NewBasicRemainingPdbTracker()
-			tracker.SetPdbs(tc.pdbs)
+			assert.NoError(t, tracker.SetPdbs(tc.pdbs))
 			ni := framework.NewTestNodeInfo(nil, tc.pods...)
 			podMoveInfo, err := GetPodsToMove(context.Background(), ni, deleteOptions, rules, registry, tracker, testTime)
 			if tc.wantErr {

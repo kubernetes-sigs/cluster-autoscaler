@@ -90,7 +90,9 @@ func New(autoscalingCtx *ca_context.AutoscalingContext, processors *processors.A
 
 	unneededNodes := unneeded.NewNodes(processors.NodeGroupConfigProcessor)
 	if autoscalingCtx.AutoscalingOptions.NodeDeletionCandidateTTL != 0 {
-		unneededNodes.LoadFromExistingTaints(autoscalingCtx, time.Now())
+		if err := unneededNodes.LoadFromExistingTaints(autoscalingCtx, time.Now()); err != nil {
+			klog.ErrorS(err, "Failed to load unneeded nodes from existing taints")
+		}
 	}
 
 	var maxNodeSkipEvalTime *nodeevaltracker.MaxNodeSkipEvalTime

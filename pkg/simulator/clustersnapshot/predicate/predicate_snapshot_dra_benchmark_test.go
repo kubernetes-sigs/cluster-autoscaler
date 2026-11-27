@@ -402,7 +402,9 @@ func BenchmarkScheduleRevert(b *testing.B) {
 							}
 
 							for i := 0; i < cfg.commits; i++ {
-								snapshot.Commit()
+								if err := snapshot.Commit(); err != nil {
+									b.Fatalf("Failed to commit the snapshot: %v", err)
+								}
 							}
 
 							for i := 0; i < cfg.reverts; i++ {

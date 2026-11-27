@@ -17,7 +17,6 @@ limitations under the License.
 package kwok
 
 import (
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -699,7 +698,7 @@ func TestLoadNodeTemplatesFromConfigMap(t *testing.T) {
 		return true, &apiv1.NodeList{Items: []apiv1.Node{}}, errors.NewNotFound(apiv1.Resource("nodes"), "whatever")
 	})
 
-	os.Setenv("POD_NAMESPACE", "kube-system")
+	t.Setenv("POD_NAMESPACE", "kube-system")
 
 	kwokConfig, err := LoadConfigFile(fakeClient)
 	assert.Nil(t, err)

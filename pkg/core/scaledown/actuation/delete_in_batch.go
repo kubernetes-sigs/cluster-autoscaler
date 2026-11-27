@@ -81,7 +81,9 @@ func (d *NodeDeletionBatcher) AddNodes(ctx context.Context, nodes []*apiv1.Node,
 		// Just in case a node group implementation is not thread-safe, the async "remove" function will obtain a new instance of it to preform deletion.
 		go func(nodeGroupId string) {
 			time.Sleep(d.deleteInterval)
-			d.remove(ctx, nodeGroupId)
+			if err := d.remove(ctx, nodeGroupId); err != nil {
+				klog.FromContext(ctx).Error(err, "Failed to delete the nodes batched for a node group", "nodeGroupId", nodeGroupId)
+			}
 		}(nodeGroup.Id())
 	}
 }
@@ -211,7 +213,9 @@ func CleanUpAndRecordFailedScaleDownEvent(ctx context.Context, autoscalingCtx *c
 		logger.Error(status.Err, msg, "node", klog.KObj(node), "statusErr", errMsg)
 	}
 	autoscalingCtx.Recorder.Eventf(node, apiv1.EventTypeWarning, "ScaleDownFailed", eventMsgFormat+": %v", status.Err)
-	taints.CleanToBeDeleted(ctx, node, autoscalingCtx.ClientSet, autoscalingCtx.CordonNodeBeforeTerminate)
+	if _, err := taints.CleanToBeDeleted(ctx, node, autoscalingCtx.ClientSet, autoscalingCtx.CordonNodeBeforeTerminate); err != nil {
+		logger.Error(err, "Failed to remove ToBeDeleted taint after a failed scale-down", "node", klog.KObj(node))
+	}
 	nodeDeletionTracker.EndDeletion(ctx, nodeGroupId, node.Name, status)
 }
 

@@ -156,7 +156,11 @@ func (s scenario) run(b *testing.B) {
 		if err != nil {
 			b.Fatalf("Failed to create cpu profile file: %v", err)
 		}
-		defer fProf.Close()
+		defer func() {
+			if err := fProf.Close(); err != nil {
+				b.Errorf("Failed to close cpu profile file: %v", err)
+			}
+		}()
 	}
 	if *runOnceTrace != "" {
 		var err error
@@ -164,7 +168,11 @@ func (s scenario) run(b *testing.B) {
 		if err != nil {
 			b.Fatalf("Failed to create trace file: %v", err)
 		}
-		defer fTrace.Close()
+		defer func() {
+			if err := fTrace.Close(); err != nil {
+				b.Errorf("Failed to close trace file: %v", err)
+			}
+		}()
 	}
 
 	for i := 0; i < b.N; i++ {

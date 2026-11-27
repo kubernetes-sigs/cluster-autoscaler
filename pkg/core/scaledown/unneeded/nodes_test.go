@@ -592,7 +592,7 @@ func TestNodeLoadFromExistingTaints(t *testing.T) {
 			ctx := &ca_context.AutoscalingContext{CloudProvider: provider, AutoscalingOptions: config.AutoscalingOptions{NodeDeletionCandidateTTL: tc.nodeDeletionCandidateTTL}}
 			ctx.ListerRegistry = kube_util.NewListerRegistry(allNodeLister, readyNodeLister,
 				nil, nil, nil, nil, nil, nil, nil)
-			nodes.LoadFromExistingTaints(ctx, currentTime)
+			assert.NoError(t, nodes.LoadFromExistingTaints(ctx, currentTime))
 
 			unneededNodes := nodes.AsList()
 

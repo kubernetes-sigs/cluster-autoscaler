@@ -1996,7 +1996,9 @@ func TestStartDeletionInBatchBasic(t *testing.T) {
 			}
 
 			for _, nodes := range deleteNodes {
-				actuator.StartDeletion(context.Background(), nodes, []*apiv1.Node{})
+				if _, _, err := actuator.StartDeletion(context.Background(), nodes, []*apiv1.Node{}); err != nil {
+					t.Errorf("StartDeletion() returned an unexpected error: %v", err)
+				}
 				time.Sleep(deleteInterval)
 			}
 			wantDeletedNodes := 0

@@ -118,7 +118,9 @@ func (d *DebuggingSnapshotterImpl) ResponseHandler(w http.ResponseWriter, r *htt
 		defer d.Mutex.Unlock()
 		klog.Errorf("Debugging Snapshot is currently being processed. Another snapshot can't be processed")
 		w.WriteHeader(http.StatusTooManyRequests)
-		w.Write([]byte("Another debugging snapshot request is being processed. Concurrent requests not supported"))
+		if _, err := w.Write([]byte("Another debugging snapshot request is being processed. Concurrent requests not supported")); err != nil {
+			klog.ErrorS(err, "Failed to write the debugging snapshot response")
+		}
 		return
 	}
 
@@ -140,7 +142,9 @@ func (d *DebuggingSnapshotterImpl) ResponseHandler(w http.ResponseWriter, r *htt
 		} else {
 			w.WriteHeader(http.StatusOK)
 		}
-		w.Write(body)
+		if _, err := w.Write(body); err != nil {
+			klog.ErrorS(err, "Failed to write the debugging snapshot response")
+		}
 
 		// reset the debugging State to receive a new snapshot request
 		*d.State = LISTENING

@@ -353,7 +353,7 @@ func TestFilterOutNodesWithUnreadyCSIResources(t *testing.T) {
 
 			clusterSnapshotStore := store.NewBasicSnapshotStore()
 			clusterSnapshot, _, _ := testsnapshot.NewCustomTestSnapshotAndHandle(clusterSnapshotStore)
-			clusterSnapshot.SetClusterState(context.Background(), []*apiv1.Node{}, []*apiv1.Pod{}, nil, csiSnapshot)
+			assert.NoError(t, clusterSnapshot.SetClusterState(context.Background(), []*apiv1.Node{}, []*apiv1.Pod{}, nil, csiSnapshot))
 
 			autoscalingCtx := &ca_context.AutoscalingContext{
 				CloudProvider:            provider,

@@ -375,7 +375,9 @@ func setupAutoscaler(config *autoscalerSetupConfig) (*StaticAutoscaler, error) {
 	}
 
 	clusterState := clusterstate.NewNotifiedClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), processors.NodeGroupConfigProcessor, templateNodeInfoRegistry, clusterstate.WithAsyncNodeGroupStateChecker(processors.AsyncNodeGroupStateChecker), clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier), clusterstate.WithConfig(config.clusterStateConfig))
-	clusterState.UpdateNodes(context.Background(), allNodes, config.nodeStateUpdateTime)
+	if err := clusterState.UpdateNodes(context.Background(), allNodes, config.nodeStateUpdateTime); err != nil {
+		return nil, err
+	}
 	quotasTrackerFactory := newQuotasTrackerFactory(&autoscalingCtx, processors)
 
 	suOrchestrator := orchestrator.New()
@@ -1150,10 +1152,10 @@ func TestStaticAutoscalerRunOnceWithALongUnregisteredNode(t *testing.T) {
 
 			nodes := []*apiv1.Node{n1}
 			// nodeInfos, _ := getNodeInfosForGroups(nodes, provider, listerRegistry, []*appsv1.DaemonSet{}, autoscalingCtx.PredicateChecker)
-			clusterState.UpdateNodes(context.Background(), nodes, now)
+			assert.NoError(t, clusterState.UpdateNodes(context.Background(), nodes, now))
 
 			// broken node failed to register in time
-			clusterState.UpdateNodes(context.Background(), nodes, later)
+			assert.NoError(t, clusterState.UpdateNodes(context.Background(), nodes, later))
 
 			sdPlanner, sdActuator := newScaleDownPlannerAndActuator(&autoscalingCtx, processors, clusterState, nil)
 			quotasTrackerFactory := newQuotasTrackerFactory(&autoscalingCtx, processors)
@@ -2109,7 +2111,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 
 			clusterState.RefreshCloudProviderNodeInstancesCache()
 			// propagate nodes info in cluster state
-			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now)
+			assert.NoError(t, clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now))
 
 			// delete nodes with create errors
 			autoscaler.deleteCreatedNodesWithErrors(context.Background())
@@ -2144,7 +2146,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 
 			// propagate nodes info in cluster state again
 			// no changes in what provider returns
-			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now)
+			assert.NoError(t, clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now))
 
 			// delete nodes with create errors
 			autoscaler.deleteCreatedNodesWithErrors(context.Background())
@@ -2217,7 +2219,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 			clusterState.RefreshCloudProviderNodeInstancesCache()
 
 			// update cluster state
-			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now)
+			assert.NoError(t, clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now))
 
 			// delete nodes with create errors
 			autoscaler.deleteCreatedNodesWithErrors(context.Background())
@@ -2265,7 +2267,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 			autoscaler.clusterStateRegistry = clusterState
 
 			// update cluster state
-			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, time.Now())
+			assert.NoError(t, clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, time.Now()))
 
 			// No nodes are deleted when failed nodes don't have matching node groups
 			autoscaler.deleteCreatedNodesWithErrors(context.Background())
@@ -2314,7 +2316,7 @@ func TestStaticAutoscalerInstanceCreationErrors(t *testing.T) {
 			autoscaler.CloudProvider = provider
 			autoscaler.clusterStateRegistry = clusterState
 			// propagate nodes info in cluster state
-			clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now)
+			assert.NoError(t, clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, now))
 
 			// delete nodes with create errors
 			autoscaler.deleteCreatedNodesWithErrors(context.Background())
@@ -2405,7 +2407,7 @@ func setupTestStaticAutoscalerInstanceCreationErrorsForZeroOrMaxScaling(t *testi
 	autoscaler.CloudProvider = provider
 	autoscaler.clusterStateRegistry = clusterState
 	// propagate nodes info in cluster state
-	clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, time.Now())
+	assert.NoError(t, clusterState.UpdateNodes(context.Background(), []*apiv1.Node{}, time.Now()))
 
 	return autoscaler, nodeGroupAtomic
 }
@@ -3066,7 +3068,7 @@ func TestSubtractNodes(t *testing.T) {
 func TestFilterOutYoungPods(t *testing.T) {
 	now := time.Now()
 	klog.InitFlags(nil)
-	flag.CommandLine.Parse([]string{"--logtostderr=false"})
+	assert.NoError(t, flag.CommandLine.Parse([]string{"--logtostderr=false"}))
 
 	p1 := BuildTestPod("p1", 500, 1000)
 	p1.CreationTimestamp = metav1.NewTime(now.Add(-1 * time.Minute))

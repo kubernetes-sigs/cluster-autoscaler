@@ -170,7 +170,11 @@ func TestComputeLoggingOptions_LogFileAlsoToStderr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open log file to build expected writer: %v", err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Errorf("failed to close log file: %v", err)
+		}
+	}()
 
 	expectedWriter := io.MultiWriter(os.Stderr, file)
 

@@ -195,7 +195,7 @@ func TestReconciliationTimestampCollector_Collect(t *testing.T) {
 			var foundNew, foundReconciled bool
 			for m := range metricsChan {
 				metricDto := &dto.Metric{}
-				m.Write(metricDto)
+				assert.NoError(t, m.Write(metricDto))
 				isNew := false
 				for _, lp := range metricDto.Label {
 					if *lp.Name == "new_buffer" && *lp.Value == "true" {

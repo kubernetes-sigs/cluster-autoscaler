@@ -427,7 +427,10 @@ func TestSnapshotForkCommitRevert(t *testing.T) {
 		}
 
 		expectedState := CloneTestSnapshot(initialState)
-		expectedState.AddCSINode(differentCSINode.DeepCopy()) // Apply same change to expected state
+		// Apply same change to expected state
+		if err := expectedState.AddCSINode(differentCSINode.DeepCopy()); err != nil {
+			t.Fatalf("AddCSINode failed on the expected state: %v", err)
+		}
 
 		compareSnapshots(t, expectedState, snapshot, "After Fork, Modify, Revert, Fork, Modify")
 	})

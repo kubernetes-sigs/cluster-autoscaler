@@ -297,7 +297,7 @@ func TestBookCapacity(t *testing.T) {
 				injector:   injector,
 			}
 			autoscalingCtx, _ := NewScaleTestAutoscalingContext(config.AutoscalingOptions{}, nil, nil, nil, nil, nil, nil)
-			processor.bookCapacity(context.Background(), &autoscalingCtx)
+			assert.NoError(t, processor.bookCapacity(context.Background(), &autoscalingCtx))
 			if (test.capacityIsBooked && len(injector.pods) == 0) || (!test.capacityIsBooked && len(injector.pods) > 0) {
 				t.Fail()
 			}
@@ -337,7 +337,7 @@ func TestBookCapacityConsumed(t *testing.T) {
 				t.Fatalf("failed to set cluster state: %v", err)
 			}
 
-			processor.bookCapacity(context.Background(), &autoscalingCtx)
+			assert.NoError(t, processor.bookCapacity(context.Background(), &autoscalingCtx))
 
 			if booked := len(injector.pods) > 0; booked != test.booked {
 				t.Errorf("booked: got %v, want %v", booked, test.booked)

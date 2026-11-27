@@ -73,7 +73,8 @@ func OnEmptyCluster(ctx context.Context, autoscalingCtx *ca_context.AutoscalingC
 	metrics.UpdateClusterSafeToAutoscale(false)
 	metrics.UpdateNodesCount(0, 0, 0, 0, 0, 0)
 	if autoscalingCtx.WriteStatusConfigMap {
-		utils.WriteStatusConfigMap(ctx, autoscalingCtx.ClientSet, autoscalingCtx.ConfigNamespace, api.ClusterAutoscalerStatus{AutoscalerStatus: api.ClusterAutoscalerInitializing, Message: status}, autoscalingCtx.LogRecorder, autoscalingCtx.StatusConfigMapName, time.Now())
+		// WriteStatusConfigMap logs a failed write.
+		_, _ = utils.WriteStatusConfigMap(ctx, autoscalingCtx.ClientSet, autoscalingCtx.ConfigNamespace, api.ClusterAutoscalerStatus{AutoscalerStatus: api.ClusterAutoscalerInitializing, Message: status}, autoscalingCtx.LogRecorder, autoscalingCtx.StatusConfigMapName, time.Now())
 	}
 	if emitEvent {
 		autoscalingCtx.LogRecorder.Eventf(apiv1.EventTypeWarning, "ClusterUnhealthy", "%s", status)

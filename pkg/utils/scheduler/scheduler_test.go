@@ -83,11 +83,7 @@ func TestResourceList(t *testing.T) {
 
 func TestConfigFromPath(t *testing.T) {
 	// temp dir
-	tmpDir, err := os.MkdirTemp("", "scheduler-configs")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	// Note that even if we are passing minimal config like below
 	// `ConfigFromPath` will set the rest of the default fields

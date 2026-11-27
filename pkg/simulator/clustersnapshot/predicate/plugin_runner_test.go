@@ -57,11 +57,7 @@ func TestRunFiltersOnNode(t *testing.T) {
 	SetNodeReadyState(n1000Unschedulable, true, time.Time{})
 
 	// temp dir
-	tmpDir, err := os.MkdirTemp("", "scheduler-configs")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	customConfigFile := filepath.Join(tmpDir, "custom_config.yaml")
 	if err := os.WriteFile(customConfigFile,
@@ -207,11 +203,7 @@ func TestRunFilterUntilPassingNode(t *testing.T) {
 	n2000 := BuildTestNode("n2000", 2000, 2000000)
 
 	// temp dir
-	tmpDir, err := os.MkdirTemp("", "scheduler-configs")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	customConfigFile := filepath.Join(tmpDir, "custom_config.yaml")
 	if err := os.WriteFile(customConfigFile,
@@ -485,11 +477,7 @@ func TestDebugInfo(t *testing.T) {
 	// with custom predicate checker
 
 	// temp dir
-	tmpDir, err := os.MkdirTemp("", "scheduler-configs")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	customConfigFile := filepath.Join(tmpDir, "custom_config.yaml")
 	if err := os.WriteFile(customConfigFile,

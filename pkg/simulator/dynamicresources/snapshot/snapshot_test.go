@@ -716,7 +716,10 @@ func TestSnapshotForkCommitRevert(t *testing.T) {
 		}
 
 		expectedState := CloneTestSnapshot(initialState)
-		expectedState.AddClaims([]*resourceapi.ResourceClaim{differentClaim.DeepCopy()}) // Apply same change to expected state
+		// Apply same change to expected state
+		if err := expectedState.AddClaims([]*resourceapi.ResourceClaim{differentClaim.DeepCopy()}); err != nil {
+			t.Fatalf("AddClaims failed on the expected state: %v", err)
+		}
 
 		compareSnapshots(t, expectedState, snapshot, "After Fork, Modify, Revert, Fork, Modify")
 	})

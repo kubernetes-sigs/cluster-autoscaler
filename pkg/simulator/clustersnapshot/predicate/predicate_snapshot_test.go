@@ -1389,7 +1389,7 @@ func TestForking(t *testing.T) {
 				snapshot.Fork()
 
 				csiNode := BuildCSINode(node)
-				snapshot.AddNodeInfo(framework.NewTestNodeInfoWithCSI(node, csiNode))
+				assert.NoError(t, snapshot.AddNodeInfo(framework.NewTestNodeInfoWithCSI(node, csiNode)))
 
 				snapshot.Revert()
 				snapshot.Revert()
@@ -1434,7 +1434,7 @@ func TestForking(t *testing.T) {
 				tc.runAndValidateOp(t, snapshot)
 				snapshot.Fork()
 				csiNode := BuildCSINode(node)
-				snapshot.AddNodeInfo(framework.NewTestNodeInfoWithCSI(node, csiNode))
+				assert.NoError(t, snapshot.AddNodeInfo(framework.NewTestNodeInfoWithCSI(node, csiNode)))
 				snapshot.Revert()
 				err := snapshot.Commit()
 				assert.NoError(t, err)

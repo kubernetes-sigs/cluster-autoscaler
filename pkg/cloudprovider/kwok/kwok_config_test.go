@@ -19,8 +19,6 @@ package kwok
 import (
 	"testing"
 
-	"os"
-
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -230,10 +228,6 @@ kwok:
 `
 
 func TestLoadConfigFile(t *testing.T) {
-	defer func() {
-		os.Unsetenv("KWOK_PROVIDER_CONFIGMAP")
-	}()
-
 	fakeClient := &fake.Clientset{}
 	fakeClient.Fake.AddReactor("get", "configmaps", func(action core.Action) (bool, runtime.Object, error) {
 		getAction := action.(core.GetAction)
@@ -254,7 +248,7 @@ func TestLoadConfigFile(t *testing.T) {
 		return true, nil, errors.NewNotFound(v1.Resource("configmaps"), "whatever")
 	})
 
-	os.Setenv("POD_NAMESPACE", "kube-system")
+	t.Setenv("POD_NAMESPACE", "kube-system")
 
 	kwokConfig, err := LoadConfigFile(fakeClient)
 	assert.Nil(t, err)
@@ -262,21 +256,21 @@ func TestLoadConfigFile(t *testing.T) {
 	assert.NotNil(t, kwokConfig.status)
 	assert.NotEmpty(t, kwokConfig.status.gpuLabel)
 
-	os.Setenv("KWOK_PROVIDER_CONFIGMAP", "without-kwok")
+	t.Setenv("KWOK_PROVIDER_CONFIGMAP", "without-kwok")
 	kwokConfig, err = LoadConfigFile(fakeClient)
 	assert.Nil(t, err)
 	assert.NotNil(t, kwokConfig)
 	assert.NotNil(t, kwokConfig.status)
 	assert.NotEmpty(t, kwokConfig.status.gpuLabel)
 
-	os.Setenv("KWOK_PROVIDER_CONFIGMAP", "with-static-kwok-release")
+	t.Setenv("KWOK_PROVIDER_CONFIGMAP", "with-static-kwok-release")
 	kwokConfig, err = LoadConfigFile(fakeClient)
 	assert.Nil(t, err)
 	assert.NotNil(t, kwokConfig)
 	assert.NotNil(t, kwokConfig.status)
 	assert.NotEmpty(t, kwokConfig.status.gpuLabel)
 
-	os.Setenv("KWOK_PROVIDER_CONFIGMAP", "skip-kwok-install")
+	t.Setenv("KWOK_PROVIDER_CONFIGMAP", "skip-kwok-install")
 	kwokConfig, err = LoadConfigFile(fakeClient)
 	assert.Nil(t, err)
 	assert.NotNil(t, kwokConfig)

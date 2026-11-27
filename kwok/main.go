@@ -198,9 +198,13 @@ func main() {
 
 	// Opt into new klog behavior where -stderrthreshold is honored even when
 	// -logtostderr=true (kubernetes/klog#212, kubernetes/klog#432).
-	flag.Set("legacy_stderr_threshold_behavior", "false")
+	if err := flag.Set("legacy_stderr_threshold_behavior", "false"); err != nil {
+		klog.Fatalf("Failed to set the legacy_stderr_threshold_behavior flag: %v", err)
+	}
 	// Preserve backward-compatible default; users can override to WARNING or ERROR.
-	flag.Set("stderrthreshold", "INFO")
+	if err := flag.Set("stderrthreshold", "INFO"); err != nil {
+		klog.Fatalf("Failed to set the stderrthreshold flag: %v", err)
+	}
 
 	featureGate := utilfeature.DefaultMutableFeatureGate
 	loggingConfig := logsapi.NewLoggingConfiguration()
