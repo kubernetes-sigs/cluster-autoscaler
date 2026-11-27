@@ -30,7 +30,6 @@ import (
 	podutils "sigs.k8s.io/cluster-autoscaler/pkg/utils/pod"
 
 	apiv1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
 )
 
@@ -126,21 +125,19 @@ func CalculateUtilizationOfResource(nodeInfo *framework.NodeInfo, resourceName a
 	// if skipDaemonSetPods = True, DaemonSet pods resourses will be subtracted
 	// from the node allocatable and won't be added to pods requests
 	// the same with the Mirror pod.
-	podsRequest := resource.MustParse("0")
-	daemonSetAndMirrorPodsUtilization := resource.MustParse("0")
+	var podsRequest, daemonSetAndMirrorPodsUtilization int64
 	for _, podInfo := range nodeInfo.Pods() {
-		podRequests := podutils.PodRequests(podInfo.Pod)
-		resourceValue := podRequests[resourceName]
+		resourceValue := podRequestMilliValue(podInfo, resourceName)
 
 		// factor daemonset pods out of the utilization calculations
 		if skipDaemonSetPods && podutils.IsDaemonSetPod(podInfo.Pod) {
-			daemonSetAndMirrorPodsUtilization.Add(resourceValue)
+			daemonSetAndMirrorPodsUtilization += resourceValue
 			continue
 		}
 
 		// factor mirror pods out of the utilization calculations
 		if skipMirrorPods && podutils.IsMirrorPod(podInfo.Pod) {
-			daemonSetAndMirrorPodsUtilization.Add(resourceValue)
+			daemonSetAndMirrorPodsUtilization += resourceValue
 			continue
 		}
 
@@ -149,8 +146,35 @@ func CalculateUtilizationOfResource(nodeInfo *framework.NodeInfo, resourceName a
 			continue
 		}
 
-		podsRequest.Add(resourceValue)
+		podsRequest += resourceValue
 	}
 
-	return float64(podsRequest.MilliValue()) / float64(nodeAllocatable.MilliValue()-daemonSetAndMirrorPodsUtilization.MilliValue()), nil
+	return float64(podsRequest) / float64(nodeAllocatable.MilliValue()-daemonSetAndMirrorPodsUtilization), nil
+}
+
+// podRequestMilliValue returns the pod's request for resourceName in milli-units.
+//
+// For CPU and memory it uses the requests the scheduler already computed and cached in the
+// PodInfo when the pod was added to the snapshot, instead of recomputing all requests for every
+// resource. The scheduler uses the same helper as podutils.PodRequests, plus options for in-place
+// pod-level resizes and DRA node-allocatable claims, which utilization never accounted for: pods
+// with pod-level resources, resource claims or node-allocatable claim statuses keep using
+// podutils.PodRequests, so results only change by rounding (see below).
+//
+// Values are rounded per pod (to milli-CPU and to bytes, like the scheduler's accounting)
+// before being summed, instead of being summed exactly and rounded once. This only differs
+// for requests below a milli-CPU or a byte.
+func podRequestMilliValue(podInfo *framework.PodInfo, resourceName apiv1.ResourceName) int64 {
+	if podInfo.PodInfo != nil && podInfo.Pod.Spec.Resources == nil && len(podInfo.Pod.Spec.ResourceClaims) == 0 &&
+		len(podInfo.Pod.Status.NodeAllocatableResourceClaimStatuses) == 0 {
+		switch resourceName {
+		case apiv1.ResourceCPU:
+			return podInfo.CalculateResource().Resource.GetMilliCPU()
+		case apiv1.ResourceMemory:
+			return podInfo.CalculateResource().Resource.GetMemory() * 1000
+		}
+	}
+	podRequests := podutils.PodRequests(podInfo.Pod)
+	value := podRequests[resourceName]
+	return value.MilliValue()
 }

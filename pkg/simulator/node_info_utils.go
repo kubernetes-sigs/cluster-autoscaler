@@ -41,9 +41,21 @@ type nodeGroupTemplateNodeInfoGetter interface {
 	TemplateNodeInfo(context.Context) (*framework.NodeInfo, error)
 }
 
+// TemplateNodeInfoOptions are optional settings for building template NodeInfos.
+type TemplateNodeInfoOptions struct {
+	// DaemonSetPodsCache, if set, caches the per-DaemonSet part of deciding which DaemonSet pods
+	// run on a template node. Callers building templates on every loop should keep one.
+	DaemonSetPodsCache *daemonset.PodsForNodeCache
+}
+
 // SanitizedTemplateNodeInfoFromNodeGroup returns a template NodeInfo object based on NodeGroup.TemplateNodeInfo(). The template is sanitized, and only
 // contains the pods that should appear on a new Node from the same node group (e.g. DaemonSet pods).
 func SanitizedTemplateNodeInfoFromNodeGroup(ctx context.Context, nodeGroup nodeGroupTemplateNodeInfoGetter, daemonsets []*appsv1.DaemonSet, taintConfig taints.TaintConfig) (*framework.NodeInfo, errors.AutoscalerError) {
+	return SanitizedTemplateNodeInfoFromNodeGroupWithOptions(ctx, nodeGroup, daemonsets, taintConfig, TemplateNodeInfoOptions{})
+}
+
+// SanitizedTemplateNodeInfoFromNodeGroupWithOptions is SanitizedTemplateNodeInfoFromNodeGroup with options.
+func SanitizedTemplateNodeInfoFromNodeGroupWithOptions(ctx context.Context, nodeGroup nodeGroupTemplateNodeInfoGetter, daemonsets []*appsv1.DaemonSet, taintConfig taints.TaintConfig, opts TemplateNodeInfoOptions) (*framework.NodeInfo, errors.AutoscalerError) {
 	// TODO(DRA): Figure out how to handle TemplateNodeInfo() returning DaemonSet Pods using DRA. Currently, things only work correctly if such pods are
 	// already allocated by TemplateNodeInfo(). It might be better for TemplateNodeInfo() to return unallocated claims, and to run scheduler predicates and
 	// compute the allocations here.
@@ -51,7 +63,7 @@ func SanitizedTemplateNodeInfoFromNodeGroup(ctx context.Context, nodeGroup nodeG
 	if err != nil {
 		return nil, errors.ToAutoscalerError(errors.CloudProviderError, err).AddPrefix("failed to obtain template NodeInfo from node group %q: ", nodeGroup.Id())
 	}
-	sanitizedNodeInfo, aErr := SanitizedTemplateNodeInfoFromNodeInfo(ctx, baseNodeInfo, nodeGroup.Id(), daemonsets, true, taintConfig)
+	sanitizedNodeInfo, aErr := SanitizedTemplateNodeInfoFromNodeInfoWithOptions(ctx, baseNodeInfo, nodeGroup.Id(), daemonsets, true, taintConfig, opts)
 	if aErr != nil {
 		return nil, aErr
 	}
@@ -62,6 +74,11 @@ func SanitizedTemplateNodeInfoFromNodeGroup(ctx context.Context, nodeGroup nodeG
 // SanitizedTemplateNodeInfoFromNodeInfo returns a template NodeInfo object based on a real example NodeInfo from the cluster. The template is sanitized, and only
 // contains the pods that should appear on a new Node from the same node group (e.g. DaemonSet pods).
 func SanitizedTemplateNodeInfoFromNodeInfo(ctx context.Context, example *framework.NodeInfo, nodeGroupId string, daemonsets []*appsv1.DaemonSet, forceDaemonSets bool, taintConfig taints.TaintConfig) (*framework.NodeInfo, errors.AutoscalerError) {
+	return SanitizedTemplateNodeInfoFromNodeInfoWithOptions(ctx, example, nodeGroupId, daemonsets, forceDaemonSets, taintConfig, TemplateNodeInfoOptions{})
+}
+
+// SanitizedTemplateNodeInfoFromNodeInfoWithOptions is SanitizedTemplateNodeInfoFromNodeInfo with options.
+func SanitizedTemplateNodeInfoFromNodeInfoWithOptions(ctx context.Context, example *framework.NodeInfo, nodeGroupId string, daemonsets []*appsv1.DaemonSet, forceDaemonSets bool, taintConfig taints.TaintConfig, opts TemplateNodeInfoOptions) (*framework.NodeInfo, errors.AutoscalerError) {
 	randSuffix := fmt.Sprintf("%d", rand.Int63())
 	newNodeNameBase := fmt.Sprintf("template-node-for-%s", nodeGroupId)
 
@@ -71,7 +88,7 @@ func SanitizedTemplateNodeInfoFromNodeInfo(ctx context.Context, example *framewo
 	if err != nil {
 		return nil, errors.ToAutoscalerError(errors.InternalError, err)
 	}
-	expectedPods, err := podsExpectedOnFreshNode(sanitizedExample, daemonsets, forceDaemonSets, randSuffix)
+	expectedPods, err := podsExpectedOnFreshNode(ctx, sanitizedExample, daemonsets, forceDaemonSets, randSuffix, opts.DaemonSetPodsCache)
 	if err != nil {
 		return nil, errors.ToAutoscalerError(errors.InternalError, err)
 	}
@@ -169,7 +186,7 @@ func createSanitizedPod(pod *apiv1.Pod, nodeName, nameSuffix string) *apiv1.Pod 
 	return sanitizedPod
 }
 
-func podsExpectedOnFreshNode(sanitizedExampleNodeInfo *framework.NodeInfo, daemonsets []*appsv1.DaemonSet, forceDaemonSets bool, nameSuffix string) ([]*framework.PodInfo, error) {
+func podsExpectedOnFreshNode(ctx context.Context, sanitizedExampleNodeInfo *framework.NodeInfo, daemonsets []*appsv1.DaemonSet, forceDaemonSets bool, nameSuffix string, daemonSetPodsCache *daemonset.PodsForNodeCache) ([]*framework.PodInfo, error) {
 	var result []*framework.PodInfo
 	runningDS := make(map[types.UID]bool)
 	for _, pod := range sanitizedExampleNodeInfo.Pods() {
@@ -198,22 +215,18 @@ func podsExpectedOnFreshNode(sanitizedExampleNodeInfo *framework.NodeInfo, daemo
 		}
 	}
 	// The provided nodeInfo has to have taints properly sanitized, or this won't work correctly.
-	daemonPods, err := daemonset.GetDaemonSetPodsForNode(sanitizedExampleNodeInfo, pendingDS)
-	if err != nil {
-		return nil, err
-	}
-	for _, pod := range daemonPods {
+	for _, pod := range daemonset.DaemonSetPodsForNode(ctx, sanitizedExampleNodeInfo.Node(), pendingDS, daemonSetPodsCache) {
 		if !forceDaemonSets && !isPreemptingSystemNodeCritical(pod) {
 			continue
 		}
 		// There's technically no need to sanitize these pods since they're created from scratch, but
 		// it's nice to have the same suffix for all names in one sanitized NodeInfo when debugging.
-		result = append(result, framework.NewPodInfo(createSanitizedPod(pod.Pod, sanitizedExampleNodeInfo.Node().Name, nameSuffix), nil))
+		result = append(result, framework.NewPodInfo(createSanitizedPod(pod, sanitizedExampleNodeInfo.Node().Name, nameSuffix), nil))
 	}
 	return result, nil
 }
 
-func isPreemptingSystemNodeCritical(pod *framework.PodInfo) bool {
+func isPreemptingSystemNodeCritical(pod *apiv1.Pod) bool {
 	if pod.Spec.PriorityClassName != labels.SystemNodeCriticalLabel {
 		return false
 	}
