@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -147,7 +148,21 @@ const (
 	NoNodeInfo
 	// BlockedByOnCompletionPod - node can't be removed because it has a pod with safe-to-evict=on-completion annotation
 	BlockedByOnCompletionPod
+	// unremovableReasonCount is the number of UnremovableReason values, not a reason itself. It must remain the last
+	// value because UnremovableReasons relies on it. Add new reasons above it.
+	unremovableReasonCount
 )
+
+// UnremovableReasons returns an iterator over all UnremovableReason values, including NoReason.
+func UnremovableReasons() iter.Seq[UnremovableReason] {
+	return func(yield func(UnremovableReason) bool) {
+		for r := range unremovableReasonCount {
+			if !yield(r) {
+				return
+			}
+		}
+	}
+}
 
 // RemovalSimulator is a helper object for simulating node removal scenarios.
 type RemovalSimulator struct {
