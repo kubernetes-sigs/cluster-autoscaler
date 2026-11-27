@@ -18,17 +18,23 @@ package test
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"sync"
 
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
+	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/experimental"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/gpu"
 )
+
+// OnScaleUpWithInstancesFunc is a function called on node group increase in TestCloudProvider,
+// returning the created instances. First parameter is the NodeGroup id, second is the increase delta.
+type OnScaleUpWithInstancesFunc func(string, int) ([]cloudprovider.Instance, error)
 
 // OnScaleUpFunc is a function called on node group increase in TestCloudProvider.
 // First parameter is the NodeGroup id, second is the increase delta.
@@ -52,19 +58,20 @@ type NodeGpuConfig func(node *apiv1.Node) *cloudprovider.GpuConfig
 // TestCloudProvider is a dummy cloud provider to be used in tests.
 type TestCloudProvider struct {
 	sync.Mutex
-	nodes             map[string]string
-	errNodes          map[string]bool
-	groups            map[string]cloudprovider.NodeGroup
-	onScaleUp         func(string, int) error
-	onScaleDown       func(string, string) error
-	onNodeGroupCreate func(string) error
-	onNodeGroupDelete func(string) error
-	hasInstance       func(string) (bool, error)
-	machineTypes      []string
-	machineTemplates  map[string]*framework.NodeInfo
-	priceModel        cloudprovider.PricingModel
-	resourceLimiter   *cloudprovider.ResourceLimiter
-	nodeGpuConfig     func(node *apiv1.Node) *cloudprovider.GpuConfig
+	nodes                  map[string]string
+	errNodes               map[string]bool
+	groups                 map[string]cloudprovider.NodeGroup
+	onScaleUp              func(string, int) error
+	onScaleUpWithInstances OnScaleUpWithInstancesFunc
+	onScaleDown            func(string, string) error
+	onNodeGroupCreate      func(string) error
+	onNodeGroupDelete      func(string) error
+	hasInstance            func(string) (bool, error)
+	machineTypes           []string
+	machineTemplates       map[string]*framework.NodeInfo
+	priceModel             cloudprovider.PricingModel
+	resourceLimiter        *cloudprovider.ResourceLimiter
+	nodeGpuConfig          func(node *apiv1.Node) *cloudprovider.GpuConfig
 }
 
 // TestCloudProviderBuilder is used to create CloudProvider
@@ -81,6 +88,15 @@ func NewTestCloudProviderBuilder() *TestCloudProviderBuilder {
 func (b *TestCloudProviderBuilder) WithOnScaleUp(onScaleUp OnScaleUpFunc) *TestCloudProviderBuilder {
 	b.builders = append(b.builders, func(p *TestCloudProvider) {
 		p.onScaleUp = onScaleUp
+	})
+	return b
+}
+
+// WithOnScaleUpWithInstances makes the node groups of the provider handle
+// experimental.InstanceCreator.IncreaseSizeWithInstances using the provided function.
+func (b *TestCloudProviderBuilder) WithOnScaleUpWithInstances(onScaleUpWithInstances OnScaleUpWithInstancesFunc) *TestCloudProviderBuilder {
+	b.builders = append(b.builders, func(p *TestCloudProvider) {
+		p.onScaleUpWithInstances = onScaleUpWithInstances
 	})
 	return b
 }
@@ -391,6 +407,8 @@ func (tcp *TestCloudProvider) Refresh(ctx context.Context) error {
 	return nil
 }
 
+var _ experimental.InstanceCreator = (*TestNodeGroup)(nil)
+
 // TestNodeGroup is a node group used by TestCloudProvider.
 type TestNodeGroup struct {
 	sync.Mutex
@@ -467,6 +485,38 @@ func (tng *TestNodeGroup) IncreaseSize(ctx context.Context, delta int) error {
 	tng.Unlock()
 
 	return tng.cloudProvider.onScaleUp(tng.id, delta)
+}
+
+// IncreaseSizeWithInstances increases the size of the node group and returns the created instances.
+// It returns cloudprovider.ErrNotImplemented without changing targetSize unless the provider was
+// built WithOnScaleUpWithInstances (or if the hook itself returns cloudprovider.ErrNotImplemented).
+// On a nil error, targetSize is incremented by delta (even if fewer than delta instances are
+// returned). On a non-nil error (other than ErrNotImplemented), targetSize is incremented by
+// len(instances) to reflect full failure (0) or partial creation (< delta).
+func (tng *TestNodeGroup) IncreaseSizeWithInstances(ctx context.Context, delta int) ([]cloudprovider.Instance, error) {
+	tng.Lock()
+	cp := tng.cloudProvider
+	id := tng.id
+	tng.Unlock()
+
+	if cp == nil || cp.onScaleUpWithInstances == nil {
+		return nil, cloudprovider.ErrNotImplemented
+	}
+
+	instances, err := cp.onScaleUpWithInstances(id, delta)
+	if stderrors.Is(err, cloudprovider.ErrNotImplemented) {
+		return nil, err
+	}
+
+	tng.Lock()
+	if err != nil {
+		tng.targetSize += len(instances)
+	} else {
+		tng.targetSize += delta
+	}
+	tng.Unlock()
+
+	return instances, err
 }
 
 // AtomicIncreaseSize is not implemented.

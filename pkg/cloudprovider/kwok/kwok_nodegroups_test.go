@@ -18,18 +18,21 @@ package kwok
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	core "k8s.io/client-go/testing"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
+	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/experimental"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	kube_util "sigs.k8s.io/cluster-autoscaler/pkg/utils/kubernetes"
 )
@@ -90,6 +93,243 @@ func TestIncreaseSize(t *testing.T) {
 	assert.Contains(t, err.Error(), maxSizeReachedErr)
 	assert.Len(t, nodes, 0)
 
+}
+
+func TestIncreaseSizeWithInstances(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("creates instances matching Nodes() and Spec.ProviderID", func(t *testing.T) {
+		fakeClient := &fake.Clientset{}
+		var createdNodes []*apiv1.Node
+		fakeClient.Fake.AddReactor("create", "nodes",
+			func(action core.Action) (bool, runtime.Object, error) {
+				node := action.(core.CreateAction).GetObject().(*apiv1.Node)
+				createdNodes = append(createdNodes, node)
+				return true, node, nil
+			})
+
+		ng := &NodeGroup{
+			name:       "ng",
+			kubeClient: fakeClient,
+			lister:     kube_util.NewTestNodeLister(nil),
+			nodeTemplate: &apiv1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "template-node-ng",
+				},
+			},
+			minSize:    0,
+			targetSize: 1,
+			maxSize:    5,
+		}
+
+		instances, err := experimental.IncreaseSizeOrFallback(ctx, ng, 3)
+		require.NoError(t, err)
+		require.Len(t, instances, 3)
+		require.Len(t, createdNodes, 3)
+		assert.Equal(t, 4, ng.targetSize)
+
+		// Verify returned instances match created nodes' Spec.ProviderID and Nodes() output.
+		ng.lister = kube_util.NewTestNodeLister(createdNodes)
+		listedInstances, err := ng.Nodes(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, listedInstances, instances)
+
+		for i, inst := range instances {
+			assert.Equal(t, createdNodes[i].Spec.ProviderID, inst.Id)
+			assert.Equal(t, getProviderID(createdNodes[i].Name), inst.Id)
+			require.NotNil(t, inst.Status)
+			assert.Equal(t, cloudprovider.InstanceRunning, inst.Status.State)
+		}
+	})
+
+	t.Run("invalid delta and max size errors", func(t *testing.T) {
+		fakeClient := &fake.Clientset{}
+		createCalls := 0
+		fakeClient.Fake.AddReactor("create", "nodes",
+			func(action core.Action) (bool, runtime.Object, error) {
+				createCalls++
+				return true, nil, nil
+			})
+
+		ng := &NodeGroup{
+			name:       "ng",
+			kubeClient: fakeClient,
+			lister:     kube_util.NewTestNodeLister(nil),
+			nodeTemplate: &apiv1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "template-node-ng",
+				},
+			},
+			minSize:    0,
+			targetSize: 2,
+			maxSize:    3,
+		}
+
+		for _, tc := range []struct {
+			name        string
+			delta       int
+			nilTemplate bool
+			errContains string
+		}{
+			{
+				name:        "zero delta",
+				delta:       0,
+				errContains: sizeIncreaseMustBePositiveErr,
+			},
+			{
+				name:        "negative delta",
+				delta:       -1,
+				errContains: sizeIncreaseMustBePositiveErr,
+			},
+			{
+				name:        "exceeds max size",
+				delta:       2,
+				errContains: maxSizeReachedErr,
+			},
+			{
+				name:        "nil template",
+				delta:       1,
+				nilTemplate: true,
+				errContains: "couldn't create a template node",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				origTemplate := ng.nodeTemplate
+				if tc.nilTemplate {
+					ng.nodeTemplate = nil
+					defer func() { ng.nodeTemplate = origTemplate }()
+				}
+
+				instances, err := ng.IncreaseSizeWithInstances(ctx, tc.delta)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.errContains)
+				assert.Empty(t, instances)
+				assert.Equal(t, 2, ng.targetSize)
+				assert.Equal(t, 0, createCalls)
+			})
+		}
+	})
+
+	t.Run("partial failure returns already created instances alongside error", func(t *testing.T) {
+		fakeClient := &fake.Clientset{}
+		var createdNodes []*apiv1.Node
+		createErr := errors.New("api server unavailable")
+		fakeClient.Fake.AddReactor("create", "nodes",
+			func(action core.Action) (bool, runtime.Object, error) {
+				if len(createdNodes) == 2 {
+					return true, nil, createErr
+				}
+				node := action.(core.CreateAction).GetObject().(*apiv1.Node)
+				createdNodes = append(createdNodes, node)
+				return true, node, nil
+			})
+
+		ng := &NodeGroup{
+			name:       "ng",
+			kubeClient: fakeClient,
+			lister:     kube_util.NewTestNodeLister(nil),
+			nodeTemplate: &apiv1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "template-node-ng",
+				},
+			},
+			minSize:    0,
+			targetSize: 1,
+			maxSize:    10,
+		}
+
+		instances, err := ng.IncreaseSizeWithInstances(ctx, 4)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, createErr)
+		require.Len(t, instances, 2)
+		require.Len(t, createdNodes, 2)
+		assert.Equal(t, 3, ng.targetSize)
+
+		for i, inst := range instances {
+			assert.Equal(t, createdNodes[i].Spec.ProviderID, inst.Id)
+			require.NotNil(t, inst.Status)
+			assert.Equal(t, cloudprovider.InstanceRunning, inst.Status.State)
+		}
+	})
+
+	t.Run("failure on first node returns empty instances and leaves targetSize unchanged", func(t *testing.T) {
+		fakeClient := &fake.Clientset{}
+		fakeClient.Fake.AddReactor("create", "nodes",
+			func(action core.Action) (bool, runtime.Object, error) {
+				return true, nil, errors.New("quota exceeded")
+			})
+
+		ng := &NodeGroup{
+			name:       "ng",
+			kubeClient: fakeClient,
+			lister:     kube_util.NewTestNodeLister(nil),
+			nodeTemplate: &apiv1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "template-node-ng",
+				},
+			},
+			minSize:    0,
+			targetSize: 1,
+			maxSize:    10,
+		}
+
+		instances, err := ng.IncreaseSizeWithInstances(ctx, 2)
+		require.Error(t, err)
+		assert.Empty(t, instances)
+		assert.Equal(t, 1, ng.targetSize)
+	})
+
+	t.Run("concurrent calls respect max size and return unique instances", func(t *testing.T) {
+		fakeClient := &fake.Clientset{}
+		fakeClient.Fake.AddReactor("create", "nodes",
+			func(action core.Action) (bool, runtime.Object, error) {
+				node := action.(core.CreateAction).GetObject().(*apiv1.Node)
+				return true, node, nil
+			})
+
+		ng := &NodeGroup{
+			name:       "ng",
+			kubeClient: fakeClient,
+			lister:     kube_util.NewTestNodeLister(nil),
+			nodeTemplate: &apiv1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "template-node-ng",
+				},
+			},
+			minSize:    0,
+			targetSize: 0,
+			maxSize:    6,
+		}
+
+		const workers = 10
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var allInstances []cloudprovider.Instance
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				insts, err := ng.IncreaseSizeWithInstances(ctx, 2)
+				if err == nil {
+					mu.Lock()
+					allInstances = append(allInstances, insts...)
+					mu.Unlock()
+				}
+			}()
+		}
+		wg.Wait()
+
+		size, err := ng.TargetSize(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, 6, size)
+		require.Len(t, allInstances, 6)
+		seen := map[string]bool{}
+		for _, inst := range allInstances {
+			assert.NotEmpty(t, inst.Id)
+			assert.False(t, seen[inst.Id], "duplicate instance id %q", inst.Id)
+			seen[inst.Id] = true
+		}
+	})
 }
 
 func TestIncreaseSizeDoesNotMutateTemplate(t *testing.T) {
