@@ -19,6 +19,7 @@ package podinjection
 import (
 	"context"
 	"fmt"
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -47,6 +48,8 @@ func TestTargetCountInjectionPodListProcessor(t *testing.T) {
 	podRep1Copy2 := buildTestPod("default", "pod-rep1-2", WithControllerOwnerRef(replicaSet1.Name, "ReplicaSet", replicaSet1.UID))
 	podRep1Copy3Gated := buildTestPod("default", "pod-rep1-3", WithControllerOwnerRef(replicaSet1.Name, "ReplicaSet", replicaSet1.UID))
 	podRep1Copy3Gated = WithSchedulingGatedStatus(podRep1Copy3Gated)
+	podRep1CrossNamespace := buildTestPod("other-ns", "pod-rep1-cross-ns", WithControllerOwnerRef(replicaSet1.Name, "ReplicaSet", replicaSet1.UID))
+	podRep1CrossNamespaceGated := WithSchedulingGatedStatus(buildTestPod("other-ns", "pod-rep1-cross-ns-gated", WithControllerOwnerRef(replicaSet1.Name, "ReplicaSet", replicaSet1.UID)))
 
 	job1 := createTestJob("job-1", "default", 10, 10, 0)
 	scheduledPodJob1Copy1 := buildTestPod("default", "scheduled-pod-job1-1", WithControllerOwnerRef(job1.Name, "Job", job1.UID), WithNodeName(node.Name))
@@ -83,6 +86,25 @@ func TestTargetCountInjectionPodListProcessor(t *testing.T) {
 			name:              "ReplicaSet",
 			scheduledPods:     []*apiv1.Pod{scheduledPodRep1Copy1},
 			unschedulablePods: []*apiv1.Pod{podRep1Copy1, podRep1Copy2},
+			wantPods:          append([]*apiv1.Pod{podRep1Copy1, podRep1Copy2}, makeFakePods(replicaSet1.UID, podRep1Copy1, 2)...),
+		},
+		{
+			name:              "ReplicaSet - cross-namespace pod with matching ownerRef UID is ignored",
+			scheduledPods:     []*apiv1.Pod{scheduledPodRep1Copy1},
+			unschedulablePods: []*apiv1.Pod{podRep1CrossNamespace, podRep1Copy1, podRep1Copy2},
+			wantPods:          append([]*apiv1.Pod{podRep1CrossNamespace, podRep1Copy1, podRep1Copy2}, makeFakePods(replicaSet1.UID, podRep1Copy1, 2)...),
+		},
+		{
+			name:              "ReplicaSet - only cross-namespace unschedulable pod does not trigger fake pod injection",
+			scheduledPods:     []*apiv1.Pod{scheduledPodRep1Copy1},
+			unschedulablePods: []*apiv1.Pod{podRep1CrossNamespace},
+			wantPods:          []*apiv1.Pod{podRep1CrossNamespace},
+		},
+		{
+			name:              "ReplicaSet - cross-namespace scheduling gated pod is ignored",
+			scheduledPods:     []*apiv1.Pod{scheduledPodRep1Copy1},
+			unschedulablePods: []*apiv1.Pod{podRep1Copy1, podRep1Copy2},
+			otherPods:         []*apiv1.Pod{podRep1CrossNamespaceGated},
 			wantPods:          append([]*apiv1.Pod{podRep1Copy1, podRep1Copy2}, makeFakePods(replicaSet1.UID, podRep1Copy1, 2)...),
 		},
 		{
@@ -195,8 +217,8 @@ func TestGroupPods(t *testing.T) {
 			name:        "no pods",
 			replicaSets: []*appsv1.ReplicaSet{&replicaSet1, &replicaSet2},
 			wantGroupedPods: map[types.UID]podGroup{
-				replicaSet1.UID: {podCount: 0, desiredReplicas: 10, sample: nil},
-				replicaSet2.UID: {podCount: 0, desiredReplicas: 10, sample: nil},
+				replicaSet1.UID: {podCount: 0, desiredReplicas: 10, sample: nil, namespace: "default"},
+				replicaSet2.UID: {podCount: 0, desiredReplicas: 10, sample: nil, namespace: "default"},
 			},
 		},
 		{
@@ -204,8 +226,8 @@ func TestGroupPods(t *testing.T) {
 			scheduledPods: []*apiv1.Pod{podRep1ScheduledCopy1, podRep1ScheduledCopy2, podRep2ScheduledCopy1},
 			replicaSets:   []*appsv1.ReplicaSet{&replicaSet1, &replicaSet2},
 			wantGroupedPods: map[types.UID]podGroup{
-				replicaSet1.UID: {podCount: 2, desiredReplicas: 10, sample: nil},
-				replicaSet2.UID: {podCount: 1, desiredReplicas: 10, sample: nil},
+				replicaSet1.UID: {podCount: 2, desiredReplicas: 10, sample: nil, namespace: "default"},
+				replicaSet2.UID: {podCount: 1, desiredReplicas: 10, sample: nil, namespace: "default"},
 			},
 		},
 		{
@@ -214,8 +236,8 @@ func TestGroupPods(t *testing.T) {
 			unscheduledPods: []*apiv1.Pod{podRep1Copy1, podRep2Copy1},
 			replicaSets:     []*appsv1.ReplicaSet{&replicaSet1, &replicaSet2},
 			wantGroupedPods: map[types.UID]podGroup{
-				replicaSet1.UID: {podCount: 2, desiredReplicas: 10, sample: podRep1Copy1, ownerUid: replicaSet1.UID},
-				replicaSet2.UID: {podCount: 1, desiredReplicas: 10, sample: podRep2Copy1, ownerUid: replicaSet2.UID},
+				replicaSet1.UID: {podCount: 2, desiredReplicas: 10, sample: podRep1Copy1, ownerUid: replicaSet1.UID, namespace: "default"},
+				replicaSet2.UID: {podCount: 1, desiredReplicas: 10, sample: podRep2Copy1, ownerUid: replicaSet2.UID, namespace: "default"},
 			},
 		},
 		{
@@ -233,8 +255,8 @@ func TestGroupPods(t *testing.T) {
 			unscheduledPods: []*apiv1.Pod{podRep1Copy1, podRep1Copy2, podRep2Copy1},
 			replicaSets:     []*appsv1.ReplicaSet{&replicaSet1, &replicaSet2},
 			wantGroupedPods: map[types.UID]podGroup{
-				replicaSet1.UID: {podCount: 2, desiredReplicas: 10, sample: podRep1Copy1, ownerUid: replicaSet1.UID},
-				replicaSet2.UID: {podCount: 1, desiredReplicas: 10, sample: podRep2Copy1, ownerUid: replicaSet2.UID},
+				replicaSet1.UID: {podCount: 2, desiredReplicas: 10, sample: podRep1Copy1, ownerUid: replicaSet1.UID, namespace: "default"},
+				replicaSet2.UID: {podCount: 1, desiredReplicas: 10, sample: podRep2Copy1, ownerUid: replicaSet2.UID, namespace: "default"},
 			},
 		},
 		{
@@ -242,8 +264,8 @@ func TestGroupPods(t *testing.T) {
 			unscheduledPods: []*apiv1.Pod{podJob1Copy1, podJob1Copy2, podJob2Copy1},
 			jobs:            []*batchv1.Job{&job1, &job2},
 			wantGroupedPods: map[types.UID]podGroup{
-				job1.UID: {podCount: 2, desiredReplicas: 10, sample: podJob1Copy1, ownerUid: job1.UID},
-				job2.UID: {podCount: 1, desiredReplicas: 10, sample: podJob2Copy1, ownerUid: job2.UID},
+				job1.UID: {podCount: 2, desiredReplicas: 10, sample: podJob1Copy1, ownerUid: job1.UID, namespace: "default"},
+				job2.UID: {podCount: 1, desiredReplicas: 10, sample: podJob2Copy1, ownerUid: job2.UID, namespace: "default"},
 			},
 		},
 		{
@@ -251,8 +273,8 @@ func TestGroupPods(t *testing.T) {
 			unscheduledPods: []*apiv1.Pod{statefulset1Copy1, statefulset1Copy2, statefulset2Copy1},
 			statefulsets:    []*appsv1.StatefulSet{&statefulset1, &statefulset2},
 			wantGroupedPods: map[types.UID]podGroup{
-				statefulset1.UID: {podCount: 2, desiredReplicas: 10, sample: statefulset1Copy1, ownerUid: statefulset1.UID},
-				statefulset2.UID: {podCount: 1, desiredReplicas: 10, sample: statefulset2Copy1, ownerUid: statefulset2.UID},
+				statefulset1.UID: {podCount: 2, desiredReplicas: 10, sample: statefulset1Copy1, ownerUid: statefulset1.UID, namespace: "default"},
+				statefulset2.UID: {podCount: 1, desiredReplicas: 10, sample: statefulset2Copy1, ownerUid: statefulset2.UID, namespace: "default"},
 			},
 		},
 		{
@@ -262,10 +284,26 @@ func TestGroupPods(t *testing.T) {
 			jobs:            []*batchv1.Job{&job1},
 			statefulsets:    []*appsv1.StatefulSet{&statefulset1},
 			wantGroupedPods: map[types.UID]podGroup{
-				replicaSet1.UID:  {podCount: 2, desiredReplicas: 10, sample: podRep1Copy1, ownerUid: replicaSet1.UID},
-				replicaSet2.UID:  {podCount: 1, desiredReplicas: 10, sample: podRep2Copy1, ownerUid: replicaSet2.UID},
-				job1.UID:         {podCount: 1, desiredReplicas: 10, sample: podJob1Copy1, ownerUid: job1.UID},
-				statefulset1.UID: {podCount: 1, desiredReplicas: 10, sample: statefulset1Copy1, ownerUid: statefulset1.UID},
+				replicaSet1.UID:  {podCount: 2, desiredReplicas: 10, sample: podRep1Copy1, ownerUid: replicaSet1.UID, namespace: "default"},
+				replicaSet2.UID:  {podCount: 1, desiredReplicas: 10, sample: podRep2Copy1, ownerUid: replicaSet2.UID, namespace: "default"},
+				job1.UID:         {podCount: 1, desiredReplicas: 10, sample: podJob1Copy1, ownerUid: job1.UID, namespace: "default"},
+				statefulset1.UID: {podCount: 1, desiredReplicas: 10, sample: statefulset1Copy1, ownerUid: statefulset1.UID, namespace: "default"},
+			},
+		},
+		{
+			name: "pods with matching controller UID in different namespace are ignored",
+			unscheduledPods: []*apiv1.Pod{
+				buildTestPod("other-ns", "pod-rep1-other", WithControllerOwnerRef(replicaSet1.Name, "ReplicaSet", replicaSet1.UID)),
+				buildTestPod("other-ns", "pod-job1-other", WithControllerOwnerRef(job1.Name, "Job", job1.UID)),
+				buildTestPod("other-ns", "pod-statefulset1-other", WithControllerOwnerRef(statefulset1.Name, "StatefulSet", statefulset1.UID)),
+			},
+			replicaSets:  []*appsv1.ReplicaSet{&replicaSet1},
+			jobs:         []*batchv1.Job{&job1},
+			statefulsets: []*appsv1.StatefulSet{&statefulset1},
+			wantGroupedPods: map[types.UID]podGroup{
+				replicaSet1.UID:  {podCount: 0, desiredReplicas: 10, sample: nil, namespace: "default"},
+				job1.UID:         {podCount: 0, desiredReplicas: 10, sample: nil, namespace: "default"},
+				statefulset1.UID: {podCount: 0, desiredReplicas: 10, sample: nil, namespace: "default"},
 			},
 		},
 	}
@@ -295,7 +333,8 @@ func TestUpdatePodGroups(t *testing.T) {
 	replicaSet1 := createTestReplicaSet("rep-set-1", "default", 10)
 	podRep1Copy1 := buildTestPod("default", "pod-rep1-1", WithControllerOwnerRef(replicaSet1.Name, "ReplicaSet", replicaSet1.UID))
 	podRep1Copy2 := buildTestPod("default", "pod-rep1-2", WithControllerOwnerRef(replicaSet1.Name, "ReplicaSet", replicaSet1.UID))
-	samplePodGroups := map[types.UID]podGroup{replicaSet1.UID: makePodGroup(10)}
+	podRep1CrossNamespace := buildTestPod("other-ns", "pod-rep1-other", WithControllerOwnerRef(replicaSet1.Name, "ReplicaSet", replicaSet1.UID))
+	samplePodGroups := map[types.UID]podGroup{replicaSet1.UID: makePodGroup(10, "default")}
 	sampleFalse := false
 	sampleTrue := true
 
@@ -337,6 +376,7 @@ func TestUpdatePodGroups(t *testing.T) {
 				desiredReplicas: 10,
 				sample:          podRep1Copy1,
 				ownerUid:        replicaSet1.UID,
+				namespace:       "default",
 			},
 			},
 		},
@@ -349,6 +389,7 @@ func TestUpdatePodGroups(t *testing.T) {
 				desiredReplicas: 10,
 				sample:          podRep1Copy1,
 				ownerUid:        replicaSet1.UID,
+				namespace:       "default",
 			},
 			},
 			wantPodGroup: map[types.UID]podGroup{replicaSet1.UID: {
@@ -356,14 +397,22 @@ func TestUpdatePodGroups(t *testing.T) {
 				desiredReplicas: 10,
 				sample:          podRep1Copy1,
 				ownerUid:        replicaSet1.UID,
+				namespace:       "default",
 			},
 			},
+		},
+		{
+			name:         "cross-namespace pod is ignored",
+			pod:          podRep1CrossNamespace,
+			ownerRef:     podRep1CrossNamespace.OwnerReferences[0],
+			podGroups:    samplePodGroups,
+			wantPodGroup: samplePodGroups,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			podGroups := updatePodGroups(tc.pod, tc.ownerRef, tc.podGroups)
+			podGroups := updatePodGroups(tc.pod, tc.ownerRef, maps.Clone(tc.podGroups))
 			assert.Equal(t, tc.wantPodGroup, podGroups)
 		})
 	}

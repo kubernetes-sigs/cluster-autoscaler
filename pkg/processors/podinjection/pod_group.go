@@ -27,14 +27,15 @@ type podGroup struct {
 	desiredReplicas int
 	sample          *apiv1.Pod
 	ownerUid        types.UID
+	namespace       string
 }
 
 // groupPods creates a map of controller uids and podGroups.
-// If a controller for some pods is not found, such pods are ignored and not grouped
+// If a controller for some pods is not found, or is in a different namespace, such pods are ignored and not grouped
 func groupPods(pods []*apiv1.Pod, controllers []controller) map[types.UID]podGroup {
 	podGroups := map[types.UID]podGroup{}
 	for _, con := range controllers {
-		podGroups[con.uid] = makePodGroup(con.desiredReplicas)
+		podGroups[con.uid] = makePodGroup(con.desiredReplicas, con.namespace)
 	}
 
 	for _, pod := range pods {
@@ -57,6 +58,9 @@ func updatePodGroups(pod *apiv1.Pod, ownerRef metav1.OwnerReference, podGroups m
 	if !found {
 		return podGroups
 	}
+	if group.namespace != pod.Namespace {
+		return podGroups
+	}
 	// only consider unscheduled pods to prevent continuous fake pods injection if real pods cannot
 	// be created e.g. due to ResourceQuota, see https://github.com/kubernetes/autoscaler/pull/7944#issuecomment-5368714300
 	if group.sample == nil && pod.Spec.NodeName == "" {
@@ -68,9 +72,10 @@ func updatePodGroups(pod *apiv1.Pod, ownerRef metav1.OwnerReference, podGroups m
 	return podGroups
 }
 
-func makePodGroup(desiredReplicas int) podGroup {
+func makePodGroup(desiredReplicas int, namespace string) podGroup {
 	return podGroup{
 		podCount:        0,
 		desiredReplicas: desiredReplicas,
+		namespace:       namespace,
 	}
 }

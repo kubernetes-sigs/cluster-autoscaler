@@ -38,7 +38,11 @@ func createStatefulSetControllers(ctx context.Context, autoscalingCtx *ca_contex
 		// Which becomes very slow (can take 2+ mins per pod)
 		// Making fast scale ups not a priority and fake pod injection costly
 		if statefulSet.Spec.PodManagementPolicy == appsv1.ParallelPodManagement {
-			controllers = append(controllers, controller{uid: statefulSet.UID, desiredReplicas: desiredReplicasFromStatefulSet(statefulSet)})
+			controllers = append(controllers, controller{
+				uid:             statefulSet.UID,
+				namespace:       statefulSet.Namespace,
+				desiredReplicas: desiredReplicasFromStatefulSet(statefulSet),
+			})
 		}
 	}
 	return controllers

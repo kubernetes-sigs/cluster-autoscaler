@@ -40,6 +40,7 @@ type PodInjectionPodListProcessor struct {
 // controller is a struct that can be used to abstract different pod controllers
 type controller struct {
 	uid             types.UID
+	namespace       string
 	desiredReplicas int
 }
 

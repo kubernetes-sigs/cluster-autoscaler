@@ -33,7 +33,11 @@ func createJobControllers(ctx context.Context, autoscalingCtx *ca_context.Autosc
 		logger.Error(err, "Failed to list jobs")
 	}
 	for _, job := range jobs {
-		controllers = append(controllers, controller{uid: job.UID, desiredReplicas: desiredReplicasFromJob(job)})
+		controllers = append(controllers, controller{
+			uid:             job.UID,
+			namespace:       job.Namespace,
+			desiredReplicas: desiredReplicasFromJob(job),
+		})
 	}
 	return controllers
 }
