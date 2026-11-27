@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/status"
 	"sigs.k8s.io/cluster-autoscaler/pkg/resourcequotas"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator"
+	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/clustersnapshot"
 	"sigs.k8s.io/cluster-autoscaler/pkg/simulator/framework"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/errors"
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/klogx"
@@ -55,6 +56,8 @@ type ScaleUpOrchestrator struct {
 	estimatorBuilder     estimator.EstimatorBuilder
 	taintConfig          taints.TaintConfig
 	initialized          bool
+	// staticPredicatesUsable caches staticPredicatesUsable(autoscalingCtx.FrameworkHandle).
+	staticPredicatesUsable *bool
 }
 
 // New returns new instance of scale up Orchestrator.
@@ -543,6 +546,40 @@ func (o *ScaleUpOrchestrator) SchedulablePodGroups(
 	nodeInfo *framework.NodeInfo,
 ) []estimator.PodEquivalenceGroup {
 	logger := klog.FromContext(ctx)
+	recordUnschedulable := func(eg *equivalence.PodGroup, err clustersnapshot.SchedulingError) {
+		samplePod := eg.Pods[0]
+		logger.V(2).Info("Pod can't be scheduled, predicate checking", "pod", klog.KObj(samplePod), "nodeGroupId", nodeGroup.Id(), "err", err)
+		if podCount := len(eg.Pods); podCount > 1 {
+			logger.V(2).Info("Other similar pods can't be scheduled", "podCount", podCount-1, "pod", klog.KObj(samplePod), "nodeGroupId", nodeGroup.Id())
+		}
+		eg.SchedulingErrors[nodeGroup.Id()] = err
+	}
+
+	// Reject pod groups that can't use this node group because of taints or node affinity
+	// before forking the snapshot and running the full scheduler framework, whose PreFilter
+	// phase (e.g. InterPodAffinity) is O(cluster) per call. The pre-check mirrors the
+	// TaintToleration and NodeAffinity Filters, so it is only used when the framework has them.
+	if o.staticPredicatesUsable == nil {
+		usable := staticPredicatesUsable(o.autoscalingCtx.FrameworkHandle)
+		o.staticPredicatesUsable = &usable
+	}
+	usePreCheck := *o.staticPredicatesUsable
+	candidates := make([]*equivalence.PodGroup, 0, len(podEquivalenceGroups))
+	for _, eg := range podEquivalenceGroups {
+		if !usePreCheck {
+			candidates = append(candidates, eg)
+			continue
+		}
+		if err := staticPredicatesError(logger, eg.Pods[0], nodeInfo.Node()); err != nil {
+			recordUnschedulable(eg, err)
+			continue
+		}
+		candidates = append(candidates, eg)
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
 	o.autoscalingCtx.ClusterSnapshot.Fork()
 	defer o.autoscalingCtx.ClusterSnapshot.Revert()
 
@@ -553,7 +590,7 @@ func (o *ScaleUpOrchestrator) SchedulablePodGroups(
 	}
 
 	var schedulablePodGroups []estimator.PodEquivalenceGroup
-	for _, eg := range podEquivalenceGroups {
+	for _, eg := range candidates {
 		samplePod := eg.Pods[0]
 		if err := o.autoscalingCtx.ClusterSnapshot.CheckPredicates(samplePod, nodeInfo.Node().Name); err == nil {
 			// Add pods to option.
@@ -564,11 +601,7 @@ func (o *ScaleUpOrchestrator) SchedulablePodGroups(
 			eg.Schedulable = true
 			eg.SchedulableGroups = append(eg.SchedulableGroups, nodeGroup.Id())
 		} else {
-			logger.V(2).Info("Pod can't be scheduled, predicate checking", "pod", klog.KObj(samplePod), "nodeGroupId", nodeGroup.Id(), "err", err)
-			if podCount := len(eg.Pods); podCount > 1 {
-				logger.V(2).Info("Other similar pods can't be scheduled", "podCount", podCount-1, "pod", klog.KObj(samplePod), "nodeGroupId", nodeGroup.Id())
-			}
-			eg.SchedulingErrors[nodeGroup.Id()] = err
+			recordUnschedulable(eg, err)
 		}
 	}
 
