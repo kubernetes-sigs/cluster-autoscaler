@@ -115,6 +115,10 @@ type scenario struct {
 	verify func(*integration.FakeSet) error
 	// config allows overriding default autoscaling options for this scenario.
 	config func(*config.AutoscalingOptions)
+	// warmupLoops is the number of untimed RunOnce calls made on the same autoscaler before the
+	// benchmarked one, to measure a steady-state loop (with whatever state is reused across
+	// loops) rather than the first loop after startup.
+	warmupLoops int
 }
 
 // run executes the benchmark for a given scenario. It handles environment stabilization,
@@ -181,6 +185,11 @@ func (s scenario) runIteration(b *testing.B, i int, fProf, fTrace *os.File) {
 		b.Fatalf("setup failed: %v", err)
 	}
 	autoscaler := newAutoscaler(ctx, b, s, clusterFakes)
+	for range s.warmupLoops {
+		if err := autoscaler.RunOnce(b.Context(), time.Now().Add(10*time.Second)); err != nil {
+			b.Fatalf("warm-up RunOnce failed: %v", err)
+		}
+	}
 
 	// Manually trigger GC before the timed section to ensure a clean state
 	// for each iteration.
@@ -867,6 +876,108 @@ func setupScaleDownDRA60Percent(nodesCount int) func(*integration.FakeSet) error
 	}
 }
 
+const (
+	poolLabel        = "example.com/pool"
+	excludedPool     = "excluded"
+	antiAffinityApps = 20
+)
+
+// withAppAntiAffinity labels the pod with app=<app> and adds a required hostname anti-affinity on
+// it ("one replica per node"), which makes the InterPodAffinity PreFilter scan every pod.
+func withAppAntiAffinity(app string) func(*corev1.Pod) {
+	return func(pod *corev1.Pod) {
+		if pod.Labels == nil {
+			pod.Labels = map[string]string{}
+		}
+		pod.Labels["app"] = app
+		if pod.Spec.Affinity == nil {
+			pod.Spec.Affinity = &corev1.Affinity{}
+		}
+		pod.Spec.Affinity.PodAntiAffinity = &corev1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": app}},
+				TopologyKey:   corev1.LabelHostname,
+			}},
+		}
+	}
+}
+
+// addFullNodesWithAntiAffinityPods adds nodesCount nodes to the ngName node group, each filled
+// with podsPerNode pods (using all of its resources) spread over antiAffinityApps apps with
+// hostname anti-affinity. Nodes get their own hostname label, like real nodes.
+func addFullNodesWithAntiAffinityPods(clusterFakes *integration.FakeSet, nodesCount, podsPerNode int, labels map[string]string) {
+	var opts []testprovider.NodeGroupOption
+	for i := range nodesCount {
+		node := BuildTestNode(fmt.Sprintf("%s-node-%d", ngName, i), nodeCPU, nodeMem)
+		SetNodeReadyState(node, true, time.Now())
+		node.Labels[corev1.LabelHostname] = node.Name
+		for k, v := range labels {
+			node.Labels[k] = v
+		}
+		opts = append(opts, testprovider.WithNode(node))
+	}
+	opts = append(opts, testprovider.WithNGSize(0, maxNGSize))
+	clusterFakes.CloudProvider.AddNodeGroup(ngName, opts...)
+
+	for i := range nodesCount * podsPerNode {
+		pod := BuildTestPod(fmt.Sprintf("pod-%d", i), int64(nodeCPU/podsPerNode), int64(nodeMem/podsPerNode),
+			WithNodeName(fmt.Sprintf("%s-node-%d", ngName, i/podsPerNode)), withAppAntiAffinity(fmt.Sprintf("app-%d", i%antiAffinityApps)))
+		// The fake client doesn't set ResourceVersions, the API server always does.
+		pod.ResourceVersion = "1"
+		clusterFakes.K8s.AddPod(pod)
+	}
+}
+
+// setupScaleUpExcludedNodeGroups prepares a scale-up in a cluster where most pods use hostname
+// anti-affinity and most node groups can't be used by the pending pods: their template nodes
+// carry a label the pending pods exclude with a required node affinity (e.g. another node pool,
+// instance type or architecture).
+//
+// The existing nodes are full, and the pending pods are pendingApps ReplicaSets of
+// replicasPerApp pods with hostname anti-affinity, so the scale-up adds replicasPerApp nodes to
+// ngName.
+func setupScaleUpExcludedNodeGroups(nodesCount, excludedNodeGroups, pendingApps, replicasPerApp int) func(*integration.FakeSet) error {
+	return func(clusterFakes *integration.FakeSet) error {
+		addFullNodesWithAntiAffinityPods(clusterFakes, nodesCount, 10, map[string]string{poolLabel: "general"})
+
+		for i := range excludedNodeGroups {
+			template := BuildTestNode(fmt.Sprintf("excluded-template-%d", i), nodeCPU, nodeMem)
+			SetNodeReadyState(template, true, time.Now())
+			template.Labels[poolLabel] = excludedPool
+			clusterFakes.CloudProvider.AddNodeGroup(fmt.Sprintf("excluded-%d", i),
+				testprovider.WithTemplate(framework.NewNodeInfo(template, nil)),
+				testprovider.WithNGSize(0, maxNGSize),
+			)
+		}
+
+		for app := range pendingApps {
+			appName := fmt.Sprintf("pending-app-%d", app)
+			for r := range replicasPerApp {
+				pod := BuildTestPod(fmt.Sprintf("%s-%d", appName, r), nodeCPU/10, nodeMem/10, MarkUnschedulable(),
+					WithControllerOwnerRef(appName, "ReplicaSet", types.UID(appName)), withAppAntiAffinity(appName))
+				pod.ResourceVersion = "1"
+				pod.Spec.Affinity.NodeAffinity = &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{Key: poolLabel, Operator: corev1.NodeSelectorOpNotIn, Values: []string{excludedPool}}},
+					}}},
+				}
+				clusterFakes.K8s.AddPod(pod)
+			}
+		}
+		return nil
+	}
+}
+
+// setupSteadyState prepares a cluster with nothing to do: nodes are full, so there is nothing
+// to scale down, and there are no pending pods. Combined with warmupLoops, it measures the
+// fixed per-loop cost of building the cluster snapshot and evaluating scale-down candidates.
+func setupSteadyState(nodesCount int) func(*integration.FakeSet) error {
+	return func(clusterFakes *integration.FakeSet) error {
+		addFullNodesWithAntiAffinityPods(clusterFakes, nodesCount, 10, nil)
+		return nil
+	}
+}
+
 // verifyTargetSize returns a verification function that checks if the node group's target size
 // matches the expected value.
 func verifyTargetSize(expectedTargetSize int) func(*integration.FakeSet) error {
@@ -1002,6 +1113,36 @@ func BenchmarkRunOnceScaleDownDRA(b *testing.B) {
 			opts.ScaleDownUnreadyEnabled = true
 			opts.ScaleDownSimulationTimeout = 60 * time.Second
 			opts.DynamicResourceAllocationEnabled = true
+		},
+	}
+	s.run(b)
+}
+
+// BenchmarkRunOnceScaleUpExcludedNodeGroups measures a scale-up where 100 node groups can't be
+// used by the pending pods because of their node affinity.
+func BenchmarkRunOnceScaleUpExcludedNodeGroups(b *testing.B) {
+	const nodes, replicas = 500, 20
+	s := scenario{
+		setup:  setupScaleUpExcludedNodeGroups(nodes, 100, 10, replicas),
+		verify: verifyTargetSize(nodes + replicas),
+		config: func(opts *config.AutoscalingOptions) {
+			opts.MaxNodesPerScaleUp = maxNGSize
+		},
+	}
+	s.run(b)
+}
+
+// BenchmarkRunOnceSteadyState measures a loop with nothing to do, after a first loop on the
+// same autoscaler: the fixed cost paid on every loop.
+func BenchmarkRunOnceSteadyState(b *testing.B) {
+	s := scenario{
+		setup:       setupSteadyState(2000),
+		verify:      verifyToBeDeleted(0),
+		warmupLoops: 1,
+		config: func(opts *config.AutoscalingOptions) {
+			opts.ScaleDownEnabled = true
+			opts.ScaleDownDelayAfterAdd = 0
+			opts.NodeGroupDefaults.ScaleDownUnneededTime = 0
 		},
 	}
 	s.run(b)
