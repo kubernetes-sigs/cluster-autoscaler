@@ -31,6 +31,7 @@ import (
 	capacityclient "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/client"
 	cbctrl "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/controller"
 	"sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/fakepods"
+	cbmetrics "sigs.k8s.io/cluster-autoscaler/pkg/capacitybuffer/metrics"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	"sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/scaleupfailures"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
@@ -239,6 +240,7 @@ func (b *AutoscalerBuilder) Build(ctx context.Context) (core.Autoscaler, *loop.L
 					return nil, nil, fmt.Errorf("failed to setup CapacityBuffer ReadyReplicas controller: %w", err)
 				}
 				autoscalingStatusProcessors = append(autoscalingStatusProcessors, cbprocessor.NewCapacityBufferAutoscalingStatusProcessor(readyReplicasController, buffersPodsRegistry))
+				cbmetrics.RegisterBufferPodSlotsCollector(capacitybufferClient)
 			}
 		}
 	}
