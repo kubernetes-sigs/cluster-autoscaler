@@ -27,9 +27,12 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	v1 "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
+	prlisters "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/client/listers/autoscaling.x-k8s.io/v1"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	. "sigs.k8s.io/cluster-autoscaler/pkg/core/test"
+	podlistprocessors "sigs.k8s.io/cluster-autoscaler/pkg/processors/pods"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/conditions"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqclient"
 	"sigs.k8s.io/cluster-autoscaler/pkg/provisioningrequest/provreqwrapper"
@@ -353,4 +356,27 @@ func TestBookCapacityConsumed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBookCapacityFailureHoldsBackProvisioningRequestPods checks that when capacity can't be
+// booked, requests admitted now can't take the capacity booked for earlier ones, while pods that
+// don't belong to a ProvisioningRequest still reach scale-up.
+func TestBookCapacityFailureHoldsBackProvisioningRequestPods(t *testing.T) {
+	client := provreqclient.NewProvisioningRequestClient(nil, failingProvisioningRequestLister{err: fmt.Errorf("lister failed")}, nil)
+	regular := BuildTestPod("regular", 100, 100)
+	requestPod := BuildTestPod("request-pod", 100, 100)
+	requestPod.Annotations = map[string]string{v1.ProvisioningRequestPodAnnotationKey: "request"}
+	chain := podlistprocessors.NewCombinedPodListProcessor([]podlistprocessors.PodListProcessor{NewProvReqProcessor(client, "")})
+	got, err := chain.Process(t.Context(), nil, []*apiv1.Pod{regular, requestPod})
+	assert.NoError(t, err, "a booking failure must not stop the other pod list processors")
+	assert.Equal(t, []*apiv1.Pod{regular}, got, "only pods of ProvisioningRequests wait for capacity to be booked")
+}
+
+type failingProvisioningRequestLister struct {
+	prlisters.ProvisioningRequestLister
+	err error
+}
+
+func (l failingProvisioningRequestLister) List(labels.Selector) ([]*v1.ProvisioningRequest, error) {
+	return nil, l.err
 }

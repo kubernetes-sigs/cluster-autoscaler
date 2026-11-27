@@ -54,4 +54,17 @@ const (
 	DefaultScaleDownDelayAfterFailure = 3 * time.Minute
 	// DefaultScanInterval is the default scan interval for CA
 	DefaultScanInterval = 10 * time.Second
+
+	// DefaultBestEffortAtomicProvisioningRequestMaxBatchAttempts is the default maximum number of
+	// scale-up attempts for one batch of best-effort-atomic ProvisioningRequests in an iteration.
+	DefaultBestEffortAtomicProvisioningRequestMaxBatchAttempts = 8
+	// DefaultBestEffortAtomicProvisioningRequestMaxResizeAttempts is the default maximum number of
+	// those attempts that may end in a resize the cloud provider rejected.
+	DefaultBestEffortAtomicProvisioningRequestMaxResizeAttempts = 4
+	// DefaultBestEffortAtomicProvisioningRequestBatchTimebox is the default time after which no new
+	// attempt starts for a batch of best-effort-atomic ProvisioningRequests in an iteration.
+	DefaultBestEffortAtomicProvisioningRequestBatchTimebox = 10 * time.Second
+	// DefaultBestEffortAtomicProvisioningRequestBatchSizeTTL is the default time for which a reduced
+	// size of best-effort-atomic batches is remembered.
+	DefaultBestEffortAtomicProvisioningRequestBatchSizeTTL = time.Hour
 )
