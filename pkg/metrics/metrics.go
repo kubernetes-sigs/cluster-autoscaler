@@ -575,7 +575,7 @@ func newCaMetrics() *caMetrics {
 			&k8smetrics.HistogramOpts{
 				Namespace: caNamespace,
 				Name:      "node_removal_latency_seconds",
-				Help:      "Latency from when an unneeded node is eligible for scale down until it is removed (deleted=true) or it became needed again (deleted=false). The 'delay_reason' label indicates the technical bottleneck that delayed the scale-down ('none' if not delayed). The 'scaledown_reason' label indicates whether the node was 'empty' or 'underutilized'.",
+				Help:      "Latency from when an unneeded node is eligible for scale down until it is removed (deleted=true), became needed again, or timed out (deleted=false). The 'delay_reason' label indicates the technical bottleneck that delayed the scale-down ('none' if not delayed). The 'scaledown_reason' label indicates whether the node was 'empty' or 'underutilized'.",
 				Buckets:   []float64{5, 10, 20, 30, 60, 90, 120, 180, 240, 300, 420, 600, 900, 1200, 1800, 2700, 3600}, // 5s → 60min
 			}, []string{"deleted", "delay_reason", "scaledown_reason"},
 		),
@@ -987,8 +987,8 @@ func (m *caMetrics) ObserveBinpackingHeterogeneity(instanceType, cpuCount, names
 	m.binpackingHeterogeneity.WithLabelValues(instanceType, cpuCount, namespaceCount).Observe(float64(pegCount))
 }
 
-// UpdateScaleDownNodeRemovalLatency records the time after which node was deleted/needed
-// again after being marked unneeded
+// UpdateScaleDownNodeRemovalLatency records the time after which node was deleted, needed
+// again, or timed out after being marked unneeded.
 func (m *caMetrics) UpdateScaleDownNodeRemovalLatency(deleted bool, delayReason string, scaleDownReason NodeScaleDownReason, duration time.Duration) {
 	m.scaleDownNodeRemovalLatency.WithLabelValues(strconv.FormatBool(deleted), delayReason, string(scaleDownReason)).Observe(duration.Seconds())
 }

@@ -38,6 +38,12 @@ const (
 	// longer than this threshold will be logged at a more visible level
 	scaleDownLatencyLogThreshold = 3 * time.Minute
 
+	// scaleDownNodeRemovalTimeout is the removal latency threshold past which a
+	// still-unneeded node emits a one-time timeout sample (deleted="false").
+	// Set to 60m to match the 3600s highest finite bucket of
+	// node_removal_latency_seconds so timeout samples land in the +Inf bucket.
+	scaleDownNodeRemovalTimeout = 60 * time.Minute
+
 	// FailedToMarkToBeDeleted is the delay reason recorded when a node's deletion
 	// is aborted because tainting failed.
 	FailedToMarkToBeDeleted = "FailedToMarkToBeDeleted"
@@ -48,6 +54,7 @@ type unneededNodeState struct {
 	removalThreshold  time.Duration
 	latestDelayReason string
 	scaleDownReason   metrics.NodeScaleDownReason
+	reported          bool
 }
 
 // NodeLatencyTracker keeps track of nodes that are marked as unneeded, when they became unneeded,
@@ -101,7 +108,6 @@ func (t *NodeLatencyTracker) UpdateScaleDownCandidates(ctx context.Context, list
 
 // Process updates unremovableNodes and reports node removal latency based on scale-down status.
 func (t *NodeLatencyTracker) Process(ctx context.Context, autoscalingCtx *ca_context.AutoscalingContext, status *status.ScaleDownStatus) {
-	logger := klog.FromContext(ctx)
 	if t.wrapped != nil {
 		t.wrapped.Process(ctx, autoscalingCtx, status)
 	}
@@ -112,39 +118,52 @@ func (t *NodeLatencyTracker) Process(ctx context.Context, autoscalingCtx *ca_con
 		t.recordAndCleanup(ctx, node.Node.Name, true)
 	}
 
-	if klog.V(6).Enabled() {
-		for nodeName := range t.unneededNodes {
-			logger.V(6).Info("Node remains in unneeded list (not scaled down). Continuing to track latency.", "nodeName", nodeName)
+	t.reportTimedOutNodes(ctx, status.Result)
+}
+
+// reportTimedOutNodes emits a one-time deleted="false" timeout sample once an
+// unneeded node's latency past removalThreshold exceeds scaleDownNodeRemovalTimeout.
+func (t *NodeLatencyTracker) reportTimedOutNodes(ctx context.Context, result status.ScaleDownResult) {
+	// StaticAutoscaler.scaleDown defers Process before checking shouldScaleDown()
+	// (e.g. loops skipped by GracefulDegradation) or fetching candidates. Skip
+	// timeout reporting when scale-down was not tried so we only emit after
+	// scale-down candidates have been refreshed in the current loop.
+	if result == status.ScaleDownNotTried {
+		return
+	}
+
+	logger := klog.FromContext(ctx)
+	now := time.Now()
+	for nodeName, info := range t.unneededNodes {
+		duration, latency := info.durations(now)
+		if info.reported || latency <= scaleDownNodeRemovalTimeout {
+			continue
 		}
+		delayReason := info.delayReason()
+		metrics.UpdateScaleDownNodeRemovalLatency(false, delayReason, info.scaleDownReason, latency)
+		info.reported = true
+		t.unneededNodes[nodeName] = info
+		logger.V(2).Info("Unneeded node exceeded removal latency timeout", "nodeName", nodeName, "unneededDuration", duration, "removalThreshold", info.removalThreshold, "delayReason", delayReason, "latency", latency)
 	}
 }
 
 // recordAndCleanup calculates the time a node spent in the "unneeded" state, updates
 // relevant Prometheus metrics, and removes the node from internal tracking.
 func (t *NodeLatencyTracker) recordAndCleanup(ctx context.Context, nodeName string, isRemoved bool) {
-	logger := klog.FromContext(ctx)
 	info, exists := t.unneededNodes[nodeName]
 	if !exists {
 		return
 	}
 	delete(t.unneededNodes, nodeName)
 
-	duration := time.Since(info.unneededSince)
-	latency := duration - info.removalThreshold
-
-	delayReason := info.latestDelayReason
-	if delayReason == "" {
-		delayReason = "none"
-	}
-
-	if latency > 0 {
-		metrics.UpdateScaleDownNodeRemovalLatency(isRemoved, delayReason, info.scaleDownReason, latency)
-		if !isRemoved {
-			logger.V(4).Info("Node became needed again", "nodeName", nodeName, "unneededDuration", duration, "delayReason", delayReason, "latency", latency)
-		}
+	duration, latency := info.durations(time.Now())
+	if !info.reported && latency > 0 {
+		metrics.UpdateScaleDownNodeRemovalLatency(isRemoved, info.delayReason(), info.scaleDownReason, latency)
 	}
 	if isRemoved {
 		t.logDeletion(ctx, nodeName, duration, info.removalThreshold, latency)
+	} else if latency > 0 {
+		klog.FromContext(ctx).V(4).Info("Node became needed again", "nodeName", nodeName, "unneededDuration", duration, "delayReason", info.delayReason(), "latency", latency)
 	}
 }
 
@@ -193,6 +212,18 @@ func (t *NodeLatencyTracker) updateLatestDelayReasons(ctx context.Context, unrem
 			}
 		}
 	}
+}
+
+func (s unneededNodeState) delayReason() string {
+	if s.latestDelayReason == "" {
+		return "none"
+	}
+	return s.latestDelayReason
+}
+
+func (s unneededNodeState) durations(now time.Time) (unneededDuration, latency time.Duration) {
+	unneededDuration = now.Sub(s.unneededSince)
+	return unneededDuration, unneededDuration - s.removalThreshold
 }
 
 func isBlocker(reason simulator.UnremovableReason) bool {
