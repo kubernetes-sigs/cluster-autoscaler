@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	klog "k8s.io/klog/v2"
 )
 
 // HealthCheck contains information about last time of autoscaler activity and timeout
@@ -85,10 +87,14 @@ func (hc *HealthCheck) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if timedOut {
 		w.WriteHeader(500)
-		w.Write([]byte(fmt.Sprintf("Error: last activity more %v ago, last success more than %v ago", time.Now().Sub(lastActivity).String(), time.Now().Sub(lastSuccessfulRun).String())))
+		if _, err := w.Write([]byte(fmt.Sprintf("Error: last activity more %v ago, last success more than %v ago", time.Now().Sub(lastActivity).String(), time.Now().Sub(lastSuccessfulRun).String()))); err != nil {
+			klog.ErrorS(err, "Failed to write the health check response")
+		}
 	} else {
 		w.WriteHeader(200)
-		w.Write([]byte("OK"))
+		if _, err := w.Write([]byte("OK")); err != nil {
+			klog.ErrorS(err, "Failed to write the health check response")
+		}
 	}
 }
 

@@ -138,7 +138,7 @@ func TestDrainable(t *testing.T) {
 	} {
 		t.Run(desc, func(t *testing.T) {
 			tracker := pdb.NewBasicRemainingPdbTracker()
-			tracker.SetPdbs(tc.pdbs)
+			assert.NoError(t, tracker.SetPdbs(tc.pdbs))
 			drainCtx := &drainability.DrainContext{
 				RemainingPdbTracker: tracker,
 			}

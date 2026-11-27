@@ -176,7 +176,8 @@ func (s *AsyncNodeGroupInitializer) prepareScaleUps(result nodegroups.AsyncNodeG
 
 func (s *AsyncNodeGroupInitializer) emitScaleUpStatus(scaleUpStatus *status.ScaleUpStatus, err errors.AutoscalerError) {
 	if err != nil {
-		status.UpdateScaleUpError(scaleUpStatus, err)
+		// UpdateScaleUpError returns the status and the error it was given.
+		_, _ = status.UpdateScaleUpError(scaleUpStatus, err)
 	}
 	s.scaleUpStatusProcessor.Process(context.TODO(), s.autoscalingCtx, scaleUpStatus)
 }

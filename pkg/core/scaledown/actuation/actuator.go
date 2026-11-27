@@ -380,7 +380,9 @@ func (a *Actuator) deleteNodesAsync(ctx context.Context, bucket *budgets.NodeGro
 			return
 		}
 		remainingPdbTracker = pdb.NewBasicRemainingPdbTracker()
-		remainingPdbTracker.SetPdbs(pdbs)
+		if err := remainingPdbTracker.SetPdbs(pdbs); err != nil {
+			klog.FromContext(ctx).Error(err, "Failed to set pod disruption budgets for the drain, continuing with the ones set before the error")
+		}
 		registry = a.autoscalingCtx.ListerRegistry
 	}
 

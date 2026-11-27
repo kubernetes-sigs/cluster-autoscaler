@@ -689,7 +689,8 @@ func (a *StaticAutoscaler) statusUpdate(ctx context.Context, state *loopState) {
 	// Update status information when the loop is done (regardless of reason)
 	if autoscalingCtx.WriteStatusConfigMap {
 		status := a.clusterStateRegistry.GetStatus(ctx, state.currentTime)
-		utils.WriteStatusConfigMap(ctx, autoscalingCtx.ClientSet, autoscalingCtx.ConfigNamespace,
+		// WriteStatusConfigMap logs a failed write, and the status is written again in the next loop.
+		_, _ = utils.WriteStatusConfigMap(ctx, autoscalingCtx.ClientSet, autoscalingCtx.ConfigNamespace,
 			*status, a.AutoscalingContext.LogRecorder, a.AutoscalingContext.StatusConfigMapName, state.currentTime)
 	}
 
@@ -1397,9 +1398,12 @@ func (a *StaticAutoscaler) ExitCleanUp() {
 	if !a.AutoscalingContext.WriteStatusConfigMap {
 		return
 	}
-	utils.DeleteStatusConfigMap(a.AutoscalingContext.ClientSet, a.AutoscalingContext.ConfigNamespace, a.AutoscalingContext.StatusConfigMapName)
+	// DeleteStatusConfigMap logs a failed delete.
+	_ = utils.DeleteStatusConfigMap(a.AutoscalingContext.ClientSet, a.AutoscalingContext.ConfigNamespace, a.AutoscalingContext.StatusConfigMapName)
 
-	a.CloudProvider.Cleanup(context.TODO())
+	if err := a.CloudProvider.Cleanup(context.TODO()); err != nil {
+		klog.ErrorS(err, "Failed to clean up the cloud provider")
+	}
 
 	a.clusterStateRegistry.Stop()
 }

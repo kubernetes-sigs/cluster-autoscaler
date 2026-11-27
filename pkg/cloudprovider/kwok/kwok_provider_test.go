@@ -18,7 +18,6 @@ package kwok
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
@@ -78,7 +77,7 @@ func TestNodeGroups(t *testing.T) {
 		return true, nil, errors.NewNotFound(apiv1.Resource("configmaps"), "whatever")
 	})
 
-	os.Setenv("POD_NAMESPACE", "kube-system")
+	t.Setenv("POD_NAMESPACE", "kube-system")
 
 	t.Run("use template nodes from the configmap", func(t *testing.T) {
 		nodesFrom = "configmap"
@@ -198,7 +197,7 @@ func TestRefresh(t *testing.T) {
 		return true, nil, errors.NewNotFound(apiv1.Resource("configmaps"), "whatever")
 	})
 
-	os.Setenv("POD_NAMESPACE", "kube-system")
+	t.Setenv("POD_NAMESPACE", "kube-system")
 
 	t.Run("refresh nodegroup target size", func(t *testing.T) {
 		nodesFrom = "configmap"
@@ -300,7 +299,7 @@ func TestGetResourceLimiter(t *testing.T) {
 		return true, &apiv1.NodeList{Items: []apiv1.Node{}}, errors.NewNotFound(apiv1.Resource("nodes"), "whatever")
 	})
 
-	os.Setenv("POD_NAMESPACE", "kube-system")
+	t.Setenv("POD_NAMESPACE", "kube-system")
 
 	fakeNodeLister := newTestAllNodeLister(map[string]*apiv1.Node{})
 
@@ -374,7 +373,7 @@ func TestGetAvailableGPUTypes(t *testing.T) {
 		return true, &apiv1.NodeList{Items: []apiv1.Node{}}, errors.NewNotFound(apiv1.Resource("nodes"), "whatever")
 	})
 
-	os.Setenv("POD_NAMESPACE", "kube-system")
+	t.Setenv("POD_NAMESPACE", "kube-system")
 
 	fakeNodeLister := newTestAllNodeLister(map[string]*apiv1.Node{})
 
@@ -453,7 +452,7 @@ func TestGetNodeGpuConfig(t *testing.T) {
 		return true, &apiv1.NodeList{Items: []apiv1.Node{}}, errors.NewNotFound(apiv1.Resource("nodes"), "whatever")
 	})
 
-	os.Setenv("POD_NAMESPACE", "kube-system")
+	t.Setenv("POD_NAMESPACE", "kube-system")
 
 	fakeNodeLister := newTestAllNodeLister(map[string]*apiv1.Node{})
 
@@ -559,7 +558,7 @@ func TestGPULabel(t *testing.T) {
 		return true, &apiv1.NodeList{Items: []apiv1.Node{}}, errors.NewNotFound(apiv1.Resource("nodes"), "whatever")
 	})
 
-	os.Setenv("POD_NAMESPACE", "kube-system")
+	t.Setenv("POD_NAMESPACE", "kube-system")
 
 	fakeNodeLister := newTestAllNodeLister(map[string]*apiv1.Node{})
 
@@ -638,7 +637,7 @@ func TestNodeGroupForNode(t *testing.T) {
 		return true, nil, errors.NewNotFound(apiv1.Resource("configmaps"), "whatever")
 	})
 
-	os.Setenv("POD_NAMESPACE", "kube-system")
+	t.Setenv("POD_NAMESPACE", "kube-system")
 
 	t.Run("use template nodes from the configmap", func(t *testing.T) {
 		nodesFrom = "configmap"
@@ -782,10 +781,6 @@ func TestNodeGroupForNode(t *testing.T) {
 }
 
 func TestBuildKwokProvider(t *testing.T) {
-	defer func() {
-		os.Unsetenv("KWOK_PROVIDER_CONFIGMAP")
-	}()
-
 	fakeClient := &fake.Clientset{}
 
 	fakeClient.Fake.AddReactor("get", "configmaps", func(action core.Action) (bool, runtime.Object, error) {
@@ -906,13 +901,13 @@ func TestBuildKwokProvider(t *testing.T) {
 		ngNodeListerFn: testNodeLister,
 	}
 
-	os.Setenv("POD_NAMESPACE", "kube-system")
+	t.Setenv("POD_NAMESPACE", "kube-system")
 
 	t.Run("(don't skip adding taint) use template nodes from the cluster (aka get them using kube client)", func(t *testing.T) {
 		// use template nodes from the cluster (aka get them using kube client)
 		fakeNodes = map[string]*apiv1.Node{fakeNode1.Name: &fakeNode1, fakeNode2.Name: &fakeNode2, fakeNode3.Name: &fakeNode3}
 		fakeNodeLister.setNodesMap(fakeNodes)
-		os.Setenv("KWOK_PROVIDER_CONFIGMAP", "testConfigDynamicTemplates")
+		t.Setenv("KWOK_PROVIDER_CONFIGMAP", "testConfigDynamicTemplates")
 
 		p, err := BuildKwokProvider(ko)
 		assert.NoError(t, err)
@@ -933,7 +928,7 @@ func TestBuildKwokProvider(t *testing.T) {
 		// use template nodes from the cluster (aka get them using kube client)
 		fakeNodes = map[string]*apiv1.Node{fakeNode1.Name: &fakeNode1, fakeNode2.Name: &fakeNode2, fakeNode3.Name: &fakeNode3}
 		fakeNodeLister.setNodesMap(fakeNodes)
-		os.Setenv("KWOK_PROVIDER_CONFIGMAP", "testConfigDynamicTemplatesSkipTaint")
+		t.Setenv("KWOK_PROVIDER_CONFIGMAP", "testConfigDynamicTemplatesSkipTaint")
 
 		p, err := BuildKwokProvider(ko)
 		assert.NoError(t, err)
@@ -964,7 +959,7 @@ func TestBuildKwokProvider(t *testing.T) {
 		fakeNodeLister = newTestAllNodeLister(fakeNodes)
 
 		// fallback to default configmap name
-		os.Unsetenv("KWOK_PROVIDER_CONFIGMAP")
+		t.Setenv("KWOK_PROVIDER_CONFIGMAP", "")
 
 		p, err := BuildKwokProvider(ko)
 		assert.NoError(t, err)
@@ -993,7 +988,7 @@ func TestBuildKwokProvider(t *testing.T) {
 			fakeNodes[nos[i].GetName()] = nos[i]
 		}
 
-		os.Setenv("KWOK_PROVIDER_CONFIGMAP", "testConfigSkipTaint")
+		t.Setenv("KWOK_PROVIDER_CONFIGMAP", "testConfigSkipTaint")
 
 		fakeNodeLister = newTestAllNodeLister(fakeNodes)
 
@@ -1014,11 +1009,6 @@ func TestBuildKwokProvider(t *testing.T) {
 }
 
 func TestCleanup(t *testing.T) {
-
-	defer func() {
-		os.Unsetenv("KWOK_PROVIDER_CONFIGMAP")
-	}()
-
 	fakeClient := &fake.Clientset{}
 	fakeClient.Fake.AddReactor("get", "configmaps", func(action core.Action) (bool, runtime.Object, error) {
 		getAction := action.(core.GetAction)
@@ -1131,13 +1121,13 @@ func TestCleanup(t *testing.T) {
 
 	})
 
-	os.Setenv("POD_NAMESPACE", "kube-system")
+	t.Setenv("POD_NAMESPACE", "kube-system")
 
 	t.Run("use template nodes from the cluster (aka get them using kube client)", func(t *testing.T) {
 		// use template nodes from the cluster (aka get them using kube client)
 		fakeNodes = map[string]*apiv1.Node{fakeNode1.Name: &fakeNode1, fakeNode2.Name: &fakeNode2, fakeNode3.Name: &fakeNode3}
 		fakeNodeLister.setNodesMap(fakeNodes)
-		os.Setenv("KWOK_PROVIDER_CONFIGMAP", "testConfigDynamicTemplates")
+		t.Setenv("KWOK_PROVIDER_CONFIGMAP", "testConfigDynamicTemplates")
 
 		ko := &kwokOptions{
 			kubeClient:      fakeClient,
@@ -1176,7 +1166,7 @@ func TestCleanup(t *testing.T) {
 		}
 
 		// fallback to default configmap name
-		os.Unsetenv("KWOK_PROVIDER_CONFIGMAP")
+		t.Setenv("KWOK_PROVIDER_CONFIGMAP", "")
 		fakeNodeLister = newTestAllNodeLister(fakeNodes)
 
 		ko := &kwokOptions{

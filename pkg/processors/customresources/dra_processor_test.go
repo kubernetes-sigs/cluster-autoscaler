@@ -565,7 +565,7 @@ func TestFilterOutNodesWithUnreadyDRAResources(t *testing.T) {
 			draSnapshot := drasnapshot.NewSnapshot(nil, tc.nodesSlices, nil, nil)
 			clusterSnapshotStore := store.NewBasicSnapshotStore()
 			clusterSnapshot, _, _ := testsnapshot.NewCustomTestSnapshotAndHandle(clusterSnapshotStore)
-			clusterSnapshot.SetClusterState(context.Background(), []*apiv1.Node{}, []*apiv1.Pod{}, draSnapshot, nil)
+			assert.NoError(t, clusterSnapshot.SetClusterState(context.Background(), []*apiv1.Node{}, []*apiv1.Pod{}, draSnapshot, nil))
 
 			autoscalingCtx := &ca_context.AutoscalingContext{
 				CloudProvider:            provider,
@@ -1177,7 +1177,7 @@ func TestDraProcessorResourceComparator(t *testing.T) {
 			draSnapshot := drasnapshot.NewSnapshot(nil, nodeResourceSlices, nil, nil)
 			clusterSnapshotStore := store.NewBasicSnapshotStore()
 			clusterSnapshot, _, _ := testsnapshot.NewCustomTestSnapshotAndHandle(clusterSnapshotStore)
-			clusterSnapshot.SetClusterState(context.Background(), []*apiv1.Node{}, []*apiv1.Pod{}, draSnapshot, nil)
+			assert.NoError(t, clusterSnapshot.SetClusterState(context.Background(), []*apiv1.Node{}, []*apiv1.Pod{}, draSnapshot, nil))
 
 			autoscalingCtx := &ca_context.AutoscalingContext{
 				CloudProvider:   provider,

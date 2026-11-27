@@ -141,7 +141,7 @@ func TestDrainable(t *testing.T) {
 			Spec: policyv1.PodDisruptionBudgetSpec{
 				Selector: &metav1.LabelSelector{
 					MatchLabels: map[string]string{
-						"k8s-app": "PDB-managed pod",
+						"k8s-app": "bar",
 					},
 				},
 			},
@@ -201,7 +201,7 @@ func TestDrainable(t *testing.T) {
 	} {
 		t.Run(desc, func(t *testing.T) {
 			tracker := pdb.NewBasicRemainingPdbTracker()
-			tracker.SetPdbs(test.pdbs)
+			assert.NoError(t, tracker.SetPdbs(test.pdbs))
 
 			drainCtx := &drainability.DrainContext{
 				RemainingPdbTracker: tracker,

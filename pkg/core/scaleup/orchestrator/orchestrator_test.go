@@ -1231,7 +1231,7 @@ func runSimpleScaleUpTest(t *testing.T, testConfig *ScaleUpTestConfig) *ScaleUpT
 	nodeInfos := autoscalingCtx.TemplateNodeInfoRegistry.GetNodeInfos()
 	clusterState := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(options.NodeGroupDefaults), autoscalingCtx.TemplateNodeInfoRegistry, clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier))
 	processors.ScaleStateNotifier.Register(nodegroupchange.NewNodeGroupChangeMetricsProducer(provider, metrics.DefaultMetrics, autoscalingCtx.TemplateNodeInfoRegistry))
-	clusterState.UpdateNodes(context.Background(), nodes, time.Now())
+	assert.NoError(t, clusterState.UpdateNodes(context.Background(), nodes, time.Now()))
 	processors.NodeGroupSetProcessor = nodegroupset.NewDefaultNodeGroupSetProcessor([]string{nodeGroupLabel}, config.NodeGroupDifferenceRatios{})
 	if testConfig.EnableAutoprovisioning {
 		processors.NodeGroupListProcessor = &MockAutoprovisioningNodeGroupListProcessor{T: t}
@@ -1350,7 +1350,7 @@ func TestScaleUpUnhealthy(t *testing.T) {
 	_ = autoscalingCtx.TemplateNodeInfoRegistry.Recompute(gocontext.Background(), &autoscalingCtx, nodes, []*appsv1.DaemonSet{}, taints.TaintConfig{}, now)
 	nodeInfos := autoscalingCtx.TemplateNodeInfoRegistry.GetNodeInfos()
 	clusterState := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute}), autoscalingCtx.TemplateNodeInfoRegistry, clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier))
-	clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now())
+	assert.NoError(t, clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now()))
 	p3 := BuildTestPod("p-new", 550, 0)
 
 	quotasProvider := resourcequotas.NewCloudQuotasProvider(provider)
@@ -1401,7 +1401,7 @@ func TestBinpackingLimiter(t *testing.T) {
 	nodeInfos := autoscalingCtx.TemplateNodeInfoRegistry.GetNodeInfos()
 
 	clusterState := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute}), autoscalingCtx.TemplateNodeInfoRegistry, clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier))
-	clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now())
+	assert.NoError(t, clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now()))
 
 	extraPod := BuildTestPod("p-new", 500, 0)
 
@@ -1464,7 +1464,7 @@ func TestScaleUpNoHelp(t *testing.T) {
 	_ = autoscalingCtx.TemplateNodeInfoRegistry.Recompute(gocontext.Background(), &autoscalingCtx, nodes, []*appsv1.DaemonSet{}, taints.TaintConfig{}, now)
 	nodeInfos := autoscalingCtx.TemplateNodeInfoRegistry.GetNodeInfos()
 	clusterState := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute}), autoscalingCtx.TemplateNodeInfoRegistry, clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier))
-	clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now())
+	assert.NoError(t, clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now()))
 	p3 := BuildTestPod("p-new", 500, 0)
 
 	quotasProvider := resourcequotas.NewCloudQuotasProvider(provider)
@@ -1712,7 +1712,7 @@ func TestScaleUpBalanceGroups(t *testing.T) {
 			_ = autoscalingCtx.TemplateNodeInfoRegistry.Recompute(gocontext.Background(), &autoscalingCtx, nodes, []*appsv1.DaemonSet{}, taints.TaintConfig{}, now)
 			nodeInfos := autoscalingCtx.TemplateNodeInfoRegistry.GetNodeInfos()
 			clusterState := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute}), autoscalingCtx.TemplateNodeInfoRegistry, clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier))
-			clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now())
+			assert.NoError(t, clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now()))
 
 			pods := make([]*apiv1.Pod, 0)
 			for i := 0; i < 2; i++ {
@@ -1875,7 +1875,7 @@ func TestScaleUpBalanceGroupsRespectsQuota(t *testing.T) {
 			_ = autoscalingCtx.TemplateNodeInfoRegistry.Recompute(gocontext.Background(), &autoscalingCtx, nodes, []*appsv1.DaemonSet{}, taints.TaintConfig{}, now)
 			nodeInfos := autoscalingCtx.TemplateNodeInfoRegistry.GetNodeInfos()
 			clusterState := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute}), autoscalingCtx.TemplateNodeInfoRegistry, clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier))
-			clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now())
+			assert.NoError(t, clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now()))
 
 			pods := make([]*apiv1.Pod, 0)
 			for i := 0; i < 6; i++ {
@@ -2091,7 +2091,7 @@ func TestScaleUpToMeetNodeGroupMinSize(t *testing.T) {
 	_ = autoscalingCtx.TemplateNodeInfoRegistry.Recompute(gocontext.Background(), &autoscalingCtx, nodes, []*appsv1.DaemonSet{}, taints.TaintConfig{}, time.Now())
 	nodeInfos := autoscalingCtx.TemplateNodeInfoRegistry.GetNodeInfos()
 	clusterState := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute}), autoscalingCtx.TemplateNodeInfoRegistry, clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier))
-	clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now())
+	assert.NoError(t, clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now()))
 
 	quotasProvider := resourcequotas.NewCloudQuotasProvider(provider)
 	trackerFactory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{
@@ -2396,7 +2396,7 @@ func TestScaleUpSimulationForSkippedNodeGroups(t *testing.T) {
 			nodeInfos := autoscalingCtx.TemplateNodeInfoRegistry.GetNodeInfos()
 
 			clusterState := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute}), autoscalingCtx.TemplateNodeInfoRegistry, clusterstate.WithScaleStateNotifier(processors.ScaleStateNotifier))
-			clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now())
+			assert.NoError(t, clusterState.UpdateNodes(gocontext.Background(), nodes, time.Now()))
 
 			quotasProvider := resourcequotas.NewCloudQuotasProvider(provider)
 			trackerFactory := resourcequotas.NewTrackerFactory(resourcequotas.TrackerOptions{
@@ -2985,7 +2985,7 @@ func TestScaleUpErrorsPopulateConsideredNodeGroups(t *testing.T) {
 			nodeInfos := autoscalingCtx.TemplateNodeInfoRegistry.GetNodeInfos()
 
 			clusterState := clusterstate.NewClusterStateRegistry(provider, autoscalingCtx.LogRecorder, NewBackoff(), nodegroupconfig.NewDefaultNodeGroupConfigProcessor(options.NodeGroupDefaults), autoscalingCtx.TemplateNodeInfoRegistry, clusterstate.WithScaleStateNotifier(autoscalingProcessors.ScaleStateNotifier))
-			clusterState.UpdateNodes(ctx, nodes, now)
+			assert.NoError(t, clusterState.UpdateNodes(ctx, nodes, now))
 
 			quotaProvider := tc.quotaProvider
 			if quotaProvider == nil {

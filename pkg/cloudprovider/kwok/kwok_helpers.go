@@ -87,7 +87,9 @@ func LoadNodeTemplatesFromConfigMap(configMapName string,
 	}
 
 	scheme := runtime.NewScheme()
-	clientscheme.AddToScheme(scheme)
+	if err := clientscheme.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("failed to add client types to the scheme: %w", err)
+	}
 
 	decoder := serializer.NewCodecFactory(scheme).UniversalDeserializer()
 
