@@ -226,7 +226,8 @@ func (r *RemovalSimulator) withForkedSnapshot(ctx context.Context, f func() erro
 		if err == nil && r.canPersist {
 			cleanupErr := r.clusterSnapshot.Commit()
 			if cleanupErr != nil {
-				klog.Fatalf("Got error when calling ClusterSnapshot.Commit(); %v", cleanupErr)
+				klog.ErrorS(cleanupErr, "Got error when calling ClusterSnapshot.Commit()")
+				klog.FlushAndExit(klog.ExitFlushTimeout, 255)
 			}
 		} else {
 			r.clusterSnapshot.Revert()

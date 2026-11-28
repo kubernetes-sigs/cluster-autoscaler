@@ -98,7 +98,7 @@ type DebuggingSnapshotter interface {
 func NewDebuggingSnapshotter(isDebuggerEnabled bool) DebuggingSnapshotter {
 	state := SNAPSHOTTER_DISABLED
 	if isDebuggerEnabled {
-		klog.Infof("Debugging Snapshot is enabled")
+		klog.InfoS("Debugging Snapshot is enabled")
 		state = LISTENING
 	}
 	return &DebuggingSnapshotterImpl{
@@ -116,7 +116,7 @@ func (d *DebuggingSnapshotterImpl) ResponseHandler(w http.ResponseWriter, r *htt
 	// checks if the handler is in the correct State to accept a new snapshot request
 	if *d.State != LISTENING {
 		defer d.Mutex.Unlock()
-		klog.Errorf("Debugging Snapshot is currently being processed. Another snapshot can't be processed")
+		klog.ErrorS(nil, "Debugging Snapshot is currently being processed. Another snapshot can't be processed")
 		w.WriteHeader(http.StatusTooManyRequests)
 		w.Write([]byte("Another debugging snapshot request is being processed. Concurrent requests not supported"))
 		return
@@ -125,7 +125,7 @@ func (d *DebuggingSnapshotterImpl) ResponseHandler(w http.ResponseWriter, r *htt
 	ctx, cancel := context.WithCancel(r.Context())
 	d.CancelRequest = cancel
 
-	klog.Infof("Received a new snapshot, that is accepted")
+	klog.InfoS("Received a new snapshot, that is accepted")
 	// set the State to trigger enabled, to allow workflow to collect data
 	*d.State = TRIGGER_ENABLED
 	d.Mutex.Unlock()
@@ -150,7 +150,7 @@ func (d *DebuggingSnapshotterImpl) ResponseHandler(w http.ResponseWriter, r *htt
 		d.Mutex.Unlock()
 	case <-ctx.Done():
 		d.Mutex.Lock()
-		klog.Infof("Received terminate trigger, aborting ongoing snapshot request")
+		klog.InfoS("Received terminate trigger, aborting ongoing snapshot request")
 		w.WriteHeader(http.StatusServiceUnavailable)
 
 		d.DebuggingSnapshot.Cleanup()

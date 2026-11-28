@@ -304,7 +304,7 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 
 	maxHealthCheckTimeout := max(p.o.MaxInactivityTime, p.o.MaxFailingTime, p.o.MaxStartupTime)
 	if p.o.MaxStartupTime < maxHealthCheckTimeout {
-		klog.Warningf("--max-startup-time needs to be at least as high as --max-failing-time and --max-inactivity, overriding it to the highest value out of them: %v", maxHealthCheckTimeout)
+		klog.InfoS("--max-startup-time needs to be at least as high as --max-failing-time and --max-inactivity, overriding it to the highest value out of them", "maxStartupTime", maxHealthCheckTimeout)
 		p.o.MaxStartupTime = maxHealthCheckTimeout
 	}
 
@@ -315,7 +315,7 @@ func (p *AutoscalingFlags) Options() (config.AutoscalingOptions, error) {
 		}
 	}
 	if verbosity < p.schedulerVerbosity {
-		klog.Warningf("--scheduler-verbosity should be at most as high as --v flag, overriding it to: %d", verbosity)
+		klog.InfoS("--scheduler-verbosity should be at most as high as --v flag, overriding it", "schedulerVerbosity", verbosity)
 		p.schedulerVerbosity = verbosity
 	}
 	if p.schedulerVerbosity < 0 {
@@ -440,17 +440,17 @@ func parseShutdownGracePeriodsAndPriorities(priorityGracePeriodStr string) []kub
 	for _, item := range priorityGracePeriodStrArr {
 		priorityAndPeriod := strings.Split(item, ":")
 		if len(priorityAndPeriod) != 2 {
-			klog.Errorf("Parsing shutdown grace periods failed because '%s' is not a priority and grace period couple separated by ':'", item)
+			klog.ErrorS(nil, "Parsing shutdown grace periods failed because item is not a priority and grace period couple separated by ':'", "item", item)
 			return emptyMap
 		}
 		priority, err := strconv.Atoi(priorityAndPeriod[0])
 		if err != nil {
-			klog.Errorf("Parsing shutdown grace periods and priorities failed: %v", err)
+			klog.ErrorS(err, "Parsing shutdown grace periods and priorities failed")
 			return emptyMap
 		}
 		shutDownGracePeriod, err := strconv.Atoi(priorityAndPeriod[1])
 		if err != nil {
-			klog.Errorf("Parsing shutdown grace periods and priorities failed: %v", err)
+			klog.ErrorS(err, "Parsing shutdown grace periods and priorities failed")
 			return emptyMap
 		}
 		priorityGracePeriodMap = append(priorityGracePeriodMap, kubelet_config.ShutdownGracePeriodByPodPriority{

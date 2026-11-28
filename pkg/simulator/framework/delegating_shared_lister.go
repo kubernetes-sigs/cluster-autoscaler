@@ -188,12 +188,12 @@ func (u *unsetResourceClaimTracker) SignalClaimPendingAllocation(claimUID types.
 }
 
 func (u *unsetResourceClaimTracker) GetPendingAllocation(claimUID types.UID) *resourceapi.AllocationResult {
-	klog.Errorf("lister not set in delegate")
+	klog.ErrorS(nil, "lister not set in delegate")
 	return nil
 }
 
 func (u *unsetResourceClaimTracker) MaybeRemoveClaimPendingAllocation(claimUID types.UID, forceRemove bool) (deleted bool) {
-	klog.Errorf("lister not set in delegate")
+	klog.ErrorS(nil, "lister not set in delegate")
 	return false
 }
 
@@ -202,7 +202,7 @@ func (u *unsetResourceClaimTracker) AssumeClaimAfterAPICall(claim *resourceapi.R
 }
 
 func (u *unsetResourceClaimTracker) AssumedClaimRestore(namespace, claimName string) {
-	klog.Errorf("lister not set in delegate")
+	klog.ErrorS(nil, "lister not set in delegate")
 }
 
 func (u *unsetResourceSliceLister) ListWithDeviceTaintRules() ([]*resourceapi.ResourceSlice, error) {
@@ -218,7 +218,7 @@ func (u *unsetDeviceClassLister) Get(className string) (*resourceapi.DeviceClass
 }
 
 func (u *unsetDeviceClassResolver) GetDeviceClass(resourceName corev1.ResourceName) *resourceapi.DeviceClass {
-	klog.Errorf("lister not set in delegate")
+	klog.ErrorS(nil, "lister not set in delegate")
 	return nil
 }
 

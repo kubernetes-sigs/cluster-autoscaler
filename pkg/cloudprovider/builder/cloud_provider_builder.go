@@ -28,7 +28,7 @@ import (
 
 // NewCloudProvider builds a cloud provider from provided parameters.
 func NewCloudProvider(opts *coreoptions.AutoscalerOptions, informerFactory informers.SharedInformerFactory) cloudprovider.CloudProvider {
-	klog.V(1).Infof("Building %s cloud provider.", opts.CloudProviderName)
+	klog.V(1).InfoS("Building cloud provider", "cloudProvider", opts.CloudProviderName)
 
 	do := cloudprovider.NodeGroupDiscoveryOptions{
 		NodeGroupSpecs:              opts.NodeGroups,
@@ -40,7 +40,7 @@ func NewCloudProvider(opts *coreoptions.AutoscalerOptions, informerFactory infor
 	if opts.CloudProviderName == "" {
 		// Ideally this would be an error, but several unit tests of the
 		// StaticAutoscaler depend on this behaviour.
-		klog.Warning("Returning a nil cloud provider")
+		klog.InfoS("Returning a nil cloud provider")
 		return nil
 	}
 
@@ -56,6 +56,7 @@ func NewCloudProvider(opts *coreoptions.AutoscalerOptions, informerFactory infor
 		return provider
 	}
 
-	klog.Fatalf("Unknown cloud provider: %s", opts.CloudProviderName)
-	return nil // This will never happen because the Fatalf will os.Exit
+	klog.ErrorS(nil, "Unknown cloud provider", "cloudProvider", opts.CloudProviderName)
+	klog.FlushAndExit(klog.ExitFlushTimeout, 255)
+	return nil // This will never happen because FlushAndExit will os.Exit
 }

@@ -171,7 +171,7 @@ func NewStaticAutoscaler(
 	csiProvider *csinodeprovider.Provider,
 	capacityBufferPodsRegistry *fakepods.Registry) *StaticAutoscaler {
 
-	klog.V(4).Infof("Creating new static autoscaler with opts: %v", opts)
+	klog.V(4).InfoS("Creating new static autoscaler", "opts", config.LoggableAutoscalingOptions(opts))
 
 	templateNodeInfoRegistry := nodeinfosprovider.NewTemplateNodeInfoRegistry(processors.TemplateNodeInfoProvider)
 
@@ -518,7 +518,7 @@ func (a *StaticAutoscaler) reconcileCluster(ctx context.Context, currentTime tim
 			logger.Info("Failed to remove unregistered nodes", "err", err)
 		}
 		if removedAny {
-			logger.V(0).Info("Some unregistered nodes were removed")
+			logger.Info("Some unregistered nodes were removed")
 		}
 	}
 
@@ -540,7 +540,7 @@ func (a *StaticAutoscaler) reconcileCluster(ctx context.Context, currentTime tim
 		return false, caerrors.ToAutoscalerError(caerrors.CloudProviderError, err)
 	}
 	if fixedSomething {
-		logger.V(0).Info("Some node group target size was fixed, skipping the iteration")
+		logger.Info("Some node group target size was fixed, skipping the iteration")
 		return true, nil
 	}
 
@@ -625,7 +625,7 @@ func (a *StaticAutoscaler) filterUnschedulablePods(ctx context.Context, state *l
 func (a *StaticAutoscaler) scaleUp(ctx context.Context, state *loopState) caerrors.AutoscalerError {
 	if err := ctx.Err(); err != nil {
 		logger := klog.FromContext(ctx)
-		logger.V(0).Info("Skipping scale-up, context cancelled", "err", err)
+		logger.Info("Skipping scale-up, context cancelled", "err", err)
 		return nil
 	}
 
@@ -659,7 +659,7 @@ func (a *StaticAutoscaler) scaleUp(ctx context.Context, state *loopState) caerro
 
 func (a *StaticAutoscaler) scaleUpMinNodes(ctx context.Context, state *loopState) caerrors.AutoscalerError {
 	if err := ctx.Err(); err != nil {
-		klog.FromContext(ctx).V(0).Info("Skipping scale-up min nodes, context cancelled", "err", err)
+		klog.FromContext(ctx).Info("Skipping scale-up min nodes, context cancelled", "err", err)
 		return nil
 	}
 
@@ -907,7 +907,7 @@ func (a *StaticAutoscaler) updateSoftDeletionTaints(ctx context.Context, allNode
 func (a *StaticAutoscaler) scaleDown(ctx context.Context, state *loopState) caerrors.AutoscalerError {
 	logger := klog.FromContext(ctx)
 	if err := ctx.Err(); err != nil {
-		logger.V(0).Info("Skipping scale-down, context cancelled", "err", err)
+		logger.Info("Skipping scale-down, context cancelled", "err", err)
 		return nil
 	}
 
@@ -1138,12 +1138,12 @@ func fixNodeGroupSize(ctx context.Context, autoscalingCtx *ca_context.Autoscalin
 				return false, fmt.Errorf("failed to get options for nodeGroup %s: %v", nodeGroup.Id(), err)
 			}
 			if opts != nil && opts.ZeroOrMaxNodeScaling {
-				logger.V(0).Info("Skipping fixing node group size for ZeroOrMaxNodeScaling node group", "nodeGroupId", nodeGroup.Id())
+				logger.Info("Skipping fixing node group size for ZeroOrMaxNodeScaling node group", "nodeGroupId", nodeGroup.Id())
 				continue
 			}
 			delta := incorrectSize.CurrentSize - incorrectSize.ExpectedSize
 			if delta < 0 {
-				logger.V(0).Info("Decreasing size", "nodeGroupId", nodeGroup.Id(), "targetSize", incorrectSize.ExpectedSize, "size", incorrectSize.CurrentSize, "delta", delta)
+				logger.Info("Decreasing size", "nodeGroupId", nodeGroup.Id(), "targetSize", incorrectSize.ExpectedSize, "size", incorrectSize.CurrentSize, "delta", delta)
 				if err := nodeGroup.DecreaseTargetSize(ctx, delta); err != nil {
 					return fixed, fmt.Errorf("failed to decrease %s: %v", nodeGroup.Id(), err)
 				}
@@ -1169,7 +1169,7 @@ func (a *StaticAutoscaler) removeOldUnregisteredNodes(ctx context.Context, allUn
 	removedAny := false
 	for nodeGroupId, unregisteredNodesToDelete := range unregisteredNodesToRemove {
 		nodeGroup := nodeGroups[nodeGroupId]
-		logger.V(0).Info("Removing unregistered nodes for node group", "nodesCount", len(unregisteredNodesToDelete), "nodeGroupId", nodeGroupId)
+		logger.Info("Removing unregistered nodes for node group", "nodesCount", len(unregisteredNodesToDelete), "nodeGroupId", nodeGroupId)
 		if !a.ForceDeleteLongUnregisteredNodes {
 			size, err := nodeGroup.TargetSize(ctx)
 			if err != nil {
@@ -1251,7 +1251,7 @@ func (a *StaticAutoscaler) oldUnregisteredNodes(ctx context.Context, allUnregist
 		}
 
 		if unregisteredNode.UnregisteredSince.Add(maxNodeProvisionTime).Before(currentTime) {
-			logger.V(0).Info("Marking unregistered node for removal", "node", klog.KObj(unregisteredNode.Node))
+			logger.Info("Marking unregistered node for removal", "node", klog.KObj(unregisteredNode.Node))
 			nodesByNodeGroupId[nodeGroup.Id()] = append(nodesByNodeGroupId[nodeGroup.Id()], unregisteredNode)
 		}
 	}
@@ -1305,7 +1305,7 @@ func (a *StaticAutoscaler) deleteCreatedNodesWithErrors(ctx context.Context) {
 	}
 
 	if deletedAny {
-		logger.V(0).Info("Some nodes that failed to create were removed, recalculating cluster state.")
+		logger.Info("Some nodes that failed to create were removed, recalculating cluster state.")
 		a.clusterStateRegistry.Recalculate(ctx)
 	}
 }

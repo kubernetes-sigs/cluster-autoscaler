@@ -102,7 +102,7 @@ func (c *ReadyReplicasController) Update(buffer *v1beta1.CapacityBuffer, readyRe
 		case c.events <- event.TypedGenericEvent[reconcile.Request]{Object: reconcile.Request{NamespacedName: key}}:
 		default:
 			c.clearTarget(key, readyReplicas)
-			klog.Warningf("CapacityBuffer ReadyReplicas event channel is full, dropping status update for %s (will retry in next loop)", key)
+			klog.InfoS("CapacityBuffer ReadyReplicas event channel is full, dropping status update (will retry in next loop)", "buffer", klog.KObj(buffer))
 		}
 	}
 }

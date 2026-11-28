@@ -145,7 +145,7 @@ func (e *scaleUpExecutor) executeScaleUp(
 	atomic bool,
 ) errors.AutoscalerError {
 	logger := klog.FromContext(ctx)
-	logger.V(0).Info("Scale-up: setting group size", "nodeGroupId", info.Group.Id(), "size", info.NewSize)
+	logger.Info("Scale-up: setting group size", "nodeGroupId", info.Group.Id(), "size", info.NewSize)
 	e.autoscalingCtx.LogRecorder.Eventf(apiv1.EventTypeNormal, "ScaledUpGroup",
 		"Scale-up: setting group %s size to %d instead of %d (max: %d)", info.Group.Id(), info.NewSize, info.CurrentSize, info.MaxSize)
 	increase := info.NewSize - info.CurrentSize
